@@ -301,8 +301,17 @@ What the game does with `WeaponAttackMotionParam.startPlaySpeed` (+0x8) / `endPl
   request's +0x4/+0x8; slot 9 only reads). Taken literally, Attack_SwingSpeed would be 0 inside every
   150 window and the windup would never play, so either a third writer exists that the byte searches
   for stores to `+0x200` (movss/movups/mov forms) did not find -- code Arxan decrypts at runtime would
-  hide one -- or the factor is not what reaches the network. **UNREAD: needs a runtime read of
-  flags+0x200 during a swing.** `scripts/ds2-poise-need.py --play-speed game` takes it as 1.0.
+  hide one -- or the factor is not what reaches the network. `scripts/ds2-poise-need.py --play-speed
+  game` takes it as 1.0.
+- **Runtime, idle (read 2026-10-01, `scripts/frida/attack-speed-read.js`, read-only, no hooks):**
+  on a character just loaded from slot 2 that had not attacked, flags+0x200 = 1.0 (`0x3f800000`),
+  +0x1f8 = +0x1fc = 0.0, +0x195 = 0, `S+0xa0` = `S+0xa4` = 0, and `[0x1410ac698]` = 1.0. So +0x200
+  holds 1.0 before any attack request, written by something other than the two writers above.
+  The game's CPU was unchanged by the attach (103-104 ticks per 2 s before and after) and Frida's
+  timers fired (about 123 samples a second at the 8 ms interval).
+- **Not yet read: the value during a swing's 150 window.** Left-clicks posted to the game window
+  through `PostMessageW` did not start an attack while the window was not in the foreground, and
+  that character had Fists in all six weapon records, so the swing needs a person at the game.
 - **Turned into one Morpheme control parameter.** `ChrAttackMotionCtrl` binds its control parameters
   in `0x14035c770`; index 4 is `ControlParameters|Attack_SwingSpeed`. Every frame `0x14035d580` sets it
   from the action state `S = PlayerCtrl+0xc0`:
