@@ -310,3 +310,20 @@ Proven 2026-10-03: the user saw three tabs filling the bar ("looks good").
   the copy had been freed by the time of the restore (the check refused it), and New Game then
   adopted a fresh, unedited copy at another address: the bundle is cached across a reopen soon
   after, but not for the whole process. Which one frees it was not traced. [runtime]
+
+## 8. A "Rename Character" row
+
+Prototype `scripts/frida/rename-at-bonfire.js`; port in `ds2-change-appearance` as a second row
+(`[rename_character] enabled`).
+
+- **The opener.** `openNameWindow` (0x140198f70) is `openCharaMakerWindow` with one difference: it
+  stores `FeOperatorTestCharaMaking+0x28 = 1`, so the operator's update 0x1400e3060 pushes name entry
+  (0x1400e3620) instead of the full creator. It ignores its argument. The game calls it from one
+  talk-script case (0x1404631e7). Same operator, same bundle, so the heap patch at 0x1400e2fda
+  applies to it too. [static]
+- **The run.** From the bonfire row, opened on the same HUD-suspended-is-0 tick as the creator:
+  `row chosen`, `name entry opened`, `operator pushed name entry`, then
+  `name "" -> "1234567890 12345"` at `PlayerGameData+0x24` (GMI+0xa8 -> +0xc0), 16 units read. The
+  user: "I believe the rename worked". The field read `""` before the rename on a loaded save, so
+  the name shown in game may live elsewhere until name entry writes this one. [runtime]
+- **Not proven:** the new name surviving Save Game to File and a reload.

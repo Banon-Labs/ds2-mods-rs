@@ -407,6 +407,10 @@ CHANGE_APPEARANCE_SECTION = "change_appearance"
 KEY_CHANGE_APPEARANCE_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-change-appearance/src/lib.rs`.
 CHANGE_APPEARANCE_LOG_PREFIX = "ds2-change-appearance:"
+#: Mirrors `RENAME_SECTION` in the same loader module. ON by default here too (user 2026-10-03:
+#: "the same for adding a bonfire menu row, except for the rename character option");
+#: `--no-rename-character` writes false.
+RENAME_CHARACTER_SECTION = "rename_character"
 
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED`/`KEY_TEST_CAP` in `crates/ds2-loader/src/weapon_sync.rs`.
 #: OFF by default here, matching the DLL; `--weapon-sync` turns it on.
@@ -1752,6 +1756,7 @@ def config_text(
     estus_max: bool = True,
     estus_max_reload_test: bool = False,
     change_appearance: bool = True,
+    rename_character: bool = True,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     armor_sync: bool = False,
@@ -2351,6 +2356,11 @@ def config_text(
 # `{CHANGE_APPEARANCE_LOG_PREFIX}`.
 {KEY_CHANGE_APPEARANCE_ENABLED} = {str(change_appearance).lower()}
 
+[{RENAME_CHARACTER_SECTION}]
+# Read at startup only. Adds "Rename Character" below that row (or below Item box): the game's own
+# name entry. ON by default; `--no-rename-character` writes false. Same log prefix.
+{KEY_CHANGE_APPEARANCE_ENABLED} = {str(rename_character).lower()}
+
 [{WEAPON_SYNC_SECTION}]
 # `enabled` is startup-only. While another player is in the world, `ds2-weapon-sync` lowers every
 # weapon of ours above the highest weapon level any of them has equipped, and puts them back when
@@ -2607,6 +2617,7 @@ def write_config(
     estus_max: bool = True,
     estus_max_reload_test: bool = False,
     change_appearance: bool = True,
+    rename_character: bool = True,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     armor_sync: bool = False,
@@ -2660,6 +2671,7 @@ def write_config(
         estus_max=estus_max,
         estus_max_reload_test=estus_max_reload_test,
         change_appearance=change_appearance,
+        rename_character=rename_character,
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
         armor_sync=armor_sync,
@@ -3170,6 +3182,7 @@ def dry_run(
     estus_max: bool = True,
     estus_max_reload_test: bool = False,
     change_appearance: bool = True,
+    rename_character: bool = True,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     armor_sync: bool = False,
@@ -3267,6 +3280,7 @@ def dry_run(
             estus_max=estus_max,
             estus_max_reload_test=estus_max_reload_test,
             change_appearance=change_appearance,
+            rename_character=rename_character,
             weapon_sync=weapon_sync,
             weapon_sync_test_cap=weapon_sync_test_cap,
             armor_sync=armor_sync,
@@ -3334,6 +3348,7 @@ def dry_run(
                 estus_max=estus_max,
                 estus_max_reload_test=estus_max_reload_test,
                 change_appearance=change_appearance,
+                rename_character=rename_character,
                 weapon_sync=weapon_sync,
                 weapon_sync_test_cap=weapon_sync_test_cap,
                 armor_sync=armor_sync,
@@ -3902,6 +3917,7 @@ def launch(
     estus_max: bool = True,
     estus_max_reload_test: bool = False,
     change_appearance: bool = True,
+    rename_character: bool = True,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     armor_sync: bool = False,
@@ -3984,6 +4000,7 @@ def launch(
         estus_max=estus_max,
         estus_max_reload_test=estus_max_reload_test,
         change_appearance=change_appearance,
+        rename_character=rename_character,
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
         armor_sync=armor_sync,
@@ -6248,6 +6265,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-rename-character",
+        dest="rename_character",
+        action="store_false",
+        default=True,
+        help=(
+            "no 'Rename Character' row in the bonfire menu. By default it sits below Change "
+            "Appearance and opens the game's own name entry."
+        ),
+    )
+    parser.add_argument(
         "--estus-max-reload-test",
         dest="estus_max_reload_test",
         action="store_true",
@@ -6606,6 +6633,7 @@ def main() -> int:
             estus_max=args.estus_max,
             estus_max_reload_test=args.estus_max_reload_test,
             change_appearance=args.change_appearance,
+            rename_character=args.rename_character,
             weapon_sync=args.weapon_sync,
             weapon_sync_test_cap=args.weapon_sync_test_cap,
             armor_sync=args.armor_sync,
@@ -6659,6 +6687,7 @@ def main() -> int:
         estus_max=args.estus_max,
         estus_max_reload_test=args.estus_max_reload_test,
         change_appearance=args.change_appearance,
+        rename_character=args.rename_character,
         weapon_sync=args.weapon_sync,
         weapon_sync_test_cap=args.weapon_sync_test_cap,
         armor_sync=args.armor_sync,

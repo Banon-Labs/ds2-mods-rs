@@ -1062,24 +1062,26 @@ fn install_estus_max() {
     }
 }
 
-/// Add the bonfire menu's "Change Appearance" row, if `<Game>/ds2-mods.toml` asked.
+/// Add the bonfire menu's "Change Appearance" and "Rename Character" rows, if
+/// `<Game>/ds2-mods.toml` asked.
 ///
-/// Off unless `[change_appearance] enabled = true`. It hooks through the union and registers on
+/// Each is off unless its section says `enabled = true`. It hooks through the union and registers on
 /// `ds2-net-tick`, so install order among those does not matter.
 fn install_change_appearance() {
     let config = change_appearance::ChangeAppearanceConfig::load();
     log_line(format_args!("{}", config.describe()));
-    if !config.enabled {
+    let rows = config.rows();
+    if !rows.any() {
         return;
     }
     ds2_change_appearance::set_logger(log_line);
     // SAFETY: the patch site's bytes are re-read and nothing is written on a mismatch; every hook
     // target is recorded in `ds2-rva`. Called from the post-Arxan position, like every other
     // install here.
-    let outcome = unsafe { ds2_change_appearance::install() };
+    let outcome = unsafe { ds2_change_appearance::install(rows) };
     if !outcome.installed {
         log_line(format_args!(
-            "{} NOT INSTALLED -- no Change Appearance row this run",
+            "{} NOT INSTALLED -- no bonfire rows this run",
             ds2_change_appearance::LOG_PREFIX
         ));
     }

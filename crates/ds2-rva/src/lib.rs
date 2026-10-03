@@ -11423,3 +11423,22 @@ pub const FLO_ADOPT: u32 = 0x00b5_46a0;
 
 /// The size of `l09_01_chara_make.flo`, the creator's layout in `menu:/09.febnd.dcx`.
 pub const CHARA_MAKE_FLO_LEN: usize = 0x765a0;
+
+/// `void openNameWindow(ignored)`: [`OPEN_CHARA_MAKER_WINDOW`], but opening name entry.
+///
+/// The one difference is that it stores `FeOperatorTestCharaMaking+0x28 = 1`, and the operator's
+/// update 0x1400e3060 then pushes name entry (0x1400e3620, `FeGroupCreateNameEntry`) instead of the
+/// full creator.
+///
+/// The game calls it only from a talk-script case (0x1404631e7). Same operator, so same bundle:
+/// [`CHARA_MAKER_BUNDLE_HEAP_ARG`] applies to it too.
+pub const OPEN_NAME_WINDOW: u32 = 0x0019_8f70;
+
+/// `GameDataManager -> PlayerGameData`, reached from [`GAME_DATA_MANAGER_OFFSET`].
+pub const GAME_DATA_MANAGER_PLAYER_GAME_DATA_OFFSET: usize = 0xc0;
+
+/// `PlayerGameData`: the character's name, NUL-terminated UTF-16.
+///
+/// Name entry writes it. Measured 2026-10-03: read `""` before a rename on a loaded save and
+/// `1234567890 12345` (16 units read) after, so the field may only be filled by name entry itself.
+pub const PLAYER_GAME_DATA_NAME_OFFSET: usize = 0x24;
