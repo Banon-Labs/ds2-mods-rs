@@ -178,20 +178,26 @@ def scan_int(value: int) -> int:
     header = ebl.Bhd5(blob)
     needle = struct.pack("<i", value)
     found = 0
-    for a in (10, 20, 30, 40, 50, 99):
-        for b in range(60):
-            for c in range(4):
-                path = f"/ezstate/talk_m{a:02d}_{b:02d}_{c:02d}_00.esd"
-                entry = header.entries.get(ebl.path_hash(path))
-                if entry is None:
-                    continue
-                found += 1
-                size, offset, key, _bucket = entry
-                data = ebl.dcx_decompress(ebl.read_entry(bdt, size, offset, key, path, blob))
-                if needle in data:
-                    print(f"HIT {path}")
-    print(f"{found} talk scripts read")
+    for kind in ("talk", "event"):
+        for a in (10, 20, 30, 40, 50, 99):
+            for b in range(60):
+                for c in range(4):
+                    found += scan_one(ebl, header, bdt, blob, needle,
+                                      f"/ezstate/{kind}_m{a:02d}_{b:02d}_{c:02d}_00.esd")
+    print(f"{found} talk/event scripts read")
     return 0
+
+
+def scan_one(ebl, header, bdt, blob: bytes, needle: bytes, path: str) -> int:
+    """1 if `path` exists in the archive (printing it when it contains `needle`), else 0."""
+    entry = header.entries.get(ebl.path_hash(path))
+    if entry is None:
+        return 0
+    size, offset, key, _bucket = entry
+    data = ebl.dcx_decompress(ebl.read_entry(bdt, size, offset, key, path, blob))
+    if needle in data:
+        print(f"HIT {path}")
+    return 1
 
 
 def main() -> int:
