@@ -327,3 +327,43 @@ Prototype `scripts/frida/rename-at-bonfire.js`; port in `ds2-change-appearance` 
   user: "I believe the rename worked". The field read `""` before the rename on a loaded save, so
   the name shown in game may live elsewhere until name entry writes this one. [runtime]
 - **Not proven:** the new name surviving Save Game to File and a reload.
+
+## 9. A "Reallocate Stats" row
+
+Prototype `scripts/frida/reallocate-at-bonfire.js`; port in `ds2-change-appearance` as a third row
+(`[reallocate_stats] enabled`). It does what choosing "Reallocate points" from the Things Betwixt
+firekeepers does once flag `102181` is set.
+
+- **Who offers it.** Only NpcEventParam row `70500000` sets the Reallocate entry (byte 0 bit `0x02`,
+  entry type 2), and only `talk_m10_02_00_00.esd` (Things Betwixt) uses that row. Its menu appears
+  when `f6(102181)` holds (group `2147483626` state 1); the Emerald Herald's level-up in
+  `talk_m10_04_00_00.esd` (group `2147483533` state 7) is the only script that sets the flag. Read
+  with `scripts/ds2-ebl.py` (which now decrypts the AES-ranged talk scripts) and
+  `scripts/ds2-esd.py`. [static]
+- **What choosing it does** (group `2147483619`): a yes/no naming the Soul Vessel (message 1200);
+  on yes, `f131401(50960000, 1, 1, 0)` -- the vessel count -- sends a player without one to message
+  1206; otherwise `c1_130455(0, 220, 0)`. That command's handler (0x14046332e) fills the talk window
+  data (0x14019b750) and calls `openAttributeMenu` (0x1401992c0) with mode 0, which pushes menu
+  0x1a: `FeGroupTestBonfireLevelUp` with the Soul Vessel as its cost. [static]
+- **The screen enforces the rest.** Its own confirm asks "Reallocation with these attributes
+  consumes %s. Okay?", and its commit (0x1400ca0ac) removes one vessel. It does not check that one
+  is held. Its stat floor is the class's `PlayerStatusParam` base, and its plan validator
+  (0x1401fbd70) wants a positive levels-bought field, so a character at its class base, or below it,
+  cannot confirm. [static, runtime]
+- **The run.** A Deprived with every stat at 1 (soul level 1, class 10) opened the screen at 6
+  everywhere and could not confirm: below its class base. A level-13 character: `screen 0x1a built`,
+  `commit spends a Soul Vessel`, vessels 99 -> 98, level unchanged. The user: "the rallocation works
+  when I have one level beyond base". [runtime]
+- **The port** opens only for a character with every stat at or above its class base, at least one
+  level above it, and a Soul Vessel (`may_reallocate`), and logs why not otherwise.
+- **Greyed out otherwise.** A command dialog row has two bytes, both 1 at construction
+  (`FexCommandSelectDialog::Command`, 0x14002a8e0): `+0xa0`, written by 0x14002c680, hides the row
+  when 0 (measured: the row vanished); `+0xa1`, written by 0x14002baf0, makes it unselectable when
+  0, but the bonfire dialog draws it unchanged -- its only reader (0x14001d405) picks animation
+  state 0x7a over 0x70, which this art does not show. The colour comes from `FeColorSetParam`:
+  0x140041410(node, set) hands the row's four values to the node's vtable +0x100. Set 1 is
+  `255 255 255 255`, set 2 `128 128 128 255`. The label's node is the one 0x1400299c0 (proxy, text)
+  resolves (`*proxy`, then its vtable slot 0) when it sets our label pointer; an `FeComponentObject`.
+  Set 2 on it: "It is greyed out" (user). [runtime] Not used: the styled add 0x14002b3e0, whose
+  (frame, field) pair drives the label's style child 0x5f5c5ad -- frames 0x98 and 0x99 looked the
+  same as 0x67, and after five opens with them the frontend faulted at DarkSoulsII.exe+0xb67075.

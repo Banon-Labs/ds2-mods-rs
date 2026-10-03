@@ -552,6 +552,7 @@ dependencies = [
 name = "ds2-change-appearance"
 version = "0.1.0"
 dependencies = [
+ "ds2-build-import-core",
  "ds2-game-base",
  "ds2-hook",
  "ds2-net-tick",

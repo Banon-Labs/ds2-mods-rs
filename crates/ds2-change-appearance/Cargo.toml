@@ -10,6 +10,8 @@ repository.workspace = true
 # the machine the code is written on. Only the hooks, the patch and the tick need Windows.
 [dependencies]
 ds2-rva.workspace = true
+# The classes' base stats, for whether a character has a level to reallocate.
+ds2-build-import-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true
