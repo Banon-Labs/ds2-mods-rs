@@ -11399,3 +11399,27 @@ pub const VISIBLE_EQUIP_RECORD_LEN: usize = 0x14;
 
 /// `void(character)`: rebuild the character from its visible equipment.
 pub const CHR_REFRESH_VISIBLE_EQUIP: u32 = 0x0037_f9d0;
+
+/// `FeGroupCharaMakingTop`'s tab list builder, vtable `0x1410bb138` +0x148:
+/// `out*(this, DLVector<FexTextTabSpec>* out)`.
+///
+/// Appends four `FexTextTabSpec`s in order -- Class & gift, Body, Face, Advanced settings -- each
+/// with [`FE_TAB_SPEC_APPEND`]. Called every frame the creator is up. The first spec names layout
+/// elements `0x5f5c1c0` (the tab) and `0x5f5c420` (its label).
+pub const CHARA_MAKER_TOP_TABS_BUILD: u32 = 0x000e_b270;
+
+/// `void(DLVector<FexTextTabSpec>* list, const FexTextTabSpec* spec)`: copy one 0x90-byte spec
+/// onto the end of a tab list.
+///
+/// Not appending is clean: the builder drops its own reference to the spec's functor after every
+/// call (0x1400eb436), so a spec that was never copied is simply freed.
+pub const FE_TAB_SPEC_APPEND: u32 = 0x000d_2a40;
+
+/// `bool(FeLayoutHolder* holder, u8* bytes, i32 len)`: adopt a `.flo` copy, relocated in place.
+///
+/// Called from the bind 0x140b00d20 once per process for a given bundle: the bundle stays cached,
+/// and later opens build from the same copy without binding again.
+pub const FLO_ADOPT: u32 = 0x00b5_46a0;
+
+/// The size of `l09_01_chara_make.flo`, the creator's layout in `menu:/09.febnd.dcx`.
+pub const CHARA_MAKE_FLO_LEN: usize = 0x765a0;

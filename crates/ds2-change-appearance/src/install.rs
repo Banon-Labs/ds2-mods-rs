@@ -1,4 +1,4 @@
-//! The five detours, the one-instruction patch and the tick.
+//! The nine detours, the one-instruction patch and the tick.
 //!
 //! Every detour goes through the hook union, so a second feature on the same function chains
 //! rather than replacing ours. The union's dispatcher adds a frame, which is why the row is found
@@ -11,6 +11,7 @@ use ds2_game_base::mem::{game_module_base, read_bytes, safe_read_u8, safe_read_u
 use ds2_hook::{UnionFn, patch_3byte_stub, register_union_hook};
 use ds2_rva::{APPEARANCE_BLOCK_LEN, VISIBLE_EQUIP_RECORD_LEN, VISIBLE_EQUIP_SLOTS};
 
+use crate::tabs::{Layout, layout_of, writes};
 use crate::{LOG_PREFIX, REPORT_AFTER_TICKS, ROW_LABEL_UTF16, open_now, records_differing};
 
 /// A log sink, installed by the loader. Stored as a `usize` because a `fn` pointer is not an
@@ -69,6 +70,20 @@ static ORIG_ENTER: AtomicUsize = AtomicUsize::new(0);
 static ORIG_FACE_COMMIT: AtomicUsize = AtomicUsize::new(0);
 static ORIG_CLASS_GIFT: AtomicUsize = AtomicUsize::new(0);
 static ORIG_SET_FACE: AtomicUsize = AtomicUsize::new(0);
+static ORIG_TOP_TABS: AtomicUsize = AtomicUsize::new(0);
+static ORIG_TAB_APPEND: AtomicUsize = AtomicUsize::new(0);
+static ORIG_FLO_ADOPT: AtomicUsize = AtomicUsize::new(0);
+
+/// The creator's tab bar is ours: from the open until the report, which is after the creator has
+/// closed. Longer than [`ARMED`], which the commit clears while the creator is still drawn.
+static TABS_HIDDEN: AtomicBool = AtomicBool::new(false);
+/// The creator's tab list builder is on the stack with [`TABS_HIDDEN`] set.
+static IN_TOP_TABS: AtomicBool = AtomicBool::new(false);
+/// This build already left out its first spec.
+static CLASS_TAB_SKIPPED: AtomicBool = AtomicBool::new(false);
+static TABS_SAID: AtomicBool = AtomicBool::new(false);
+/// The creator's parsed layout, from its adopt. The bundle stays cached, so this is set once.
+static LAYOUT: AtomicUsize = AtomicUsize::new(0);
 
 /// The row's job creator: a `DLReferenceCountObject` the menu holds by pointer. Its vtable is the
 /// game's own first two slots and [`invoke`]; the reference count is set far from zero so neither
@@ -250,6 +265,15 @@ fn tick(_session: usize) {
 }
 
 fn open() {
+    // Reopened before the last change was reported: report it now, against its own snapshot.
+    if REPORT_IN.swap(0, Ordering::AcqRel) > 0 {
+        report();
+    }
+    TABS_HIDDEN.store(true, Ordering::Release);
+    TABS_SAID.store(false, Ordering::Release);
+    if LAYOUT.load(Ordering::Acquire) != 0 {
+        set_layout(Layout::Thirds);
+    }
     *lock(&SNAPSHOT) = None;
     *lock(&COMMITTED) = None;
     WAREHOUSE.store(0, Ordering::Release);
@@ -264,6 +288,9 @@ fn open() {
 }
 
 fn report() {
+    // The creator is gone by now: give the next one, which may be New Game's, its four tabs back.
+    TABS_HIDDEN.store(false, Ordering::Release);
+    set_layout(Layout::Original);
     let Some((model, equip)) = player().and_then(chr_parts) else {
         log(format_args!("{LOG_PREFIX} done (no player to read back)"));
         return;
@@ -417,6 +444,89 @@ unsafe extern "system" fn class_gift_handler(this: usize, b: usize, c: usize, d:
     unsafe { call_orig(&ORIG_CLASS_GIFT, this, b, c, d) }
 }
 
+// --- the tab bar -----------------------------------------------------------------------------
+
+unsafe extern "system" fn top_tabs_handler(this: usize, out: usize, c: usize, d: usize) -> usize {
+    let hide = TABS_HIDDEN.load(Ordering::Acquire);
+    IN_TOP_TABS.store(hide, Ordering::Release);
+    CLASS_TAB_SKIPPED.store(false, Ordering::Release);
+    // SAFETY: the game's own arguments.
+    let result = unsafe { call_orig(&ORIG_TOP_TABS, this, out, c, d) };
+    IN_TOP_TABS.store(false, Ordering::Release);
+    if hide && !TABS_SAID.swap(true, Ordering::AcqRel) {
+        log(format_args!(
+            "{LOG_PREFIX} tab bar built without Class & gift (skipped={})",
+            CLASS_TAB_SKIPPED.load(Ordering::Acquire)
+        ));
+    }
+    result
+}
+
+unsafe extern "system" fn tab_append_handler(
+    list: usize,
+    spec: usize,
+    c: usize,
+    d: usize,
+) -> usize {
+    // The builder's first append is Class & gift. Not copying it is clean: the builder releases
+    // its own spec after every append either way.
+    if IN_TOP_TABS.load(Ordering::Acquire) && !CLASS_TAB_SKIPPED.swap(true, Ordering::AcqRel) {
+        return 0;
+    }
+    // SAFETY: the game's own arguments.
+    unsafe { call_orig(&ORIG_TAB_APPEND, list, spec, c, d) }
+}
+
+unsafe extern "system" fn flo_adopt_handler(
+    holder: usize,
+    bytes: usize,
+    len: usize,
+    d: usize,
+) -> usize {
+    // SAFETY: the game's own arguments.
+    let result = unsafe { call_orig(&ORIG_FLO_ADOPT, holder, bytes, len, d) };
+    if result & 0xff != 0 && len as u32 as usize == ds2_rva::CHARA_MAKE_FLO_LEN && bytes != 0 {
+        LAYOUT.store(bytes, Ordering::Release);
+        log(format_args!(
+            "{LOG_PREFIX} creator layout adopted at 0x{bytes:x}"
+        ));
+        if TABS_HIDDEN.load(Ordering::Acquire) {
+            set_layout(Layout::Thirds);
+        }
+    }
+    result
+}
+
+/// Put the creator's cached layout in `to`, if it is the layout [`tabs`] knows in either state.
+fn set_layout(to: Layout) {
+    let base = LAYOUT.load(Ordering::Acquire);
+    if base == 0 {
+        return;
+    }
+    // SAFETY: fault-tolerant reads; a freed block reads as something that is not the layout.
+    let now = layout_of(|at, out| unsafe { read_bytes(base + at, out) });
+    match now {
+        Some(now) if now == to => {}
+        Some(_) => {
+            for (at, bytes) in writes(to) {
+                // SAFETY: `layout_of` just found all eight records and their transforms at these
+                // offsets, inside the heap copy the game parsed in place and builds from.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        bytes.as_ptr(),
+                        (base + at) as *mut u8,
+                        bytes.len(),
+                    );
+                }
+            }
+            log(format_args!("{LOG_PREFIX} creator layout set to {to:?}"));
+        }
+        None => log(format_args!(
+            "{LOG_PREFIX} creator layout at 0x{base:x} not recognised; left alone"
+        )),
+    }
+}
+
 // --- install ---------------------------------------------------------------------------------
 
 /// What [`install`] managed to do.
@@ -492,7 +602,25 @@ pub unsafe fn install() -> Outcome {
     }
 
     // The row goes last, so a failure before it leaves a game where nothing of ours can arm.
-    let hooks: [(&str, u32, UnionFn, &'static AtomicUsize); 6] = [
+    let hooks: [(&str, u32, UnionFn, &'static AtomicUsize); 9] = [
+        (
+            "flo-adopt",
+            ds2_rva::FLO_ADOPT,
+            flo_adopt_handler,
+            &ORIG_FLO_ADOPT,
+        ),
+        (
+            "tab-append",
+            ds2_rva::FE_TAB_SPEC_APPEND,
+            tab_append_handler,
+            &ORIG_TAB_APPEND,
+        ),
+        (
+            "top-tabs",
+            ds2_rva::CHARA_MAKER_TOP_TABS_BUILD,
+            top_tabs_handler,
+            &ORIG_TOP_TABS,
+        ),
         (
             "class-gift-commit",
             ds2_rva::CHARA_MAKER_CLASS_GIFT_COMMIT,
@@ -542,7 +670,7 @@ pub unsafe fn install() -> Outcome {
     }
 
     log(format_args!(
-        "{LOG_PREFIX} installed: bundle heap patch, tick, creator hooks, row"
+        "{LOG_PREFIX} installed: bundle heap patch, tick, creator hooks, tab bar, row"
     ));
     Outcome { installed: true }
 }

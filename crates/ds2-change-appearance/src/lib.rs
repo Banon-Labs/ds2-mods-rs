@@ -22,6 +22,10 @@
 //!    commit, which is skipped. After the face commit the block is imported into the player's face
 //!    part, which also writes sex, and the equipment is put back.
 //!
+//! 6. **The tab bar** while ours is up has no Class & gift, and Body, Face and Advanced settings
+//!    each take a third of it ([`tabs`]). The first tab spec is not appended, and the creator's
+//!    cached layout is rewritten for the open and put back after.
+//!
 //! The creator's menu bundle is created on the resource manager's default heap
 //! ([`ds2_rva::CHARA_MAKER_BUNDLE_HEAP_ARG`]): after a bonfire the frontend heap could not take its
 //! layout, and the creator stayed blank for the rest of the process.
@@ -64,6 +68,8 @@ pub const fn open_now(requested: bool, suspended: Option<u8>) -> bool {
 pub fn records_differing<R: PartialEq>(before: &[R], after: &[R]) -> usize {
     before.iter().zip(after).filter(|(b, a)| b != a).count() + before.len().abs_diff(after.len())
 }
+
+pub mod tabs;
 
 #[cfg(windows)]
 mod install;

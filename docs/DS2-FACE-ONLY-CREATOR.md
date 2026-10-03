@@ -281,3 +281,32 @@ end.
 - **Frida.** A hooked function called from inside one of the agent's own listeners on the same
   thread is not reported. That is why hooks on 0x1400e2f00 and 0x1400264d0 stayed silent: the agent
   calls the open from its nav-update listener. Patch an instruction instead. [runtime]
+
+## 7. The tab bar without Class & gift, in thirds
+
+Prototype `scripts/frida/chara-tabs-thirds.js`; port in `crates/ds2-change-appearance/src/tabs.rs`.
+Proven 2026-10-03: the user saw three tabs filling the bar ("looks good").
+
+- **The specs.** `FeGroupCharaMakingTop` vtable +0x148 (0x1400eb270) builds the tab list **every
+  frame** (1683 calls in one session). It appends four `FexTextTabSpec`s (0x90 bytes, built by
+  0x140018ad0) through 0x1400d2a40, in order Class & gift (text 10010100), Body, Face, Advanced
+  settings. Each spec names a tab element path `[0x5f5c3e0, 0x5f5c1c0+k]` and a label path ending
+  `0x5f5c420+k, 0x5f5b9f2`. Not appending the first spec is clean: the builder unrefs its own copy
+  of the spec's functor after each append. With three specs the remaining tabs keep their own ids,
+  so Body is still `0x5f5c1c1`. [static, runtime]
+- **The layout.** `l09_01_chara_make.flo` (0x765a0 bytes, from `/menu/09.febnd.dcx` via
+  `scripts/ds2-ebl.py extract`). Tabs are `def 0x00b8` children `0x5f5c1c0..1c3` at x 86.4, 357.4,
+  628.4, 899.6; labels are `def 0x00ae` children `0x5f5c420..423`, 37.75 right of their tab. A tab's
+  art is shape `0x00b5`, 287.2 wide, drawn 4.65 right of the tab; on the 271 pitch neighbours
+  overlap by 16.2, and the overlap is the divider line. Thirds keep the span and overlap: scale_x
+  1.3148, tabs at 84.94 / 446.34 / 807.74, labels at 169.35 / 530.75 / 892.15. Class & gift's tab
+  and label go to x -4000. [static, runtime]
+- **The cache.** The bind 0x140b00d20 copies the bytes and 0x140b546a0(holder, copy, len) adopts the
+  copy and relocates it in place; that copy is what every later build reads. A second open in the
+  same process did **not** bind again. So the edit cannot be made once at bind time without
+  reaching New Game's creator too: the DLL captures the copy at adopt, writes the eight transforms
+  on open, and writes the originals back when the change is reported (120 ticks after the commit).
+  Each write first checks all eight record ids and their current floats. In the DLL's first run
+  the copy had been freed by the time of the restore (the check refused it), and New Game then
+  adopted a fresh, unedited copy at another address: the bundle is cached across a reopen soon
+  after, but not for the whole process. Which one frees it was not traced. [runtime]
