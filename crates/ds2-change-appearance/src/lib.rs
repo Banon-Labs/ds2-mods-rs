@@ -1,5 +1,7 @@
 //! A "Change Appearance" row in the bonfire menu, below Item box, that opens the game's own
-//! character creator and commits only the appearance: face, sex and body.
+//! character creator and commits only the appearance: face, sex and body. And a "Rename Character"
+//! row below it that opens the game's own name entry ([`ds2_rva::OPEN_NAME_WINDOW`]); either row
+//! can be left out ([`Rows`]).
 //!
 //! Class, stats, souls, level, gift and inventory stay as they are. The prototype this ports,
 //! `scripts/frida/appearance-only-creator.js`, was proven end to end in game on 2026-10-03; the
@@ -52,6 +54,29 @@ const fn utf16_nul<const N: usize>(text: &str) -> [u16; N] {
     out
 }
 
+/// The second row's text: opens the game's own name entry ([`ds2_rva::OPEN_NAME_WINDOW`]).
+pub const RENAME_ROW_LABEL: &str = "Rename Character";
+
+/// [`RENAME_ROW_LABEL`] as NUL-terminated UTF-16, in a `static` for the same reason as
+/// [`ROW_LABEL_UTF16`].
+pub static RENAME_ROW_LABEL_UTF16: [u16; RENAME_ROW_LABEL.len() + 1] = utf16_nul(RENAME_ROW_LABEL);
+
+/// Which rows to add below Item box, in this order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rows {
+    /// "Change Appearance": the creator, committing only face, sex and body.
+    pub change_appearance: bool,
+    /// "Rename Character": name entry.
+    pub rename: bool,
+}
+
+impl Rows {
+    /// Whether any row is wanted, i.e. whether to install at all.
+    pub const fn any(self) -> bool {
+        self.change_appearance || self.rename
+    }
+}
+
 /// How many game ticks after the class/gift commit was skipped the result is logged, so the face
 /// rebuild and the equipment refresh have landed. The tick is 60 a second.
 pub const REPORT_AFTER_TICKS: u32 = 120;
@@ -83,10 +108,15 @@ mod tests {
 
     #[test]
     fn utf16_nul_is_the_label() {
-        let decoded = String::from_utf16(&ROW_LABEL_UTF16[..ROW_LABEL.len()]).unwrap();
-        assert_eq!(decoded, ROW_LABEL);
-        assert_eq!(ROW_LABEL_UTF16[ROW_LABEL.len()], 0);
-        assert!(ROW_LABEL.is_ascii());
+        for (text, wide) in [
+            (ROW_LABEL, &ROW_LABEL_UTF16[..]),
+            (RENAME_ROW_LABEL, &RENAME_ROW_LABEL_UTF16[..]),
+        ] {
+            let decoded = String::from_utf16(&wide[..text.len()]).unwrap();
+            assert_eq!(decoded, text);
+            assert_eq!(wide[text.len()], 0);
+            assert!(text.is_ascii());
+        }
     }
 
     #[test]

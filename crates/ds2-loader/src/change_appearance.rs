@@ -1,11 +1,14 @@
-//! Reading `[change_appearance]` out of `<Game>/ds2-mods.toml`: whether to add the bonfire menu's
-//! "Change Appearance" row.
+//! Reading `[change_appearance]` and `[rename_character]` out of `<Game>/ds2-mods.toml`: whether to
+//! add the bonfire menu's "Change Appearance" and "Rename Character" rows.
 //!
 //! The feature lives in `ds2-change-appearance`; this is only the switch, kept here for the same
 //! reason every other feature's is -- the config file belongs to the loader.
 //!
 //! ```toml
 //! [change_appearance]
+//! enabled = true
+//!
+//! [rename_character]
 //! enabled = true
 //! ```
 
@@ -16,7 +19,10 @@ use crate::crash_logging::config_file_path;
 /// The section this module reads. Mirrored in `scripts/ds2-run.py`.
 pub const CONFIG_SECTION: &str = "change_appearance";
 
-/// Whether to install the row at all.
+/// The rename row's section. Mirrored in `scripts/ds2-run.py`.
+pub const RENAME_SECTION: &str = "rename_character";
+
+/// Whether to add the section's row. The same key in both sections.
 pub const KEY_ENABLED: &str = "enabled";
 
 /// `[change_appearance]`, resolved.
@@ -26,6 +32,8 @@ pub struct ChangeAppearanceConfig {
     ///
     /// Off by default, like every feature here: a config that says nothing is the game as shipped.
     pub enabled: bool,
+    /// `[rename_character] enabled`: add the "Rename Character" row. Off by default as well.
+    pub rename: bool,
 }
 
 impl ChangeAppearanceConfig {
@@ -43,19 +51,32 @@ impl ChangeAppearanceConfig {
     /// The same decision against a config file's text, so it can be tested without one on disk.
     pub fn from_text(text: &str) -> Self {
         let values = KeyValues::parse(text);
+        let on = |section| {
+            values
+                .get(section, KEY_ENABLED)
+                .is_some_and(|raw| raw.trim().trim_matches('"') == "true")
+        };
         Self {
-            enabled: values
-                .get(CONFIG_SECTION, KEY_ENABLED)
-                .is_some_and(|raw| raw.trim().trim_matches('"') == "true"),
+            enabled: on(CONFIG_SECTION),
+            rename: on(RENAME_SECTION),
+        }
+    }
+
+    /// The rows to ask `ds2-change-appearance` for.
+    pub const fn rows(&self) -> ds2_change_appearance::Rows {
+        ds2_change_appearance::Rows {
+            change_appearance: self.enabled,
+            rename: self.rename,
         }
     }
 
     /// One line for the attach log, written before anything acts on it.
     pub fn describe(&self) -> String {
         format!(
-            "{} config [{CONFIG_SECTION}] {KEY_ENABLED}={}",
+            "{} config [{CONFIG_SECTION}] {KEY_ENABLED}={} [{RENAME_SECTION}] {KEY_ENABLED}={}",
             ds2_change_appearance::LOG_PREFIX,
-            self.enabled
+            self.enabled,
+            self.rename
         )
     }
 }
@@ -74,7 +95,23 @@ mod tests {
     #[test]
     fn a_release_leaves_it_off() {
         let shipped = include_str!("../../../.github/dist-ds2-mods.toml");
-        assert!(!ChangeAppearanceConfig::from_text(shipped).enabled);
+        assert!(!ChangeAppearanceConfig::from_text(shipped).rows().any());
+    }
+
+    #[test]
+    fn each_section_switches_its_own_row() {
+        let rename_only = ChangeAppearanceConfig::from_text("[rename_character]\nenabled = true\n");
+        assert_eq!(
+            rename_only.rows(),
+            ds2_change_appearance::Rows {
+                change_appearance: false,
+                rename: true
+            }
+        );
+        let both = ChangeAppearanceConfig::from_text(
+            "[change_appearance]\nenabled = true\n[rename_character]\nenabled = true\n",
+        );
+        assert!(both.enabled && both.rename);
     }
 
     #[test]

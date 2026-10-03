@@ -5,14 +5,17 @@
 //! by its label and an enclosing flag rather than by a return address.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use ds2_game_base::mem::{game_module_base, read_bytes, safe_read_u8, safe_read_usize};
 use ds2_hook::{UnionFn, patch_3byte_stub, register_union_hook};
 use ds2_rva::{APPEARANCE_BLOCK_LEN, VISIBLE_EQUIP_RECORD_LEN, VISIBLE_EQUIP_SLOTS};
 
 use crate::tabs::{Layout, layout_of, writes};
-use crate::{LOG_PREFIX, REPORT_AFTER_TICKS, ROW_LABEL_UTF16, open_now, records_differing};
+use crate::{
+    LOG_PREFIX, RENAME_ROW_LABEL_UTF16, REPORT_AFTER_TICKS, ROW_LABEL_UTF16, Rows, open_now,
+    records_differing,
+};
 
 /// A log sink, installed by the loader. Stored as a `usize` because a `fn` pointer is not an
 /// `Atomic` type.
@@ -47,8 +50,16 @@ static BASE: AtomicUsize = AtomicUsize::new(0);
 
 /// A change is in progress: from the open until the class/gift commit is skipped.
 static ARMED: AtomicBool = AtomicBool::new(false);
-/// The row was chosen and the creator has not been opened yet.
-static OPEN_REQUESTED: AtomicBool = AtomicBool::new(false);
+/// Which row was chosen and is waiting for the bonfire menu to let go: [`NOTHING`], [`APPEARANCE`]
+/// or [`RENAME`].
+static OPEN_REQUESTED: AtomicU8 = AtomicU8::new(NOTHING);
+const NOTHING: u8 = 0;
+const APPEARANCE: u8 = 1;
+const RENAME: u8 = 2;
+/// The rows [`install`] was asked for: bit 0 Change Appearance, bit 1 Rename Character.
+static ROWS: AtomicU8 = AtomicU8::new(0);
+/// The name before the last rename's open, while a change is still being watched for.
+static NAME_BEFORE: Mutex<Option<String>> = Mutex::new(None);
 /// The bonfire menu builder is on the stack.
 static IN_BONFIRE_BUILD: AtomicBool = AtomicBool::new(false);
 /// The label pointer of the Item box row, looked up when the builder starts.
@@ -90,6 +101,9 @@ static LAYOUT: AtomicUsize = AtomicUsize::new(0);
 /// destructor is ever reached. Both live in `static`s because the game keeps raw pointers to them.
 static VTABLE: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
 static CREATOR: [AtomicUsize; 5] = [const { AtomicUsize::new(0) }; 5];
+/// The rename row's job creator, the same shape with [`invoke_rename`] in slot 2.
+static RENAME_VTABLE: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
+static RENAME_CREATOR: [AtomicUsize; 5] = [const { AtomicUsize::new(0) }; 5];
 const CREATOR_REFCOUNT: usize = 0x4000_0000;
 
 fn rva(rva: u32) -> usize {
@@ -217,20 +231,31 @@ unsafe extern "system" fn add_row_handler(
     {
         return result;
     }
-    // The add consumes a reference from `*slot` and zeroes it, so it gets a slot of its own.
-    let mut ours = CREATOR.as_ptr() as usize;
-    // SAFETY: the builder the game just returned, our static label and creator, and a live slot.
-    let result = unsafe {
-        call_orig(
-            &ORIG_ADD_ROW,
-            result,
+    let rows = ROWS.load(Ordering::Acquire);
+    let ours: [(u8, usize, usize); 2] = [
+        (
+            APPEARANCE,
             ROW_LABEL_UTF16.as_ptr() as usize,
-            &raw mut ours as usize,
-            0,
-        )
-    };
+            CREATOR.as_ptr() as usize,
+        ),
+        (
+            RENAME,
+            RENAME_ROW_LABEL_UTF16.as_ptr() as usize,
+            RENAME_CREATOR.as_ptr() as usize,
+        ),
+    ];
+    let mut result = result;
+    for (bit, label, creator) in ours {
+        if rows & bit == 0 {
+            continue;
+        }
+        // The add consumes a reference from `*slot` and zeroes it, so each row gets its own slot.
+        let mut slot = creator;
+        // SAFETY: the builder the game just returned, our static label and creator, a live slot.
+        result = unsafe { call_orig(&ORIG_ADD_ROW, result, label, &raw mut slot as usize, 0) };
+    }
     if !ROW_ADDED_SAID.swap(true, Ordering::AcqRel) {
-        log(format_args!("{LOG_PREFIX} row added below Item box"));
+        log(format_args!("{LOG_PREFIX} rows added below Item box"));
     }
     result
 }
@@ -239,22 +264,36 @@ unsafe extern "system" fn add_row_handler(
 ///
 /// No job closes the bonfire menu; the creator is opened from the tick once the menu has let go.
 extern "system" fn invoke(_this: usize, out: *mut usize) -> *mut usize {
+    request(out, APPEARANCE, "Change Appearance")
+}
+
+/// [`invoke`] for the rename row.
+extern "system" fn invoke_rename(_this: usize, out: *mut usize) -> *mut usize {
+    request(out, RENAME, "Rename Character")
+}
+
+fn request(out: *mut usize, what: u8, name: &str) -> *mut usize {
     if !out.is_null() {
         // SAFETY: the dialog passes a live out-slot (`0x14001c2b3`) and assigns from it after.
         unsafe { out.write(0) };
     }
-    OPEN_REQUESTED.store(true, Ordering::Release);
-    log(format_args!("{LOG_PREFIX} row chosen"));
+    OPEN_REQUESTED.store(what, Ordering::Release);
+    log(format_args!("{LOG_PREFIX} {name} row chosen"));
     out
 }
 
 // --- the open and the report -----------------------------------------------------------------
 
 fn tick(_session: usize) {
-    if open_now(OPEN_REQUESTED.load(Ordering::Acquire), hud_suspended()) {
-        OPEN_REQUESTED.store(false, Ordering::Release);
-        open();
+    let requested = OPEN_REQUESTED.load(Ordering::Acquire);
+    if open_now(requested != NOTHING, hud_suspended()) {
+        OPEN_REQUESTED.store(NOTHING, Ordering::Release);
+        match requested {
+            RENAME => open_rename(),
+            _ => open(),
+        }
     }
+    watch_name();
     let left = REPORT_IN.load(Ordering::Acquire);
     if left > 0 {
         REPORT_IN.store(left - 1, Ordering::Release);
@@ -285,6 +324,59 @@ fn open() {
         unsafe { std::mem::transmute::<usize, OpenFn>(rva(ds2_rva::OPEN_CHARA_MAKER_WINDOW)) };
     open(0);
     log(format_args!("{LOG_PREFIX} creator opened"));
+}
+
+/// Open name entry. Nothing of the appearance path is armed: it writes only the name.
+fn open_rename() {
+    if REPORT_IN.swap(0, Ordering::AcqRel) > 0 {
+        report();
+    }
+    *lock(&NAME_BEFORE) = Some(player_name().unwrap_or_default());
+    type OpenFn = extern "system" fn(usize);
+    // SAFETY: the RVA's signature is recorded in `ds2-rva`; it ignores its argument. Called on the
+    // game thread, outside any menu handler, as `open` is.
+    let open: OpenFn =
+        unsafe { std::mem::transmute::<usize, OpenFn>(rva(ds2_rva::OPEN_NAME_WINDOW)) };
+    open(0);
+    log(format_args!("{LOG_PREFIX} name entry opened"));
+}
+
+/// The player's name, at most the field's 16 units, or `None` with no player.
+fn player_name() -> Option<String> {
+    // SAFETY: fault-tolerant reads down the recorded chain.
+    let data = unsafe {
+        let gdm = safe_read_usize(game_manager()? + ds2_rva::GAME_DATA_MANAGER_OFFSET)?;
+        safe_read_usize(gdm + ds2_rva::GAME_DATA_MANAGER_PLAYER_GAME_DATA_OFFSET)?
+    };
+    if data == 0 {
+        return None;
+    }
+    let mut raw = [0u8; 32];
+    // SAFETY: fault-tolerant copy.
+    if !unsafe { read_bytes(data + ds2_rva::PLAYER_GAME_DATA_NAME_OFFSET, &mut raw) } {
+        return None;
+    }
+    let units: Vec<u16> = raw
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| u16::from_le_bytes(*b))
+        .take_while(|&u| u != 0)
+        .collect();
+    Some(String::from_utf16_lossy(&units))
+}
+
+/// After a rename's open, log the name once it changes.
+fn watch_name() {
+    let mut before = lock(&NAME_BEFORE);
+    let Some(old) = before.as_ref() else { return };
+    let Some(now) = player_name() else { return };
+    if &now != old {
+        log(format_args!(
+            "{LOG_PREFIX} name changed: {old:?} -> {now:?}"
+        ));
+        *before = None;
+    }
 }
 
 fn report() {
@@ -545,7 +637,7 @@ pub struct Outcome {
 /// # Safety
 ///
 /// Patches executable memory in the loaded game image. Call from the loader's post-Arxan callback.
-pub unsafe fn install() -> Outcome {
+pub unsafe fn install(rows: Rows) -> Outcome {
     let failed = Outcome { installed: false };
     let base = match game_module_base() {
         Ok(base) => base,
@@ -585,11 +677,29 @@ pub unsafe fn install() -> Outcome {
         return failed;
     }
 
-    VTABLE[0].store(rva(ds2_rva::FE_JOB_CREATOR_SLOT0), Ordering::Release);
-    VTABLE[1].store(rva(ds2_rva::FE_JOB_CREATOR_SLOT1), Ordering::Release);
-    VTABLE[2].store(invoke as *const () as usize, Ordering::Release);
-    CREATOR[0].store(VTABLE.as_ptr() as usize, Ordering::Release);
-    CREATOR[ds2_rva::FE_JOB_CREATOR_REFCOUNT_OFFSET / 8].store(CREATOR_REFCOUNT, Ordering::Release);
+    for (vtable, creator, invoke) in [
+        (&VTABLE, &CREATOR, invoke as *const () as usize),
+        (
+            &RENAME_VTABLE,
+            &RENAME_CREATOR,
+            invoke_rename as *const () as usize,
+        ),
+    ] {
+        vtable[0].store(rva(ds2_rva::FE_JOB_CREATOR_SLOT0), Ordering::Release);
+        vtable[1].store(rva(ds2_rva::FE_JOB_CREATOR_SLOT1), Ordering::Release);
+        vtable[2].store(invoke, Ordering::Release);
+        creator[0].store(vtable.as_ptr() as usize, Ordering::Release);
+        creator[ds2_rva::FE_JOB_CREATOR_REFCOUNT_OFFSET / 8]
+            .store(CREATOR_REFCOUNT, Ordering::Release);
+    }
+    ROWS.store(
+        if rows.change_appearance {
+            APPEARANCE
+        } else {
+            0
+        } | if rows.rename { RENAME } else { 0 },
+        Ordering::Release,
+    );
 
     if let Err(error) = {
         // SAFETY: the caller's contract.
@@ -670,7 +780,7 @@ pub unsafe fn install() -> Outcome {
     }
 
     log(format_args!(
-        "{LOG_PREFIX} installed: bundle heap patch, tick, creator hooks, tab bar, row"
+        "{LOG_PREFIX} installed: bundle heap patch, tick, creator hooks, tab bar, rows {rows:?}"
     ));
     Outcome { installed: true }
 }
