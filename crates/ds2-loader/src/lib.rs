@@ -84,6 +84,7 @@ use dearxan::disabler::{neuter_arxan, schedule_after_arxan};
 pub mod arxan_probe;
 pub mod boot_timeline;
 pub mod build_import;
+pub mod change_appearance;
 pub mod continue_flow;
 pub mod crash_logging;
 pub mod dialog_skip;
@@ -380,6 +381,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_soul_memory_guard();
                 install_weapon_sync();
                 install_estus_max();
+                install_change_appearance();
                 install_music_probe();
                 arm_fault(crash_config);
                 finish_boot_batch();
@@ -433,6 +435,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_soul_memory_guard();
                 install_weapon_sync();
                 install_estus_max();
+                install_change_appearance();
                 install_music_probe();
                 arm_fault(crash_config);
                 finish_boot_batch();
@@ -1055,6 +1058,29 @@ fn install_estus_max() {
         log_line(format_args!(
             "{} NOT INSTALLED -- the flask is never raised this run",
             ds2_estus_max::LOG_PREFIX
+        ));
+    }
+}
+
+/// Add the bonfire menu's "Change Appearance" row, if `<Game>/ds2-mods.toml` asked.
+///
+/// Off unless `[change_appearance] enabled = true`. It hooks through the union and registers on
+/// `ds2-net-tick`, so install order among those does not matter.
+fn install_change_appearance() {
+    let config = change_appearance::ChangeAppearanceConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_change_appearance::set_logger(log_line);
+    // SAFETY: the patch site's bytes are re-read and nothing is written on a mismatch; every hook
+    // target is recorded in `ds2-rva`. Called from the post-Arxan position, like every other
+    // install here.
+    let outcome = unsafe { ds2_change_appearance::install() };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- no Change Appearance row this run",
+            ds2_change_appearance::LOG_PREFIX
         ));
     }
 }
