@@ -65,6 +65,10 @@ static ROWS: AtomicU8 = AtomicU8::new(0);
 /// Soul Vessels held when the Reallocate screen opened, while a spend is still being watched for;
 /// [`u32::MAX`] when nothing is.
 static VESSELS_BEFORE: AtomicU32 = AtomicU32::new(u32::MAX);
+/// The Reallocate row was last built disabled: its label is drawn grey.
+static REALLOCATE_GREYED: AtomicBool = AtomicBool::new(false);
+/// The reallocate row's last build has been logged with this state (0 none, 1 on, 2 off).
+static REALLOCATE_STATE_SAID: AtomicU8 = AtomicU8::new(0);
 /// The name before the last rename's open, while a change is still being watched for.
 static NAME_BEFORE: Mutex<Option<String>> = Mutex::new(None);
 /// The bonfire menu builder is on the stack.
@@ -91,6 +95,7 @@ static ORIG_SET_FACE: AtomicUsize = AtomicUsize::new(0);
 static ORIG_TOP_TABS: AtomicUsize = AtomicUsize::new(0);
 static ORIG_TAB_APPEND: AtomicUsize = AtomicUsize::new(0);
 static ORIG_FLO_ADOPT: AtomicUsize = AtomicUsize::new(0);
+static ORIG_SET_TEXT: AtomicUsize = AtomicUsize::new(0);
 
 /// The creator's tab bar is ours: from the open until the report, which is after the creator has
 /// closed. Longer than [`ARMED`], which the commit clears while the creator is still drawn.
@@ -268,9 +273,70 @@ unsafe extern "system" fn add_row_handler(
         let mut slot = creator;
         // SAFETY: the builder the game just returned, our static label and creator, a live slot.
         result = unsafe { call_orig(&ORIG_ADD_ROW, result, label, &raw mut slot as usize, 0) };
+        if bit == REALLOCATE && result != 0 {
+            set_reallocate_enabled(result);
+        }
     }
     if !ROW_ADDED_SAID.swap(true, Ordering::AcqRel) {
         log(format_args!("{LOG_PREFIX} rows added below Item box"));
+    }
+    result
+}
+
+/// Make the Reallocate row, just added to `builder`, unselectable unless the character may
+/// reallocate now; its label is greyed by [`set_text_handler`].
+fn set_reallocate_enabled(builder: usize) {
+    let verdict =
+        class_and_stats().map(|(class, stats)| may_reallocate(class, &stats, soul_vessels()));
+    let enabled = matches!(verdict, Some(Ok(_)));
+    REALLOCATE_GREYED.store(!enabled, Ordering::Release);
+    type SetFn = extern "system" fn(usize, u8) -> usize;
+    // SAFETY: the RVA's signature is recorded in `ds2-rva`; `builder` is the one the add returned,
+    // whose last row is ours.
+    let set: SetFn = unsafe {
+        std::mem::transmute::<usize, SetFn>(rva(ds2_rva::FEX_COMMAND_DIALOG_SET_ROW_ENABLED))
+    };
+    set(builder, u8::from(enabled));
+    let state = if enabled { 1 } else { 2 };
+    if REALLOCATE_STATE_SAID.swap(state, Ordering::AcqRel) != state {
+        log(format_args!(
+            "{LOG_PREFIX} Reallocate Stats row {}: {verdict:?}",
+            if enabled { "enabled" } else { "disabled" }
+        ));
+    }
+}
+
+/// `FE_SCENE_PROXY_SET_TEXT(proxy*, text)`: after the game sets our Reallocate label, colour its
+/// node grey or white to match the row's state. The node is resolved the way the callee resolves it.
+unsafe extern "system" fn set_text_handler(proxy: usize, text: usize, c: usize, d: usize) -> usize {
+    // SAFETY: the game's own arguments.
+    let result = unsafe { call_orig(&ORIG_SET_TEXT, proxy, text, c, d) };
+    if text == 0 || text != REALLOCATE_ROW_LABEL_UTF16.as_ptr() as usize {
+        return result;
+    }
+    // SAFETY: fault-tolerant reads of `*proxy` and its vtable's first slot.
+    let resolved = unsafe {
+        safe_read_usize(proxy)
+            .filter(|&inner| inner != 0)
+            .and_then(|inner| Some((inner, safe_read_usize(safe_read_usize(inner)?)?)))
+    };
+    let Some((inner, resolve)) = resolved.filter(|&(_, f)| f != 0) else {
+        return result;
+    };
+    // SAFETY: the same call the setter just made: `inner->vtbl[0](inner)` returns the node.
+    let resolve: extern "system" fn(usize) -> usize = unsafe { std::mem::transmute(resolve) };
+    let node = resolve(inner);
+    if node != 0 {
+        let set = if REALLOCATE_GREYED.load(Ordering::Acquire) {
+            ds2_rva::FE_COLOR_SET_DIMMED
+        } else {
+            ds2_rva::FE_COLOR_SET_PLAIN
+        };
+        type ColourFn = extern "system" fn(usize, u32);
+        // SAFETY: the RVA's signature is recorded in `ds2-rva`; `node` is live, just written to.
+        let colour: ColourFn =
+            unsafe { std::mem::transmute::<usize, ColourFn>(rva(ds2_rva::FE_APPLY_COLOR_SET)) };
+        colour(node, set);
     }
     result
 }
@@ -913,6 +979,24 @@ pub unsafe fn install(rows: Rows) -> Outcome {
                 "{LOG_PREFIX} install-failed stage=hook site={name} rva=0x{target:08x} status={status:?}"
             ));
             return failed;
+        }
+    }
+
+    if rows.reallocate {
+        // SAFETY: `(proxy*, const wchar_t*)`, two integer arguments; `ORIG_SET_TEXT` is the
+        // static the handler calls through.
+        if let Err(status) = unsafe {
+            register_union_hook(
+                rva(ds2_rva::FE_SCENE_PROXY_SET_TEXT),
+                set_text_handler,
+                &ORIG_SET_TEXT,
+            )
+        } {
+            // The row still works without it; only its grey is lost.
+            log(format_args!(
+                "{LOG_PREFIX} set-text hook failed status={status:?}: a disabled Reallocate row \
+                 will not be drawn grey"
+            ));
         }
     }
 

@@ -11323,6 +11323,41 @@ pub const BONFIRE_MENU_BUILD: u32 = 0x000d_6dc0;
 /// `48 89 5c 24 10 48 89 6c 24 18`.
 pub const FEX_COMMAND_DIALOG_ADD_ROW: u32 = 0x0002_b240;
 
+/// Set whether the row a command dialog builder added last can be chosen. RVA `0x0002baf0`.
+///
+/// `fn(builder, enabled: u8) -> builder`: writes byte `+0xa1` of the builder's last row
+/// (`FexCommandSelectDialog::Command`, both `+0xa0` and `+0xa1` start at 1 in `0x14002a8e0`).
+///
+/// A disabled row cannot be chosen, but its label is drawn as before: the only reader of the byte
+/// (`0x14001d405`) picks animation state `0x7a` instead of `0x70`, and the bonfire dialog's art
+/// shows no difference. The sibling at `0x0002c680` writes `+0xa0`, which hides the row. Proven
+/// 2026-10-03 with `scripts/frida/reallocate-at-bonfire.js`.
+pub const FEX_COMMAND_DIALOG_SET_ROW_ENABLED: u32 = 0x0002_baf0;
+
+/// Set a scene proxy's text. RVA `0x000299c0`. `fn(proxy*, const wchar_t*)`.
+///
+/// Resolves the node as `inner = *proxy; node = inner->vtbl[0](inner)` and tail-calls
+/// `node->vtbl[0x140](node, text)`. A command dialog row added by pointer
+/// ([`FEX_COMMAND_DIALOG_ADD_ROW`]) has its label set through here (`0x140027aa0`), with the very
+/// pointer the row was added with, so the label's node can be found by that pointer.
+pub const FE_SCENE_PROXY_SET_TEXT: u32 = 0x0002_99c0;
+
+/// Colour a scene node from an `FeColorSetParam` row. RVA `0x00041410`. `fn(node, setId)`.
+///
+/// Reads the row through `0x1404ff7b0([GameManagerImp + 0x22e0], setId)` and passes its four
+/// values to `node->vtbl[0x100]`; an `FeComponentObject` forwards that to each child component.
+/// Measured rows: [`FE_COLOR_SET_PLAIN`] `255 255 255 255`, [`FE_COLOR_SET_DIMMED`]
+/// `128 128 128 255`, no others from 0 to 8. Applied to a disabled bonfire row's label node it
+/// draws the label grey (user, 2026-10-03: "It is greyed out").
+pub const FE_APPLY_COLOR_SET: u32 = 0x0004_1410;
+
+/// The plain (white) [`FE_APPLY_COLOR_SET`] row.
+pub const FE_COLOR_SET_PLAIN: u32 = 1;
+
+/// The dimmed (grey) [`FE_APPLY_COLOR_SET`] row. What `0x140509664` and `0x14007cca1` pass for the
+/// other state of an entry.
+pub const FE_COLOR_SET_DIMMED: u32 = 2;
+
 /// The FMG text lookup: `const wchar_t*(u32 category, u32 id)`.
 ///
 /// Returns a fallback string, never null, for a missing id. The bonfire menu labels its rows with

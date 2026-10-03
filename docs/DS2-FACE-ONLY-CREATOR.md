@@ -355,6 +355,15 @@ firekeepers does once flag `102181` is set.
   `commit spends a Soul Vessel`, vessels 99 -> 98, level unchanged. The user: "the rallocation works
   when I have one level beyond base". [runtime]
 - **The port** opens only for a character with every stat at or above its class base, at least one
-  level above it, and a Soul Vessel (`may_reallocate`), and logs why not otherwise. The row is still
-  listed for any character; showing it disabled needs the bonfire dialog's disabled-row mechanism,
-  which is not traced.
+  level above it, and a Soul Vessel (`may_reallocate`), and logs why not otherwise.
+- **Greyed out otherwise.** A command dialog row has two bytes, both 1 at construction
+  (`FexCommandSelectDialog::Command`, 0x14002a8e0): `+0xa0`, written by 0x14002c680, hides the row
+  when 0 (measured: the row vanished); `+0xa1`, written by 0x14002baf0, makes it unselectable when
+  0, but the bonfire dialog draws it unchanged -- its only reader (0x14001d405) picks animation
+  state 0x7a over 0x70, which this art does not show. The colour comes from `FeColorSetParam`:
+  0x140041410(node, set) hands the row's four values to the node's vtable +0x100. Set 1 is
+  `255 255 255 255`, set 2 `128 128 128 255`. The label's node is the one 0x1400299c0 (proxy, text)
+  resolves (`*proxy`, then its vtable slot 0) when it sets our label pointer; an `FeComponentObject`.
+  Set 2 on it: "It is greyed out" (user). [runtime] Not used: the styled add 0x14002b3e0, whose
+  (frame, field) pair drives the label's style child 0x5f5c5ad -- frames 0x98 and 0x99 looked the
+  same as 0x67, and after five opens with them the frontend faulted at DarkSoulsII.exe+0xb67075.
