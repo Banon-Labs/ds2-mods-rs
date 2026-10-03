@@ -246,3 +246,38 @@ fields]
 Not used: CharacterManager+0x840. Only 0x1400de610 writes it, at character creation, and it is not
 loaded from the save on its own [not checked]. After a load it may be 0, which would leave the gate
 shut, so a fixed valid id is the safer choice.
+
+## 6. A "Change Appearance" row in the bonfire menu
+
+`scripts/frida/appearance-only-creator.js --config-json '{"trigger":"bonfire"}'`. Proven
+2026-10-03: the row appeared below Item box, the creator opened from it, the face commit landed,
+the class and gift commit was skipped, 0 equipment slots differed, and the user confirmed it end to
+end.
+
+- **The menu.** The live bonfire menu is built in 0x1400d6dc0 (`FeTestBonfireWarehouse`), not
+  `FeGroupTestBonfireTop` (0x1400d1900 builds an unused four-row list). Rows are added by
+  0x14002b240(builder, label, &jobCreator): Travel, Attune spells, Burn, Nullify Human Effigy, Item
+  box (the call at 0x1400d72f7), then Begin journey (0x14002b3e0). The label is the UTF-16 text
+  itself, so a custom string needs no FMG entry. [static, runtime]
+- **The row's action.** A job creator is a ref-counted object; choosing the row (0x14001c2bb) calls
+  its vtbl+0x10(this, &job) and assigns the job with a plain ref-pointer assign (0x140046de0), so a
+  null job is accepted and closes the menu. [static, runtime]
+- **Memory.** Frida's `Memory.alloc` frees its block when the JS value is collected. The game held
+  the row's vtable only as a raw pointer, and picking the row jumped to rip 0x30. [runtime]
+- **When to open.** `openCharaMakerWindow` swaps the frontend operator and tears down the current
+  scenes immediately. Calling it inside the row handler crashed in the dialog's update (0x140106c3a,
+  freed memory). Open it from the next nav update once the HUD operator's suspended byte
+  ([root+0xd8]+0x08) is back to 0. The frontend mode +0x32c is not the signal: it stays 1 after
+  the bonfire closes. [runtime]
+- **Why the creator stayed blank after a bonfire.** Its bundle `menu:/09.febnd.dcx` is created by
+  0x1400e2f00 through 0x1400264d0 on the frontend heap ([[0x141616ca8]+0xcb0]->vtbl+0x38). After a
+  bonfire, its 0x765a0-byte `.flo` failed to bind (0x140b00d20 takes its copy from that heap), and
+  the bundle ended failed (state +0x34 = 3, error +0x7d = 1, written at 0x140af6ec5). The creator's
+  update 0x1400e3060 then waited forever for state 2. The lookup 0x140b02360 returns a same-named
+  resource without checking its state, so one failure lasts for the rest of the process. Fix:
+  `mov r9, rsi` at 0x1400e2fda becomes `xor r9d, r9d`, and 0x1400264d0 then uses the resource
+  manager's default heap (+0xe8). The bind then succeeded. Not checked: whether that heap is
+  exhausted any other way. [static, runtime]
+- **Frida.** A hooked function called from inside one of the agent's own listeners on the same
+  thread is not reported. That is why hooks on 0x1400e2f00 and 0x1400264d0 stayed silent: the agent
+  calls the open from its nav-update listener. Patch an instruction instead. [runtime]
