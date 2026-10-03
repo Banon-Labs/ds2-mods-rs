@@ -11261,3 +11261,165 @@ pub const FE_COMPONENT_OBJECT_APPLY_MASK_FULL: u8 = 7;
 
 /// `u8` at `this + 0x9a`: the flag the last `setMatrix` was given.
 pub const FE_COMPONENT_OBJECT_MATRIX_FLAG_OFFSET: usize = 0x9a;
+
+// ---------------------------------------------------------------------------------------------
+// Change Appearance: a bonfire-menu row that opens the character creator and commits only the
+// appearance (face, sex, body). Static trace and runtime proof: `docs/DS2-FACE-ONLY-CREATOR.md`,
+// sections 1-6. Used by `ds2-change-appearance`.
+// ---------------------------------------------------------------------------------------------
+
+/// `FeTestBonfireWarehouse`'s bonfire menu builder: `void(this, out, u16 bonfire)`.
+///
+/// Adds Travel, Attune spells, Burn, Nullify Human Effigy, Item box and Begin journey, each with
+/// [`FEX_COMMAND_DIALOG_ADD_ROW`]. Entry `48 89 5c 24 20 55 56`.
+pub const BONFIRE_MENU_BUILD: u32 = 0x000d_6dc0;
+
+/// `FexCommandSelectDialog` builder: `builder*(builder, const wchar_t* label, JobCreator** slot)`.
+///
+/// Appends one row and returns the builder. It takes a reference to `*slot` for the row, then
+/// releases the caller's and zeroes `*slot`. The label is stored as a pointer, not copied. Entry
+/// `48 89 5c 24 10 48 89 6c 24 18`.
+pub const FEX_COMMAND_DIALOG_ADD_ROW: u32 = 0x0002_b240;
+
+/// The FMG text lookup: `const wchar_t*(u32 category, u32 id)`.
+///
+/// Returns a fallback string, never null, for a missing id. The bonfire menu labels its rows with
+/// this, so the pointer it returns for [`BONFIRE_TEXT_ITEM_BOX`] is the Item box row's label.
+pub const FMG_TEXT_LOOKUP: u32 = 0x0050_3620;
+
+/// The FMG category of the bonfire menu's text (`bofire.fmg`).
+pub const BONFIRE_TEXT_CATEGORY: u32 = 0xb;
+
+/// "Item box" in `bofire.fmg`: the row the Change Appearance row goes below.
+pub const BONFIRE_TEXT_ITEM_BOX: u32 = 0x2777;
+
+/// `JobCreator` vtable slot 0 the game's own creators use (`FeFunctorJobCreator`, `0x1410bad98`).
+pub const FE_JOB_CREATOR_SLOT0: u32 = 0x0002_d1d0;
+
+/// `JobCreator` vtable slot 1, the scalar deleting destructor, as [`FE_JOB_CREATOR_SLOT0`].
+pub const FE_JOB_CREATOR_SLOT1: u32 = 0x000d_6cd0;
+
+/// Byte offset of a `JobCreator`'s `u32` reference count (`DLReferenceCountObject`).
+pub const FE_JOB_CREATOR_REFCOUNT_OFFSET: usize = 0x8;
+
+/// `openCharaMakerWindow(ignored)`: switch the frontend to the full character creator.
+///
+/// The body is `[GameManagerImp + `[`GAME_MANAGER_FRONTEND_ROOT_OFFSET`]`]`'s `0x1404fffd0`, which
+/// resets the current frontend mode and its operators at once, so it must not be called from
+/// inside a menu's own handler.
+pub const OPEN_CHARA_MAKER_WINDOW: u32 = 0x0019_86c0;
+
+/// The creator bundle load's `mov r9, rsi` (the heap argument to the resource create).
+///
+/// Patched to [`CHARA_MAKER_BUNDLE_HEAP_ARG_PATCH`] so `menu:/09.febnd.dcx` is created on the
+/// resource manager's default heap. After a bonfire the frontend heap could not take its `.flo`.
+pub const CHARA_MAKER_BUNDLE_HEAP_ARG: u32 = 0x000e_2fda;
+
+/// The bytes expected at [`CHARA_MAKER_BUNDLE_HEAP_ARG`]: `mov r9, rsi`.
+pub const CHARA_MAKER_BUNDLE_HEAP_ARG_ORIGINAL: [u8; 3] = [0x4c, 0x8b, 0xce];
+
+/// `xor r9d, r9d`, written over [`CHARA_MAKER_BUNDLE_HEAP_ARG_ORIGINAL`].
+pub const CHARA_MAKER_BUNDLE_HEAP_ARG_PATCH: [u8; 3] = [0x45, 0x31, 0xc9];
+
+/// The creator's enter: `void(this)`, with `this - `[`CHARA_MAKER_WAREHOUSE_FROM_ENTER`] the
+/// creator's warehouse.
+///
+/// Strips the player's visible equipment and builds the preview. Entry `40 55 56 41 56`.
+pub const CHARA_MAKER_ENTER: u32 = 0x0004_c910;
+
+/// How far below [`CHARA_MAKER_ENTER`]'s `this` the creator's warehouse starts.
+pub const CHARA_MAKER_WAREHOUSE_FROM_ENTER: usize = 0x3e20;
+
+/// The class/gift selection in the creator's warehouse.
+pub const CHARA_MAKER_SELECTION_OFFSET: usize = 0x3b28;
+
+/// `u32` class id in the selection. Finish creation refuses while it is 0.
+pub const CHARA_MAKER_SELECTION_CLASS_OFFSET: usize = 0x108;
+
+/// `u32` gift id in the selection. Finish creation refuses while it is 0.
+pub const CHARA_MAKER_SELECTION_GIFT_OFFSET: usize = 0x10c;
+
+/// `u8` in the selection: a class or gift list is open. Finish creation refuses while it is set.
+pub const CHARA_MAKER_SELECTION_LIST_OPEN_OFFSET: usize = 0x131;
+
+/// Deprived: a valid class id for the Finish gate. Never granted, because the commit that reads
+/// it ([`CHARA_MAKER_CLASS_GIFT_COMMIT`]) is skipped.
+pub const CHARA_MAKER_PREFILL_CLASS: u32 = 0x6e;
+
+/// The "Nothing" gift: a valid gift id for the Finish gate, likewise never granted.
+pub const CHARA_MAKER_PREFILL_GIFT: u32 = 500;
+
+/// The creator's face commit: `void(this)`. Called first by the leave handler `0x1400ec020`.
+///
+/// Calls the face part's `SetFaceData` ([`SET_FACE_DATA`]) once with the creator's block. Entry
+/// `48 89 5c 24 10 48 89 74 24 18`.
+pub const CHARA_MAKER_FACE_COMMIT: u32 = 0x0004_cc90;
+
+/// The creator's class, stats, souls and gift commit: `void(this)`. Called second by the leave
+/// handler, and skipped for an appearance-only change. Entry `40 55 56 41 54 41 56 41 57`.
+pub const CHARA_MAKER_CLASS_GIFT_COMMIT: u32 = 0x000d_e610;
+
+/// `SetFaceData(face, const u8* block)`. It does not write sex. Entry `48 85 d2 0f 84`.
+pub const SET_FACE_DATA: u32 = 0x0033_a5b0;
+
+/// The appearance block's length: face, sex (`+0x92`) and body (`+0x93`, `+0x95` bits 4-6, `+0x99`).
+pub const APPEARANCE_BLOCK_LEN: usize = 0xa2;
+
+/// `face_part*(model)`: the model's face part, or null.
+pub const CHR_MODEL_FACE_PART: u32 = 0x0033_9cd0;
+
+/// The face part's import: `void(part, const u8* block)`, a vtable slot.
+///
+/// Writes sex as well as the face, and rebuilds the live face.
+pub const FACE_PART_IMPORT_VTABLE_OFFSET: usize = 0x188;
+
+/// Character vtable slot returning its `ChrAsm`.
+pub const CHR_ASM_VTABLE_OFFSET: usize = 0x120;
+
+/// `ChrAsm` vtable slot returning its model.
+pub const CHR_ASM_MODEL_VTABLE_OFFSET: usize = 0x80;
+
+/// `ChrAsm` vtable slot returning its visible equipment.
+pub const CHR_ASM_VISIBLE_EQUIP_VTABLE_OFFSET: usize = 0x60;
+
+/// Model vtable slot returning a pointer to its appearance block ([`APPEARANCE_BLOCK_LEN`] bytes).
+pub const CHR_MODEL_APPEARANCE_VTABLE_OFFSET: usize = 0x68;
+
+/// `void(equip, u8* out, i32 slot)`: read one visible-equipment record.
+pub const VISIBLE_EQUIP_READ: u32 = 0x0034_6940;
+
+/// `void(equip, i32 slot, const u8* record)`: write one visible-equipment record.
+pub const VISIBLE_EQUIP_WRITE: u32 = 0x0034_63d0;
+
+/// How many visible-equipment slots there are.
+pub const VISIBLE_EQUIP_SLOTS: usize = 0x34;
+
+/// The length of one visible-equipment record.
+pub const VISIBLE_EQUIP_RECORD_LEN: usize = 0x14;
+
+/// `void(character)`: rebuild the character from its visible equipment.
+pub const CHR_REFRESH_VISIBLE_EQUIP: u32 = 0x0037_f9d0;
+
+/// `FeGroupCharaMakingTop`'s tab list builder, vtable `0x1410bb138` +0x148:
+/// `out*(this, DLVector<FexTextTabSpec>* out)`.
+///
+/// Appends four `FexTextTabSpec`s in order -- Class & gift, Body, Face, Advanced settings -- each
+/// with [`FE_TAB_SPEC_APPEND`]. Called every frame the creator is up. The first spec names layout
+/// elements `0x5f5c1c0` (the tab) and `0x5f5c420` (its label).
+pub const CHARA_MAKER_TOP_TABS_BUILD: u32 = 0x000e_b270;
+
+/// `void(DLVector<FexTextTabSpec>* list, const FexTextTabSpec* spec)`: copy one 0x90-byte spec
+/// onto the end of a tab list.
+///
+/// Not appending is clean: the builder drops its own reference to the spec's functor after every
+/// call (0x1400eb436), so a spec that was never copied is simply freed.
+pub const FE_TAB_SPEC_APPEND: u32 = 0x000d_2a40;
+
+/// `bool(FeLayoutHolder* holder, u8* bytes, i32 len)`: adopt a `.flo` copy, relocated in place.
+///
+/// Called from the bind 0x140b00d20 once per process for a given bundle: the bundle stays cached,
+/// and later opens build from the same copy without binding again.
+pub const FLO_ADOPT: u32 = 0x00b5_46a0;
+
+/// The size of `l09_01_chara_make.flo`, the creator's layout in `menu:/09.febnd.dcx`.
+pub const CHARA_MAKE_FLO_LEN: usize = 0x765a0;

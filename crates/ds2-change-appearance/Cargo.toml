@@ -1,0 +1,20 @@
+[package]
+name = "ds2-change-appearance"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# What happens at each step of a change is plain state and builds everywhere, so its tests run on
+# the machine the code is written on. Only the hooks, the patch and the tick need Windows.
+[dependencies]
+ds2-rva.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ds2-game-base.workspace = true
+ds2-hook.workspace = true
+ds2-net-tick.workspace = true
+
+[lints]
+workspace = true
