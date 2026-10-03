@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import base64
 import struct
+import subprocess
 import sys
 import zlib
 from pathlib import Path
@@ -163,19 +164,44 @@ class Bhd5:
         return entry
 
 
-def read_entry(bdt_path: Path, size: int, offset: int, aes_key: int, what: str) -> bytes:
-    if aes_key:
-        raise SystemExit(
-            f"{what} is one of the AES-encrypted entries (key record at {aes_key:#x}).\n"
-            "    This tool does not decrypt those, and will not hand back ciphertext dressed\n"
-            "    up as a file. See the module docstring."
-        )
+def aes_ranges(header: bytes, key_offset: int) -> tuple[bytes, list[tuple[int, int]]]:
+    """The AES key record: a 16-byte key, an i32 count, then `count` x (i64 start, i64 end)."""
+    key = header[key_offset : key_offset + 16]
+    count = struct.unpack_from("<i", header, key_offset + 16)[0]
+    ranges = [struct.unpack_from("<qq", header, key_offset + 20 + i * 16) for i in range(count)]
+    return key, ranges
+
+
+def aes_128_ecb_decrypt(key: bytes, data: bytes) -> bytes:
+    """Through the system `openssl`: the standard library has no AES."""
+    return subprocess.run(
+        ["openssl", "enc", "-aes-128-ecb", "-d", "-nopad", "-K", key.hex()],
+        input=data,
+        capture_output=True,
+        check=True,
+    ).stdout
+
+
+def read_entry(
+    bdt_path: Path, size: int, offset: int, aes_key: int, what: str, header: bytes = b""
+) -> bytes:
     with bdt_path.open("rb") as handle:
         handle.seek(offset)
-        data = handle.read(size)
+        data = bytearray(handle.read(size))
     if len(data) != size:
         raise SystemExit(f"{what}: wanted {size} bytes at {offset:#x}, got {len(data)}")
-    return data
+    if aes_key:
+        if not header:
+            raise SystemExit(f"{what} is AES-encrypted and no header was passed to find its key")
+        key, ranges = aes_ranges(header, aes_key)
+        for start, end in ranges:
+            # -1 marks a range that is stored in the clear.
+            if start < 0 or end <= start:
+                continue
+            if (end - start) % 16 or end > size:
+                raise SystemExit(f"{what}: AES range {start:#x}..{end:#x} is not whole blocks in the entry")
+            data[start:end] = aes_128_ecb_decrypt(key, bytes(data[start:end]))
+    return bytes(data)
 
 
 def dcx_decompress(data: bytes) -> bytes:
@@ -276,7 +302,7 @@ def main() -> int:
         return 0
 
     size, offset, aes_key, _bucket = header.lookup(args.path)
-    data = read_entry(bdt_path, size, offset, aes_key, args.path)
+    data = read_entry(bdt_path, size, offset, aes_key, args.path, header.blob)
     args.out.mkdir(parents=True, exist_ok=True)
     stem = args.path.rsplit("/", 1)[-1]
     print(f"{args.path}  hash=0x{path_hash(args.path):08x} size={size} offset={offset:#x}")
