@@ -6819,6 +6819,48 @@ pub const PLAYER_PARAM_SOUL_LEVEL_BIAS: u32 = 53;
 /// [`GAME_MANAGER_FRONTEND_ROOT_OFFSET`] -- machinery `ds2-menu-row` already touches.
 pub const FE_OPEN_ATTRIBUTE_MENU: u32 = 0x0019_92c0;
 
+/// [`FE_OPEN_ATTRIBUTE_MENU`]'s `mode` for the Reallocate screen (menu `0x1a`): what the Things
+/// Betwixt firekeepers open, `c1_130455(0, 220, 0)` in `talk_m10_02_00_00.esd` group `2147483619`.
+///
+/// The screen (`FeGroupTestBonfireLevelUp` with a Soul Vessel cost, built at `0x1400c63c0` case
+/// `0x1a`) asks its own "consumes a Soul Vessel. Okay?" on confirm, and its commit removes one
+/// vessel (`0x1400ca0ac`). It does not check that one is held -- the firekeepers' script does that
+/// before opening. Proven 2026-10-03 with `scripts/frida/reallocate-at-bonfire.js`: vessels 99 to
+/// 98, level unchanged.
+pub const ATTRIBUTE_MENU_MODE_REALLOCATE: i32 = 0;
+
+/// `GameManagerImp -> EventManager`. `+0x70`. [`FE_OPEN_ATTRIBUTE_MENU`]'s window manager hangs off
+/// it at [`EVENT_MANAGER_WINDOW_MANAGER_OFFSET`]; [`EVENT_COMMON_FLOAT`] takes it.
+pub const GAME_MANAGER_EVENT_MANAGER_OFFSET: usize = 0x70;
+
+/// `EventManager -> EventWindowManager`. `+0x50`. The first argument of every `open*Window`.
+pub const EVENT_MANAGER_WINDOW_MANAGER_OFFSET: usize = 0x50;
+
+/// `EventCommonParamFloat` row `index`. RVA `0x0044ea70`. `fn(eventManager, index) -> f32`, `0.0`
+/// when the param is not loaded or `index` is past its end.
+///
+/// The talk window data (`fillWindowDataBuffer`, `0x14019b750`) squares row
+/// [`EVENT_COMMON_FLOAT_TALK_DISTANCE`] for the distance at which a talk window closes.
+pub const EVENT_COMMON_FLOAT: u32 = 0x0044_ea70;
+
+/// The [`EVENT_COMMON_FLOAT`] row a talk window's close distance comes from. `5.0` measured.
+pub const EVENT_COMMON_FLOAT_TALK_DISTANCE: u32 = 7;
+
+/// How many of an item the player holds. RVA `0x00040440`. `fn(itemId) -> u32`, `0` with no game
+/// data. What the NPC menu builder (`0x140103670`) asks of the Soul Vessel.
+pub const PLAYER_ITEM_COUNT: u32 = 0x0004_0440;
+
+/// The Soul Vessel's item id. `50960000`. The id the firekeepers' script counts.
+pub const SOUL_VESSEL_ITEM_ID: u32 = 50_960_000;
+
+/// `PlayerCtrl -> world position`, four `f32` (`x y z w`). `+0x90`. What a talk window centres on
+/// when there is no talker (`fillWindowDataBuffer` falls back to the player).
+pub const PLAYER_CTRL_POSITION_OFFSET: usize = 0x90;
+
+/// Bytes of the window data [`FE_OPEN_ATTRIBUTE_MENU`] copies: centre (`+0x00`, four `f32`), squared
+/// close distance (`+0x10`), `-1.0` (`+0x14`), unused (`+0x18`). Read with `movaps`, so 16-aligned.
+pub const TALK_WINDOW_DATA_LEN: usize = 0x20;
+
 /// `SaveLoadSystem::RequestSave`. RVA `0x002e7410`. `fn(saveLoadSystem, kind)`, `kind = 2`.
 ///
 /// `saveLoadSystem` is `[GAME_MANAGER_IMP + `[`SAVE_LOAD_SYSTEM_OFFSET`]`]`. How a change is

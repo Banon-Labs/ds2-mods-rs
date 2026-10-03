@@ -411,6 +411,10 @@ CHANGE_APPEARANCE_LOG_PREFIX = "ds2-change-appearance:"
 #: "the same for adding a bonfire menu row, except for the rename character option");
 #: `--no-rename-character` writes false.
 RENAME_CHARACTER_SECTION = "rename_character"
+#: Mirrors `REALLOCATE_SECTION` in the same loader module. ON by default (user 2026-10-03: "Lets
+#: add a bonfire menu option to do the same action ... selecting the respec option");
+#: `--no-reallocate-stats` writes false.
+REALLOCATE_STATS_SECTION = "reallocate_stats"
 
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED`/`KEY_TEST_CAP` in `crates/ds2-loader/src/weapon_sync.rs`.
 #: OFF by default here, matching the DLL; `--weapon-sync` turns it on.
@@ -1757,6 +1761,7 @@ def config_text(
     estus_max_reload_test: bool = False,
     change_appearance: bool = True,
     rename_character: bool = True,
+    reallocate_stats: bool = True,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     armor_sync: bool = False,
@@ -2361,6 +2366,12 @@ def config_text(
 # name entry. ON by default; `--no-rename-character` writes false. Same log prefix.
 {KEY_CHANGE_APPEARANCE_ENABLED} = {str(rename_character).lower()}
 
+[{REALLOCATE_STATS_SECTION}]
+# Read at startup only. Adds "Reallocate Stats" below those rows: the Reallocate screen the Things
+# Betwixt firekeepers open, for a Soul Vessel, once the character has a level above its class base.
+# ON by default; `--no-reallocate-stats` writes false. Same log prefix.
+{KEY_CHANGE_APPEARANCE_ENABLED} = {str(reallocate_stats).lower()}
+
 [{WEAPON_SYNC_SECTION}]
 # `enabled` is startup-only. While another player is in the world, `ds2-weapon-sync` lowers every
 # weapon of ours above the highest weapon level any of them has equipped, and puts them back when
@@ -2618,6 +2629,7 @@ def write_config(
     estus_max_reload_test: bool = False,
     change_appearance: bool = True,
     rename_character: bool = True,
+    reallocate_stats: bool = True,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     armor_sync: bool = False,
@@ -2672,6 +2684,7 @@ def write_config(
         estus_max_reload_test=estus_max_reload_test,
         change_appearance=change_appearance,
         rename_character=rename_character,
+        reallocate_stats=reallocate_stats,
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
         armor_sync=armor_sync,
@@ -3183,6 +3196,7 @@ def dry_run(
     estus_max_reload_test: bool = False,
     change_appearance: bool = True,
     rename_character: bool = True,
+    reallocate_stats: bool = True,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     armor_sync: bool = False,
@@ -3281,6 +3295,7 @@ def dry_run(
             estus_max_reload_test=estus_max_reload_test,
             change_appearance=change_appearance,
             rename_character=rename_character,
+            reallocate_stats=reallocate_stats,
             weapon_sync=weapon_sync,
             weapon_sync_test_cap=weapon_sync_test_cap,
             armor_sync=armor_sync,
@@ -3349,6 +3364,7 @@ def dry_run(
                 estus_max_reload_test=estus_max_reload_test,
                 change_appearance=change_appearance,
                 rename_character=rename_character,
+                reallocate_stats=reallocate_stats,
                 weapon_sync=weapon_sync,
                 weapon_sync_test_cap=weapon_sync_test_cap,
                 armor_sync=armor_sync,
@@ -3918,6 +3934,7 @@ def launch(
     estus_max_reload_test: bool = False,
     change_appearance: bool = True,
     rename_character: bool = True,
+    reallocate_stats: bool = True,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     armor_sync: bool = False,
@@ -4001,6 +4018,7 @@ def launch(
         estus_max_reload_test=estus_max_reload_test,
         change_appearance=change_appearance,
         rename_character=rename_character,
+        reallocate_stats=reallocate_stats,
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
         armor_sync=armor_sync,
@@ -6275,6 +6293,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-reallocate-stats",
+        dest="reallocate_stats",
+        action="store_false",
+        default=True,
+        help=(
+            "no 'Reallocate Stats' row in the bonfire menu. By default it sits below Rename "
+            "Character and opens the firekeepers' Reallocate screen for a Soul Vessel."
+        ),
+    )
+    parser.add_argument(
         "--estus-max-reload-test",
         dest="estus_max_reload_test",
         action="store_true",
@@ -6634,6 +6662,7 @@ def main() -> int:
             estus_max_reload_test=args.estus_max_reload_test,
             change_appearance=args.change_appearance,
             rename_character=args.rename_character,
+            reallocate_stats=args.reallocate_stats,
             weapon_sync=args.weapon_sync,
             weapon_sync_test_cap=args.weapon_sync_test_cap,
             armor_sync=args.armor_sync,
@@ -6688,6 +6717,7 @@ def main() -> int:
         estus_max_reload_test=args.estus_max_reload_test,
         change_appearance=args.change_appearance,
         rename_character=args.rename_character,
+        reallocate_stats=args.reallocate_stats,
         weapon_sync=args.weapon_sync,
         weapon_sync_test_cap=args.weapon_sync_test_cap,
         armor_sync=args.armor_sync,

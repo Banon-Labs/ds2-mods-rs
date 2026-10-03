@@ -1,5 +1,7 @@
-//! Reading `[change_appearance]` and `[rename_character]` out of `<Game>/ds2-mods.toml`: whether to
-//! add the bonfire menu's "Change Appearance" and "Rename Character" rows.
+//! The switches for the bonfire menu's three added rows, out of `<Game>/ds2-mods.toml`.
+//!
+//! `[change_appearance]`, `[rename_character]` and `[reallocate_stats]` each add one row: "Change
+//! Appearance", "Rename Character" and "Reallocate Stats".
 //!
 //! The feature lives in `ds2-change-appearance`; this is only the switch, kept here for the same
 //! reason every other feature's is -- the config file belongs to the loader.
@@ -9,6 +11,9 @@
 //! enabled = true
 //!
 //! [rename_character]
+//! enabled = true
+//!
+//! [reallocate_stats]
 //! enabled = true
 //! ```
 
@@ -22,6 +27,9 @@ pub const CONFIG_SECTION: &str = "change_appearance";
 /// The rename row's section. Mirrored in `scripts/ds2-run.py`.
 pub const RENAME_SECTION: &str = "rename_character";
 
+/// The reallocate row's section. Mirrored in `scripts/ds2-run.py`.
+pub const REALLOCATE_SECTION: &str = "reallocate_stats";
+
 /// Whether to add the section's row. The same key in both sections.
 pub const KEY_ENABLED: &str = "enabled";
 
@@ -34,6 +42,8 @@ pub struct ChangeAppearanceConfig {
     pub enabled: bool,
     /// `[rename_character] enabled`: add the "Rename Character" row. Off by default as well.
     pub rename: bool,
+    /// `[reallocate_stats] enabled`: add the "Reallocate Stats" row. Off by default as well.
+    pub reallocate: bool,
 }
 
 impl ChangeAppearanceConfig {
@@ -59,6 +69,7 @@ impl ChangeAppearanceConfig {
         Self {
             enabled: on(CONFIG_SECTION),
             rename: on(RENAME_SECTION),
+            reallocate: on(REALLOCATE_SECTION),
         }
     }
 
@@ -67,16 +78,19 @@ impl ChangeAppearanceConfig {
         ds2_change_appearance::Rows {
             change_appearance: self.enabled,
             rename: self.rename,
+            reallocate: self.reallocate,
         }
     }
 
     /// One line for the attach log, written before anything acts on it.
     pub fn describe(&self) -> String {
         format!(
-            "{} config [{CONFIG_SECTION}] {KEY_ENABLED}={} [{RENAME_SECTION}] {KEY_ENABLED}={}",
+            "{} config [{CONFIG_SECTION}] {KEY_ENABLED}={} [{RENAME_SECTION}] {KEY_ENABLED}={} \
+             [{REALLOCATE_SECTION}] {KEY_ENABLED}={}",
             ds2_change_appearance::LOG_PREFIX,
             self.enabled,
-            self.rename
+            self.rename,
+            self.reallocate
         )
     }
 }
@@ -105,7 +119,18 @@ mod tests {
             rename_only.rows(),
             ds2_change_appearance::Rows {
                 change_appearance: false,
-                rename: true
+                rename: true,
+                reallocate: false
+            }
+        );
+        let reallocate_only =
+            ChangeAppearanceConfig::from_text("[reallocate_stats]\nenabled = true\n");
+        assert_eq!(
+            reallocate_only.rows(),
+            ds2_change_appearance::Rows {
+                change_appearance: false,
+                rename: false,
+                reallocate: true
             }
         );
         let both = ChangeAppearanceConfig::from_text(

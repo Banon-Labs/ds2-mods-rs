@@ -7,14 +7,17 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
-use ds2_game_base::mem::{game_module_base, read_bytes, safe_read_u8, safe_read_usize};
+use ds2_game_base::mem::{
+    game_module_base, read_bytes, safe_read_f32, safe_read_u8, safe_read_u16, safe_read_u32,
+    safe_read_usize,
+};
 use ds2_hook::{UnionFn, patch_3byte_stub, register_union_hook};
 use ds2_rva::{APPEARANCE_BLOCK_LEN, VISIBLE_EQUIP_RECORD_LEN, VISIBLE_EQUIP_SLOTS};
 
 use crate::tabs::{Layout, layout_of, writes};
 use crate::{
-    LOG_PREFIX, RENAME_ROW_LABEL_UTF16, REPORT_AFTER_TICKS, ROW_LABEL_UTF16, Rows, open_now,
-    records_differing,
+    LOG_PREFIX, REALLOCATE_ROW_LABEL_UTF16, RENAME_ROW_LABEL_UTF16, REPORT_AFTER_TICKS,
+    ROW_LABEL_UTF16, Rows, may_reallocate, open_now, records_differing,
 };
 
 /// A log sink, installed by the loader. Stored as a `usize` because a `fn` pointer is not an
@@ -50,14 +53,18 @@ static BASE: AtomicUsize = AtomicUsize::new(0);
 
 /// A change is in progress: from the open until the class/gift commit is skipped.
 static ARMED: AtomicBool = AtomicBool::new(false);
-/// Which row was chosen and is waiting for the bonfire menu to let go: [`NOTHING`], [`APPEARANCE`]
-/// or [`RENAME`].
+/// Which row was chosen and is waiting for the bonfire menu to let go: [`NOTHING`], [`APPEARANCE`],
+/// [`RENAME`] or [`REALLOCATE`].
 static OPEN_REQUESTED: AtomicU8 = AtomicU8::new(NOTHING);
 const NOTHING: u8 = 0;
 const APPEARANCE: u8 = 1;
 const RENAME: u8 = 2;
-/// The rows [`install`] was asked for: bit 0 Change Appearance, bit 1 Rename Character.
+const REALLOCATE: u8 = 4;
+/// The rows [`install`] was asked for, as the bits above.
 static ROWS: AtomicU8 = AtomicU8::new(0);
+/// Soul Vessels held when the Reallocate screen opened, while a spend is still being watched for;
+/// [`u32::MAX`] when nothing is.
+static VESSELS_BEFORE: AtomicU32 = AtomicU32::new(u32::MAX);
 /// The name before the last rename's open, while a change is still being watched for.
 static NAME_BEFORE: Mutex<Option<String>> = Mutex::new(None);
 /// The bonfire menu builder is on the stack.
@@ -104,6 +111,9 @@ static CREATOR: [AtomicUsize; 5] = [const { AtomicUsize::new(0) }; 5];
 /// The rename row's job creator, the same shape with [`invoke_rename`] in slot 2.
 static RENAME_VTABLE: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
 static RENAME_CREATOR: [AtomicUsize; 5] = [const { AtomicUsize::new(0) }; 5];
+/// The reallocate row's, with [`invoke_reallocate`].
+static REALLOCATE_VTABLE: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
+static REALLOCATE_CREATOR: [AtomicUsize; 5] = [const { AtomicUsize::new(0) }; 5];
 const CREATOR_REFCOUNT: usize = 0x4000_0000;
 
 fn rva(rva: u32) -> usize {
@@ -232,7 +242,7 @@ unsafe extern "system" fn add_row_handler(
         return result;
     }
     let rows = ROWS.load(Ordering::Acquire);
-    let ours: [(u8, usize, usize); 2] = [
+    let ours: [(u8, usize, usize); 3] = [
         (
             APPEARANCE,
             ROW_LABEL_UTF16.as_ptr() as usize,
@@ -242,6 +252,11 @@ unsafe extern "system" fn add_row_handler(
             RENAME,
             RENAME_ROW_LABEL_UTF16.as_ptr() as usize,
             RENAME_CREATOR.as_ptr() as usize,
+        ),
+        (
+            REALLOCATE,
+            REALLOCATE_ROW_LABEL_UTF16.as_ptr() as usize,
+            REALLOCATE_CREATOR.as_ptr() as usize,
         ),
     ];
     let mut result = result;
@@ -272,6 +287,11 @@ extern "system" fn invoke_rename(_this: usize, out: *mut usize) -> *mut usize {
     request(out, RENAME, "Rename Character")
 }
 
+/// [`invoke`] for the reallocate row.
+extern "system" fn invoke_reallocate(_this: usize, out: *mut usize) -> *mut usize {
+    request(out, REALLOCATE, "Reallocate Stats")
+}
+
 fn request(out: *mut usize, what: u8, name: &str) -> *mut usize {
     if !out.is_null() {
         // SAFETY: the dialog passes a live out-slot (`0x14001c2b3`) and assigns from it after.
@@ -290,10 +310,12 @@ fn tick(_session: usize) {
         OPEN_REQUESTED.store(NOTHING, Ordering::Release);
         match requested {
             RENAME => open_rename(),
+            REALLOCATE => open_reallocate(),
             _ => open(),
         }
     }
     watch_name();
+    watch_vessels();
     let left = REPORT_IN.load(Ordering::Acquire);
     if left > 0 {
         REPORT_IN.store(left - 1, Ordering::Release);
@@ -376,6 +398,115 @@ fn watch_name() {
             "{LOG_PREFIX} name changed: {old:?} -> {now:?}"
         ));
         *before = None;
+    }
+}
+
+/// The window data the attribute menu copies ([`ds2_rva::TALK_WINDOW_DATA_LEN`]); read with
+/// `movaps`, hence the alignment.
+#[repr(C, align(16))]
+struct WindowData([f32; ds2_rva::TALK_WINDOW_DATA_LEN / 4]);
+
+fn soul_vessels() -> u32 {
+    type CountFn = extern "system" fn(u32) -> u32;
+    // SAFETY: the RVA's signature is recorded in `ds2-rva`; it returns 0 with no game data.
+    let count: CountFn =
+        unsafe { std::mem::transmute::<usize, CountFn>(rva(ds2_rva::PLAYER_ITEM_COUNT)) };
+    count(ds2_rva::SOUL_VESSEL_ITEM_ID)
+}
+
+/// The class id and the nine levelled stats, or `None` with no character.
+fn class_and_stats() -> Option<(u32, [u16; 9])> {
+    // SAFETY: fault-tolerant reads down the recorded chains.
+    unsafe {
+        let gdm = safe_read_usize(game_manager()? + ds2_rva::GAME_DATA_MANAGER_OFFSET)?;
+        let data = safe_read_usize(gdm + ds2_rva::GAME_DATA_MANAGER_PLAYER_GAME_DATA_OFFSET)?;
+        let class = safe_read_u32(data + ds2_rva::PLAYER_DATA_CLASS_OFFSET)?;
+        let param = safe_read_usize(player()? + ds2_rva::PLAYER_PARAM_OFFSET)?;
+        let mut stats = [0u16; 9];
+        for (stat, offset) in stats.iter_mut().zip(ds2_rva::PLAYER_PARAM_STAT_OFFSETS) {
+            *stat = safe_read_u16(param + offset)?;
+        }
+        Some((class, stats))
+    }
+}
+
+/// Open the Reallocate screen, on the firekeepers' terms: a level above the class base and a Soul
+/// Vessel. The screen asks its own confirmation and spends the vessel itself.
+fn open_reallocate() {
+    let Some((class, stats)) = class_and_stats() else {
+        log(format_args!(
+            "{LOG_PREFIX} reallocate not opened: no character"
+        ));
+        return;
+    };
+    let vessels = soul_vessels();
+    let levels = match may_reallocate(class, &stats, vessels) {
+        Ok(levels) => levels,
+        Err(why) => {
+            log(format_args!(
+                "{LOG_PREFIX} reallocate not opened: {why:?} (class {class}, stats {stats:?}, \
+                 vessels {vessels})"
+            ));
+            return;
+        }
+    };
+    let Some(player) = player() else { return };
+    let Some(events) = game_manager().and_then(|gm| {
+        // SAFETY: fault-tolerant read.
+        unsafe { safe_read_usize(gm + ds2_rva::GAME_MANAGER_EVENT_MANAGER_OFFSET) }
+            .filter(|&p| p != 0)
+    }) else {
+        return;
+    };
+    // SAFETY: fault-tolerant read.
+    let Some(windows) =
+        unsafe { safe_read_usize(events + ds2_rva::EVENT_MANAGER_WINDOW_MANAGER_OFFSET) }
+            .filter(|&p| p != 0)
+    else {
+        return;
+    };
+    type FloatFn = extern "system" fn(usize, u32) -> f32;
+    // SAFETY: the RVA's signature is recorded in `ds2-rva`.
+    let float: FloatFn =
+        unsafe { std::mem::transmute::<usize, FloatFn>(rva(ds2_rva::EVENT_COMMON_FLOAT)) };
+    let reach = float(events, ds2_rva::EVENT_COMMON_FLOAT_TALK_DISTANCE);
+    let mut data = WindowData([0.0; ds2_rva::TALK_WINDOW_DATA_LEN / 4]);
+    for (i, slot) in data.0[..4].iter_mut().enumerate() {
+        // SAFETY: fault-tolerant read of the player's position.
+        *slot = unsafe { safe_read_f32(player + ds2_rva::PLAYER_CTRL_POSITION_OFFSET + i * 4) }
+            .unwrap_or(0.0);
+    }
+    data.0[4] = reach * reach;
+    data.0[5] = -1.0;
+    VESSELS_BEFORE.store(vessels, Ordering::Release);
+    type OpenFn = extern "system" fn(usize, i32, *const WindowData);
+    // SAFETY: the RVA's signature is recorded in `ds2-rva`; `data` is 16-aligned and outlives the
+    // call, which copies it. Called on the game thread, outside any menu handler.
+    let open: OpenFn =
+        unsafe { std::mem::transmute::<usize, OpenFn>(rva(ds2_rva::FE_OPEN_ATTRIBUTE_MENU)) };
+    open(
+        windows,
+        ds2_rva::ATTRIBUTE_MENU_MODE_REALLOCATE,
+        &raw const data,
+    );
+    log(format_args!(
+        "{LOG_PREFIX} reallocate opened: {levels} levels above the class base, {vessels} vessels"
+    ));
+}
+
+/// After a reallocate's open, log the vessel count once it changes: the screen's commit spends one.
+fn watch_vessels() {
+    let before = VESSELS_BEFORE.load(Ordering::Acquire);
+    if before == u32::MAX || player().is_none() {
+        return;
+    }
+    let now = soul_vessels();
+    if now != before {
+        log(format_args!(
+            "{LOG_PREFIX} Soul Vessels {before} -> {now}, stats {:?}",
+            class_and_stats().map(|(_, stats)| stats)
+        ));
+        VESSELS_BEFORE.store(u32::MAX, Ordering::Release);
     }
 }
 
@@ -684,6 +815,11 @@ pub unsafe fn install(rows: Rows) -> Outcome {
             &RENAME_CREATOR,
             invoke_rename as *const () as usize,
         ),
+        (
+            &REALLOCATE_VTABLE,
+            &REALLOCATE_CREATOR,
+            invoke_reallocate as *const () as usize,
+        ),
     ] {
         vtable[0].store(rva(ds2_rva::FE_JOB_CREATOR_SLOT0), Ordering::Release);
         vtable[1].store(rva(ds2_rva::FE_JOB_CREATOR_SLOT1), Ordering::Release);
@@ -697,7 +833,8 @@ pub unsafe fn install(rows: Rows) -> Outcome {
             APPEARANCE
         } else {
             0
-        } | if rows.rename { RENAME } else { 0 },
+        } | if rows.rename { RENAME } else { 0 }
+            | if rows.reallocate { REALLOCATE } else { 0 },
         Ordering::Release,
     );
 

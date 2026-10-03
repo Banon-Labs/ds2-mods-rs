@@ -1,7 +1,8 @@
 //! A "Change Appearance" row in the bonfire menu, below Item box, that opens the game's own
 //! character creator and commits only the appearance: face, sex and body. And a "Rename Character"
-//! row below it that opens the game's own name entry ([`ds2_rva::OPEN_NAME_WINDOW`]); either row
-//! can be left out ([`Rows`]).
+//! row below it that opens the game's own name entry ([`ds2_rva::OPEN_NAME_WINDOW`]). And a
+//! "Reallocate Stats" row that opens the Reallocate screen the Things Betwixt firekeepers open, on
+//! the same terms ([`may_reallocate`]). Any row can be left out ([`Rows`]).
 //!
 //! Class, stats, souls, level, gift and inventory stay as they are. The prototype this ports,
 //! `scripts/frida/appearance-only-creator.js`, was proven end to end in game on 2026-10-03; the
@@ -61,6 +62,15 @@ pub const RENAME_ROW_LABEL: &str = "Rename Character";
 /// [`ROW_LABEL_UTF16`].
 pub static RENAME_ROW_LABEL_UTF16: [u16; RENAME_ROW_LABEL.len() + 1] = utf16_nul(RENAME_ROW_LABEL);
 
+/// The third row's text: opens the game's own Reallocate screen, what the Things Betwixt
+/// firekeepers' "Reallocate points" opens ([`ds2_rva::ATTRIBUTE_MENU_MODE_REALLOCATE`]).
+pub const REALLOCATE_ROW_LABEL: &str = "Reallocate Stats";
+
+/// [`REALLOCATE_ROW_LABEL`] as NUL-terminated UTF-16, in a `static` for the same reason as
+/// [`ROW_LABEL_UTF16`].
+pub static REALLOCATE_ROW_LABEL_UTF16: [u16; REALLOCATE_ROW_LABEL.len() + 1] =
+    utf16_nul(REALLOCATE_ROW_LABEL);
+
 /// Which rows to add below Item box, in this order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rows {
@@ -68,13 +78,65 @@ pub struct Rows {
     pub change_appearance: bool,
     /// "Rename Character": name entry.
     pub rename: bool,
+    /// "Reallocate Stats": the Reallocate screen, for a Soul Vessel.
+    pub reallocate: bool,
 }
 
 impl Rows {
     /// Whether any row is wanted, i.e. whether to install at all.
     pub const fn any(self) -> bool {
-        self.change_appearance || self.rename
+        self.change_appearance || self.rename || self.reallocate
     }
+}
+
+/// Why the Reallocate row does not open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoReallocation {
+    /// The class id is not one of the eight; no base to count from.
+    UnknownClass(u32),
+    /// A stat is below the class's starting value: a character no level-up or respec produces.
+    /// The screen floors every stat at the class base and its confirm never passes.
+    BelowClassBase,
+    /// At the class's starting stats: no level to move. The screen's confirm needs one.
+    NoLevelAboveBase,
+    /// No Soul Vessel held. The firekeepers refuse here (their message 1206); the screen would
+    /// otherwise reallocate for nothing.
+    NoSoulVessel,
+}
+
+/// Whether a character may reallocate: what the firekeepers' script and the screen require.
+///
+/// `class_id` is `player_data + `[`ds2_rva::PLAYER_DATA_CLASS_OFFSET`], `stats` the nine levelled
+/// stats in the game's order, `vessels` the Soul Vessels held. `Ok` carries the levels above the
+/// class's base -- the points the screen hands back to spend.
+///
+/// # Errors
+///
+/// The first of the [`NoReallocation`] reasons that applies, in the order they are declared.
+pub fn may_reallocate(
+    class_id: u32,
+    stats: &[u16; 9],
+    vessels: u32,
+) -> Result<u32, NoReallocation> {
+    use ds2_build_import_core::class::StartingClass;
+    let class =
+        StartingClass::from_game_id(class_id).ok_or(NoReallocation::UnknownClass(class_id))?;
+    let base = class.base();
+    if stats.iter().zip(base).any(|(&have, floor)| have < floor) {
+        return Err(NoReallocation::BelowClassBase);
+    }
+    let above: u32 = stats
+        .iter()
+        .zip(base)
+        .map(|(&have, floor)| u32::from(have - floor))
+        .sum();
+    if above == 0 {
+        return Err(NoReallocation::NoLevelAboveBase);
+    }
+    if vessels == 0 {
+        return Err(NoReallocation::NoSoulVessel);
+    }
+    Ok(above)
 }
 
 /// How many game ticks after the class/gift commit was skipped the result is logged, so the face
@@ -111,6 +173,7 @@ mod tests {
         for (text, wide) in [
             (ROW_LABEL, &ROW_LABEL_UTF16[..]),
             (RENAME_ROW_LABEL, &RENAME_ROW_LABEL_UTF16[..]),
+            (REALLOCATE_ROW_LABEL, &REALLOCATE_ROW_LABEL_UTF16[..]),
         ] {
             let decoded = String::from_utf16(&wide[..text.len()]).unwrap();
             assert_eq!(decoded, text);
@@ -128,6 +191,38 @@ mod tests {
         );
         assert!(!open_now(true, None), "no HUD: title or load");
         assert!(!open_now(false, Some(0)));
+    }
+
+    #[test]
+    fn reallocation_needs_a_level_above_the_class_base_and_a_vessel() {
+        const DEPRIVED: u32 = 10;
+        const SORCERER: u32 = 7;
+        // The character measured 2026-10-03: every stat 1 on a Deprived.
+        assert_eq!(
+            may_reallocate(DEPRIVED, &[1; 9], 99),
+            Err(NoReallocation::BelowClassBase)
+        );
+        assert_eq!(
+            may_reallocate(DEPRIVED, &[6; 9], 99),
+            Err(NoReallocation::NoLevelAboveBase)
+        );
+        let mut one_up = [6; 9];
+        one_up[4] = 7;
+        assert_eq!(may_reallocate(DEPRIVED, &one_up, 1), Ok(1));
+        assert_eq!(
+            may_reallocate(DEPRIVED, &one_up, 0),
+            Err(NoReallocation::NoSoulVessel)
+        );
+        // Every class counts from its own base: a Sorcerer's 14 INT is not a level.
+        let sorcerer = [5, 6, 5, 12, 3, 7, 14, 4, 8];
+        assert_eq!(
+            may_reallocate(SORCERER, &sorcerer, 99),
+            Err(NoReallocation::NoLevelAboveBase)
+        );
+        assert_eq!(
+            may_reallocate(3, &[20; 9], 99),
+            Err(NoReallocation::UnknownClass(3))
+        );
     }
 
     #[test]
