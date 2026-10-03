@@ -6118,11 +6118,21 @@ def main() -> int:
         "--weapon-sync",
         dest="weapon_sync",
         action="store_true",
+        default=True,
+        help="the default, kept so old command lines still parse: weapon sync on.",
+    )
+    parser.add_argument(
+        "--no-weapon-sync",
+        dest="weapon_sync",
+        action="store_false",
         help=(
-            "while another player is in the world, lower every weapon in our inventory above the "
-            "highest weapon level any of them has equipped, and restore them when they leave. A "
-            "save made while capped keeps the real levels. F6 (the [weapon_sync] key) turns it on and off in "
-            "game. Runs alongside --voice-chat: both share one net session update detour."
+            "leave weapon sync off. ON by default for our own runs, OFF in a release: the release "
+            "config has no [weapon_sync] section and the DLL's default is off (user directive "
+            "2026-10-02). While another player is in the world, every weapon in our inventory "
+            "above the highest weapon level any of them has equipped is lowered to it, and "
+            "restored when they leave. A save made while capped keeps the real levels. F6 (the "
+            "[weapon_sync] key) turns it on and off in game. Runs alongside --voice-chat: both "
+            "share one net session update detour."
         ),
     )
     parser.add_argument(
@@ -6141,11 +6151,19 @@ def main() -> int:
         "--armor-sync",
         dest="armor_sync",
         action="store_true",
+        default=True,
+        help="the default, kept so old command lines still parse: armour sync on.",
+    )
+    parser.add_argument(
+        "--no-armor-sync",
+        dest="armor_sync",
+        action="store_false",
         help=(
-            "a feature of its own, with or without --weapon-sync: while another player is in the "
-            "world, lower every armour piece in our inventory (worn or not) above the highest "
-            "armour reinforcement level any of them wears, and restore them when they leave. A "
-            f"save made while capped keeps the real levels. {ARMOR_SYNC_DEFAULT_KEY} (the "
+            "leave armour sync off. ON by default for our own runs, OFF in a release, like "
+            "weapon sync. A feature of its own: while another player is in the world, every "
+            "armour piece in our inventory (worn or not) above the highest armour reinforcement "
+            "level any of them wears is lowered to it, and restored when they leave. A save made "
+            f"while capped keeps the real levels. {ARMOR_SYNC_DEFAULT_KEY} (the "
             f"[{ARMOR_SYNC_SECTION}] key) turns it on and off in game."
         ),
     )
