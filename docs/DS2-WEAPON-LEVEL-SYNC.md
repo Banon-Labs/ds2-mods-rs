@@ -14,6 +14,20 @@ the running process is being held for another investigation.
 - **[inferred]** means it follows from what was read but was not traced to the end. Each one
   says what would prove it.
 
+## On by default in our own runs, off in a release (2026-10-02)
+
+User requirement: "you can have them on by default for me, but off by default as a release. As
+long as, when I play with my friend tomorrow, I can have +10 weapons, and then join him, and my
+weapons and armor get downscaled if needed."
+
+`scripts/ds2-run.py` now writes `enabled = true` in both `[weapon_sync]` and `[armor_sync]` unless
+it is given `--no-weapon-sync` / `--no-armor-sync`. A release is unchanged: `.github/dist-ds2-mods.toml`
+has neither section, and the DLL's default without one is off. Joining a friend is the non-invader
+rule (`policy::cap_for` through `cap_in` with `hosting=false`): our gear is capped at the highest
+level the friend has equipped, weapons against weapons and armour against armour. Seamless Co-op
+players reaching the remote roster has not been measured; the first real session's log should show
+`ds2-weapon-sync: cap none -> +N ... people=1`.
+
 ## Hosting an invader: match the highest invader (2026-10-01)
 
 User requirement: "update our weapon/armor downscalers during multiplayer so they work if I'm
