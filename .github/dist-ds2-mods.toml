@@ -1,141 +1,76 @@
-# DARK SOULS II mod settings. Put this file in the folder that holds `DarkSoulsII.exe`, beside
-# `dinput8.dll` -- both the DLL and `ds2-launcher.exe` read it from there.
-#
-# Every key in here is optional. A missing key means the built-in default, and every feature's
-# built-in default is off -- the game as shipped. This file turns on two things, `[voice_chat]`
-# and `[estus_max]`, and otherwise says what there is to change.
+# DARK SOULS II mod settings. Put this file beside DarkSoulsII.exe and dinput8.dll.
+# Every key is optional: a missing key means the built-in default, and every built-in default is
+# the game as shipped. Keys marked (live) take effect about a second after you save the file.
 
-# ---------------------------------------------------------------------------------------------
-# [launcher] -- only read by `ds2-launcher.exe`, and only for DLLs that cannot be loaded from
-# inside the running game. If you are not running Seamless Co-op you do not need the launcher at
-# all: start the game through Steam as usual and `dinput8.dll` loads on its own, with Steam
-# playtime, the overlay and cloud saves intact. The launcher gives all three up, because Steam is
-# not the thing starting the game.
-# ---------------------------------------------------------------------------------------------
-[launcher]
+# ============================================================================================
+# Online and co-op
+# ============================================================================================
 
-# DLLs to inject, in the order written. Paths are relative to this folder unless they start from
-# a drive or a root.
-#
-# DO NOT PUT `dinput8.dll` IN THIS LIST. The game imports it statically, and the first injected
-# thread runs process initialisation -- static imports and their DllMains -- before its own start
-# routine, so this repo's loader is already in before anything here. Naming it would load it
-# twice.
-#
-# ORDER IS LOAD ORDER, and load order is the contract: two mods that hook the same function
-# resolve in it. `[seamless]` below, when enabled, goes in first whether or not it is named here,
-# and naming it twice still loads it once.
-#
-# If any file in this list is missing, the launch is refused and NO game process is started. A
-# session gets the whole list or does not exist.
-dlls = []
+[offline]
+# On by default. These mods patch the game in memory, which FromSoftware's servers look for;
+# this keeps you off them. Ignored while [seamless] is enabled.
+enabled = true
+pin_flag = true        # never leave the offline state the game boots in
+report_offline = true  # every "am I online?" check answers no
+block_sockets = true   # refuse non-loopback connections, incl. the server login the flags miss
 
-# The executable to start. Change it only if yours is named something else.
-exe = "DarkSoulsII.exe"
-
-# ---------------------------------------------------------------------------------------------
-# [seamless] -- DARK SOULS II Seamless Co-op, which is SOMEBODY ELSE'S MOD and is not shipped
-# here. Install it yourself, keep it updated yourself: it refuses to boot on a build it considers
-# out of date, and says so on a dialog rather than in a log, so a copy bundled by us would go
-# stale on its author's schedule and fail as a hang you could not diagnose.
-# ---------------------------------------------------------------------------------------------
 [seamless]
-
-# `false` is the shipped default, and deliberately so -- loading a foreign binary into your game
-# is not something a default should do without being asked. Set it to `true` once Seamless is
-# installed, and start the game with `ds2-launcher.exe` rather than through Steam. `[offline]`
-# below turns itself off while this is true, because co-op cannot connect through it.
+# Seamless Co-op is someone else's mod: install and update it yourself. Set enabled = true once
+# it is installed, then start the game with ds2-launcher.exe instead of Steam.
 enabled = false
-
-# Where its DLL is. This is the path its own launcher uses, so leaving it alone is right for a
-# normal install. Backslashes and forward slashes mean the same thing.
+# Its DLL, relative to this folder.
 dll = "SeamlessCoop/ds2sc.dll"
-
-# The save container Seamless uses, which must match `save_file_extension` in its own
-# `ds2sc_settings.ini`. Vanilla is `sl2`; Seamless ships `co2` and keeps its characters apart
-# from your offline ones that way.
+# Must match save_file_extension in its ds2sc_settings.ini (vanilla saves are sl2).
 save_file_extension = "co2"
 
-# ---------------------------------------------------------------------------------------------
-# [offline] -- ON BY DEFAULT, AND UNDERSTAND WHAT YOU ARE TURNING OFF. Everything in this mod
-# patches the game's code in memory, which is what FromSoftware's matchmaking servers watch for.
-# These four keys keep you off them. Ignored while `[seamless] enabled = true`.
-# ---------------------------------------------------------------------------------------------
-[offline]
-enabled = true
-pin_flag = true
-report_offline = true
-block_sockets = true
+[launcher]
+# Only read by ds2-launcher.exe, which you need only for Seamless or other DLLs that must be
+# injected before the game starts. Starting through it costs Steam playtime, overlay and cloud saves.
+# Extra DLLs, in load order; one missing file refuses the launch. Never list dinput8.dll.
+dlls = []
+exe = "DarkSoulsII.exe"
 
-# ---------------------------------------------------------------------------------------------
-# [menu_row] -- extra rows on the in-game pause menu. None with no file present, and with none the
-# pause menu is the game's own.
-# ---------------------------------------------------------------------------------------------
-[menu_row]
-
-# Which rows appear, in this order. All five, in the order they read best:
-#   rows = ["load-build-from-url", "load-character-from-file", "save-game-to-file", "build-recommender", "quit-to-desktop"]
-# `build-recommender` opens the PvP build recommender panel. Its Apply puts a generated build on
-# the character you are playing, and like Load from URL it raises soul memory, which cannot be
-# undone; the panel asks before it does.
-# Keep it on one line. The reader is a line-based key-value parser, not a TOML parser: an array
-# split across lines parses as `rows = [` and every continuation line is discarded.
-rows = []
-
-# ---------------------------------------------------------------------------------------------
-# [save_block] -- stop the game saving by itself: no five-minute autosave, no save at a bonfire,
-# no save on the way out to the title. Off with no file present.
-# ---------------------------------------------------------------------------------------------
-[save_block]
-# Set to true and the `save-game-to-file` row above is the only thing that writes your character.
-# Anything since your last press of that row is lost when the game closes. Ignored, and the game
-# keeps saving, if that row is not on the menu.
-enabled = false
-
-# ---------------------------------------------------------------------------------------------
-# [voice_chat] -- a key that flips the game's own Voice chat option (Options > Game > Voice chat)
-# on and off, the same way changing it in that menu does. It takes effect at once, and it is kept
-# only if the game saves afterwards, like any option change. The menu's own row still works.
-# ---------------------------------------------------------------------------------------------
 [voice_chat]
+# A key that toggles Options > Game > Voice chat, kept only if the game saves afterwards.
 enabled = true
-
-# The key. Any name the other hotkeys here accept, with modifiers if you like: "F8", "Ctrl+V".
-# Set it to "" to unbind it. Editing this while the game runs takes effect in about a second.
+# (live) A hotkey name, e.g. "F8" or "Ctrl+V"; "" unbinds it.
 key = "F8"
-
-# What a press says out loud, so you know which way it went: "en" for "Voice chat on/off", "pl"
-# for the Polish pair, or "" for silence. Also takes effect in about a second.
+# (live) Spoken on each press: "en", "pl" or "" for silence.
 announce = "en"
 
-# ---------------------------------------------------------------------------------------------
-# [invasion_path] -- a trail of the game's own Prism Stones along a walkable route to every other
-# player in your session. Nothing is drawn for anyone closer than 30 metres. Needs a co-op
-# session to have anyone to lead to. Off by default: set to true to load it.
-# ---------------------------------------------------------------------------------------------
 [invasion_path]
+# A trail of Prism Stones along a walkable route to every other player more than 30 m away.
+enabled = false
+# Toggle key.
+toggle_key = "semicolon"
+marker_effect_id = 833  # (live) 833-839 are the stone's seven colours, 0 = none
+
+# ============================================================================================
+# Pause menu and saves
+# ============================================================================================
+
+[menu_row]
+# Extra pause-menu rows, in this order. Keep the list on one line: the reader is line-based.
+#   load-build-from-url       apply a soulsplanner build to this character (raises soul memory)
+#   load-character-from-file  pick a save for the next launch to load
+#   save-game-to-file         save, then copy the save file where you choose
+#   build-recommender         the PvP build recommender panel (Apply raises soul memory)
+#   quit-to-desktop           quit at once, no confirmation and no save
+# All of them:
+#   rows = ["load-build-from-url", "load-character-from-file", "save-game-to-file", "build-recommender", "quit-to-desktop"]
+rows = []
+
+[save_block]
+# Refuse the game's own saves (autosave, bonfire, quit), so save-game-to-file is the only save and
+# anything after your last press of it is lost. Ignored unless that row is in [menu_row] rows.
 enabled = false
 
-# The key that turns the trail on and off while you play.
-toggle_key = "semicolon"
+# ============================================================================================
+# Gameplay and HUD
+# ============================================================================================
 
-# The stone laid at each step. 833 is the Prism Stone, and 833 to 839 are its seven colours; 0
-# lays none. Editing this while the game runs takes effect in about a second.
-marker_effect_id = 833
-
-# ---------------------------------------------------------------------------------------------
-# [estus_max] -- ON. Every time a character loads, your Estus Flask's charges and heal level are
-# raised to the game's maximum (12 and +6 as shipped) through the game's own upgrade setter. Solo:
-# it changes only your flask and reads nothing about other players. Set to false to keep the
-# flask as the save has it. Read at startup.
-# ---------------------------------------------------------------------------------------------
 [estus_max]
-enabled = true
+enabled = true  # Estus Flask at max charges and heal (12 and +6) on every load
 
-# ---------------------------------------------------------------------------------------------
-# [item_warn] -- ON. A red X on the icon of any weapon, armour piece or spell your stats cannot
-# use, and on spells there are no attunement slots for. Display only: it changes no item and
-# reads nothing about other players. Set to false to hide the marks. Read at startup.
-# ---------------------------------------------------------------------------------------------
 [item_warn]
-enabled = true
+enabled = true  # red X on items your stats or attunement slots can't use
