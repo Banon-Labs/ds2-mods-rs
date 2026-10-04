@@ -1779,808 +1779,231 @@ def config_text(
     if release_config_text is not None:
         return release_config_text
     settings, _ = PROBE_ARMS[probe]
-    # THE LIST KEY OVERRIDES `enabled`, AND IT IS NEVER WRITTEN FROM HERE. It was, through a
-    # `--rows` flag, and that flag cost a session: a run launched with two of the four names
-    # narrowed the menu to two rows, and the missing pair read as a regression in the DLL rather
-    # than as the launcher having been told to leave them out. Every row is on by default and the
-    # launcher's job is to launch the default; a player who wants fewer edits this line in the file
-    # it is commented into, where the choice is visible next to the thing it changes.
-    every_row = ", ".join(f'"{name}"' for name in MENU_ROW_ROW_NAMES[:MENU_ROW_MAX_ADDED])
-    # The owner's own setup, and so this launcher's default since 2026-09-25: every row, the game's
-    # own saving off, and the autoload `main` works out. The DLL's defaults went the other way on the
-    # same day -- no rows, the game saving as shipped -- because those are what the release ships,
-    # and "I want these personally, but not on by default in my release" is the whole split.
-    # `--all-menu-rows` is kept, and now names the default.
-    if not menu_rows_no_save:
-        # ALL of them or none, never a subset, which is the whole lesson of the comment above: a
-        # subset written from here looks like a DLL that lost rows.
-        menu_row_rows_line = (
-            f"# WRITTEN BY ds2-run.py: every row this table knows, in the default order.\n"
-            f"{KEY_MENU_ROW_ROWS} = [{every_row}]"
-        )
-    else:
-        # Every row EXCEPT the one that turns the game's own saving off.
-        #
-        # This is a named mode rather than an arbitrary subset, which is the distinction the
-        # comment above cares about: a run missing two rows nobody asked to remove looked like a
-        # DLL regression, and this removes exactly one, for a stated reason, and says so in the
-        # file. `save-game-to-file` registering is what installs `ds2-save-block`, and that block
-        # refuses every save the game makes for itself -- no autosave, nothing at a bonfire,
-        # nothing on the way out. Measured 2026-09-24: a session played under it logged
-        # `refused a save kind=10 ... nothing was written` and the container's mtime never moved,
-        # so the character's progress was being dropped on the floor.
-        kept = [name for name in MENU_ROW_ROW_NAMES[:MENU_ROW_MAX_ADDED] if name != "save-game-to-file"]
-        menu_row_rows_line = (
-            f"# WRITTEN BY --no-save-file-row: every row except `save-game-to-file`, so the\n"
-            f"# game saves itself normally. That row is the only thing that installs\n"
-            f"# `ds2-save-block`, and it is off here for exactly that reason.\n"
-            f"{KEY_MENU_ROW_ROWS} = [" + ", ".join(f'"{name}"' for name in kept) + "]"
-        )
-    # `[save_block]` follows the save row: on whenever it is listed, off with --no-save-file-row.
-    save_block_enabled = str(not menu_rows_no_save).lower()
-    # `[seamless] enabled` is NOT folded in here. The injector does that itself, from the
-    # `[seamless]` keys written above, and doing it in both places would put the same path in the
-    # list twice -- which its deduplication would survive, but only by silently disagreeing with
-    # the file a human is reading. One writer per fact.
+
+    def b(value: bool) -> str:
+        return str(value).lower()
+
+    # Every row, or every row but the save row with --no-save-file-row. Never an arbitrary subset:
+    # a `--rows` flag once wrote two of four names, and the missing pair read as a DLL regression.
+    rows = [
+        name
+        for name in MENU_ROW_ROW_NAMES[:MENU_ROW_MAX_ADDED]
+        if not (menu_rows_no_save and name == "save-game-to-file")
+    ]
+    row_list = ", ".join(f'"{name}"' for name in rows)
+    rows_note = (
+        "# --no-save-file-row: save-game-to-file is left out, so the game saves normally.\n"
+        if menu_rows_no_save
+        else ""
+    )
+    # `[seamless] enabled` is folded into the DLL list by the injector, not here: one writer per fact.
     launcher_dll_list = ", ".join(f'"{name}"' for name in launcher_dlls)
     crash_banner = (
         ""
         if fault_after_ms == NO_FAULT_MS
-        else (
-            "#\n"
-            "# *** THIS RUN IS ARMED TO CRASH ON PURPOSE. *** The loader raises 0xc0000005 on a\n"
-            "# dedicated thread after the delay below, to exercise the crash logger's FATAL path --\n"
-            "# the top-level filter and the minidump tier -- which a first-chance exception cannot\n"
-            "# reach. The game dying is the expected result, not a failure.\n"
+        else "# THIS RUN IS ARMED TO CRASH ON PURPOSE, to test the crash logger's fatal path.\n"
+    )
+    weapon_test = "".join(
+        f"{key} = {value}\n"
+        for key, value in (
+            (KEY_WEAPON_SYNC_TEST_CAP, weapon_sync_test_cap),
+            (KEY_SYNC_TEST_INVADER, sync_test_invader),
         )
+        if value is not None
+    )
+    armor_test = "".join(
+        f"{key} = {value}\n"
+        for key, value in (
+            (KEY_ARMOR_SYNC_TEST_CAP, armor_sync_test_cap),
+            (KEY_SYNC_TEST_INVADER, sync_test_invader),
+        )
+        if value is not None
     )
     return f"""\
-# DARK SOULS II mod settings. Read by `dinput8.dll` out of this directory -- the directory of the
-# running executable -- in `DllMain`, before the game's entry point.
-#
-# WRITTEN BY scripts/ds2-run.py ON EVERY LAUNCH. Edits to the two startup-only keys below are
-# overwritten by the next run, deliberately: the arm under test has to be the arm that was asked
-# for, and the launcher reads the arm back out of the log to prove it was.
-#
-# THIS FILE REPLACED TWO ENVIRONMENT VARIABLES, and the reason is measured rather than stylistic.
-# `DS2_ARXAN_PROBE` and `DS2_ARXAN_PROBE_SKIP_NEUTER` were set in the launcher's environment and
-# arrived at the game UNSET: `steam -applaunch` hands the request to an already-running Steam
-# client over IPC, and the game inherits THAT client's environment. A file beside the DLL travels
-# through no IPC at all, and both arms can now be run back to back with nothing to do in between.
+# DARK SOULS II mod settings, read by dinput8.dll and ds2-launcher.exe from the game folder.
+# Written by scripts/ds2-run.py on every launch: change its flags, not this file.
+# A missing key means the built-in default. Keys marked (live) are re-read about once a second
+# while the game runs; everything else is read once at startup.
 
-[{CONFIG_SECTION}]
-# STARTUP-ONLY. Both are consumed in DllMain, before the game's entry point, because that is the
-# only moment the choice can be made: `skip_neuter` decides whether Arxan's 48 stubs are patched
-# before the Arxan entry stub runs, and there is no un-neutering a live process. Editing either
-# one while the game is running changes nothing and says so in the log.
-{KEY_ENABLED} = {str(settings[KEY_ENABLED]).lower()}
-{KEY_SKIP_NEUTER} = {str(settings[KEY_SKIP_NEUTER]).lower()}
-# STARTUP-ONLY. "m1" is the control: a clean function Arxan never touched, where a surviving
-# detour says only that hooking works at all. "redirected" is applySpEffect, whose five entry
-# bytes ARE Arxan's redirect -- the only site where survival is evidence about Arxan.
-{KEY_SITE} = "{site}"
+# ============================================================================================
+# Boot and title screen
+# ============================================================================================
 
 [{INTRO_SECTION}]
-# STARTUP-ONLY. Detours the `enter` of the three boot substates -- FeSubStateWarningNoCopy,
-# FeSubStateTitleLogo, FeSubStateTitleUserPolicy -- and writes each one's terminal phase, which
-# is a transition every one of them already performs on itself under some condition the game
-# knows about. There are THREE logo screens, not one.
-#
-# ON by default; `--no-intro-skip` writes false. The key exists so that a boot failure can be
-# tested against this feature by editing one line, with no rebuild and nothing to re-stage. A
-# default that cannot be switched off is a default that cannot be ruled out.
-{KEY_INTRO_ENABLED} = {str(intro_skip).lower()}
+{KEY_INTRO_ENABLED} = {b(intro_skip)}  # skip the three logo screens
 
 [{DIALOG_SECTION}]
-# STARTUP-ONLY. Detours ONE function -- FeSubStateCommonWindowBase::v3, the update every message
-# box in the title flow shares -- and writes the result byte a button press writes. The dispatch
-# that closes the box reads that byte and nothing else about the press, so this is the press
-# rather than an imitation of it; the close, the animation and the phase transition all stay the
-# game's own.
-#
-# It answers three allowlisted boot dialogs and re-checks at runtime that their two decision
-# handlers are still the base class's empty stubs, so a box whose answer would DO something --
-# FeSubStateTitleDeleteProfile shares the same update and overrides one of them -- is left for the
-# player. Anything it declines to answer is named in the log.
-#
-# ON by default; `--no-dialog-skip` writes false. Separate from [{INTRO_SECTION}] on purpose: two
-# switches mean a boot failure can be pinned on one feature without rebuilding either.
-{KEY_DIALOG_ENABLED} = {str(dialog_skip).lower()}
+{KEY_DIALOG_ENABLED} = {b(dialog_skip)}  # answer the boot notice boxes that have nothing to decide
 
 [{TITLE_SECTION}]
-# STARTUP-ONLY, both keys. The last two things between boot and a usable menu, and they are NOT
-# the same kind of thing as the notice boxes above -- neither is suppressed.
-#
-# `{KEY_PRESS_ANY_BUTTON}` detours the poll behind the PRESS ANY BUTTON gate so it always reports a
-# press. That poll has exactly ONE caller in the whole image (inside FeSubStateTitleMain::v3), so
-# this reaches one gate rather than input handling. The gate that waits for the title sequence to
-# be up is left alone, and the game's own phase-1 body -- which is what builds the top menu -- runs
-# in full.
-#
-# `{KEY_PROCESS_WINDOWS}` zeroes the minimum display time on the "please wait" windows
-# (network check, server login, system-data save, profile load). Those wrap REAL asynchronous work
-# and are never skipped: the wait on "is it finished yet" is untouched, and only the artificial
-# floor that keeps the window up after the work is already done is removed.
-#
-# ON by default; `--no-press-any-button-skip` and `--no-process-window-skip` write false. Two keys
-# rather than one so a boot failure can be pinned on one hook.
-{KEY_PRESS_ANY_BUTTON} = {str(press_any_button).lower()}
-{KEY_PROCESS_WINDOWS} = {str(process_windows).lower()}
-# STARTUP-ONLY. `{KEY_HIDE_PROCESS_WINDOWS}` goes further: it reproduces the wait window's `enter`
-# WITHOUT its one call that draws a window, so the box never appears at all. The call that starts
-# the work is still made and the wait for that work is still honoured -- only the drawing is
-# dropped. It rides on the `{KEY_PROCESS_WINDOWS}` detour, so turning THAT off leaves the wait
-# windows completely alone.
-{KEY_HIDE_PROCESS_WINDOWS} = {str(hide_process_windows).lower()}
-# STARTUP-ONLY. `{KEY_TITLE_ANIMATION}` writes FeSubStateTitleMain's terminal phase once its phase-1
-# body has run, skipping phases 2 and 3 -- the flourish that plays after the press is registered.
-# Phase 1 is where the top-menu setup happens, so observing phase 2 or 3 means that setup is
-# already done and only the animation is left.
-{KEY_TITLE_ANIMATION} = {str(title_animation).lower()}
-# STARTUP-ONLY, and this is the one that removes the title logo animating in. Phase 1 of
-# FeSubStateTitleMain will not even LOOK for a button press until 0x1400f37f0 reports the scene's
-# current sequence is 0x67 -- the idle "press any button" state. That wait is the animation, so
-# `{KEY_PRESS_ANY_BUTTON}` on its own skips nothing visible. Forcing this gate too lets phase 1 run
-# on the first frame; its own body then calls the game's finish-sequence routine, which is how the
-# press path already handles being taken mid-animation.
-{KEY_TITLE_SEQUENCE_GATE} = {str(title_sequence_gate).lower()}
-# STARTUP-ONLY. `{KEY_TITLE_SETTLE}` puts FeSceneTitle straight into its settled state by playing
-# sequence 0x67 -- the state the gate above waits to observe -- rather than letting the 0x66 intro
-# sequence FeSubStateTitleMain::v1 started play out. THIS is what makes the menu usable as soon as
-# its data is available instead of being paced by an animation. It shares the
-# FeSubStateTitleMain::v3 detour with `{KEY_TITLE_ANIMATION}`, so either key installs that hook and
-# each behaviour is gated separately inside.
-{KEY_TITLE_SETTLE} = {str(title_settle).lower()}
-# STARTUP-ONLY. `{KEY_SUBSTATE_FLOORS}` lifts the ONE-SECOND FLOORS that
-# FeSubStateTitleSteamLoadSystemData and FeSubStateTitleInformation keep for themselves. Measured
-# at 879ms and 985ms, both spent AFTER the work they were waiting for had finished. They are not
-# process windows, so they have no min_duration field for `{KEY_PROCESS_WINDOWS}` to zero -- each
-# inlines a comparison against the pooled 1.0f literal instead, which is why the existing fix
-# never reached them. This sets each substate's OWN elapsed field at enter so the game's own
-# comparison passes; the shared constant is NOT touched (it has 2042 references). Only the floor
-# goes: Information's branch still returns while its download job is running.
-{KEY_SUBSTATE_FLOORS} = {str(substate_floors).lower()}
+{KEY_PRESS_ANY_BUTTON} = {b(press_any_button)}  # skip PRESS ANY BUTTON
+{KEY_PROCESS_WINDOWS} = {b(process_windows)}  # no minimum display time on "please wait" windows
+{KEY_HIDE_PROCESS_WINDOWS} = {b(hide_process_windows)}  # don't draw those windows at all (needs process_windows)
+{KEY_TITLE_ANIMATION} = {b(title_animation)}  # skip the flourish after the press
+{KEY_TITLE_SEQUENCE_GATE} = {b(title_sequence_gate)}  # don't wait for the title logo to animate in
+{KEY_TITLE_SETTLE} = {b(title_settle)}  # open the title screen already settled
+{KEY_SUBSTATE_FLOORS} = {b(substate_floors)}  # drop the 1 s floors on the system-data and news screens
 
 [{MENU_SECTION}]
-# STARTUP-ONLY. NOT a skip -- this is the only key here that changes what the title menu DRAWS
-# rather than how long it takes to get there, which is why it is its own section.
-#
-# The top menu is a fixed vector of SIX rows and the game never inserts or removes one; the only
-# per-row variable is one byte, computed from whether a save exists and whether online is
-# available. That byte does two separate things: it sets the cell state that decides whether the
-# cursor can land on the row, and it picks which sequence the row plays. On this layout the
-# unavailable sequence does not grey a row, it takes it off the screen -- which is why LOAD GAME
-# is simply absent until a save exists.
-#
-# `{KEY_SHOW_UNAVAILABLE}` swaps which of the two carries the meaning: the row is styled as
-# available so it is DRAWN, and its cell state is put straight back to the unavailable value so it
-# is STILL NOT SELECTABLE. Both are the game's own values in the game's own fields.
-#
-# The row is drawn in its normal style, not a greyed one: sequence ids index a layout resource
-# inside GameDataEbl.bdt, so which id looks greyed cannot be read out of the executable and is not
-# guessed at here. What this delivers is "visible and inert".
-#
-# ON by default; `--no-show-unavailable-menu-rows` writes false.
-{KEY_SHOW_UNAVAILABLE} = {str(show_unavailable).lower()}
-
-[{TIMELINE_SECTION}]
-# STARTUP-ONLY, and THE ONLY FEATURE HERE THAT DEFAULTS OFF. It measures; it does not fix.
-#
-# Detours two pieces of machinery rather than any named screen: FeStateFlow::update, which drives
-# whichever substate is resident, and FeSubStateBase::v6, the "drop my transitions" slot the flow
-# calls immediately before every leave -- checked against all 36 substate vtables, not one
-# overrides it. So every arrival and every departure is seen, including from classes nobody
-# thought to name. That is the point: per-class hooking already missed steps once in this repo.
-#
-# The two hooks are each other's check. A `leave` line whose `mismatch=true` means the arrival
-# sampler missed a transition and the durations after it are attributed to the wrong step.
-#
-# Timestamps are milliseconds from DllMain, which runs during import resolution -- BEFORE the
-# game's entry point. So the gap between t=0 and the first substate is the engine starting up,
-# and under Proton that may be the largest number in the log.
-#
-# OFF by default; `--boot-timeline` writes true. Only an exact `true` turns it on: for an
-# instrument the harmless direction of a typo is "did not measure", never "patched two extra
-# sites in a run that was not meant to be instrumented".
-{KEY_TIMELINE_ENABLED} = {str(boot_timeline).lower()}
+{KEY_SHOW_UNAVAILABLE} = {b(show_unavailable)}  # draw unavailable title rows (LOAD GAME with no save), still unselectable
 
 [{CONTINUE_SECTION}]
-# STARTUP-ONLY, and OFF by default. The first half of a native continue flow, and the half that
-# only watches.
-#
-# Detours FeSubStateTitleLoadDataList::v3 -- the character list's per-frame update, and the only
-# place the selected slot, the group's confirmed action and the outgoing phase are all in scope at
-# once. It logs one line per change: which slot the cursor is on, whether that slot is occupied,
-# what the ownership word says, and which substate the phase it wrote will transition to.
-#
-# It writes NOTHING into the game -- `slot` below is what drives the flow. This is the instrument
-# that made that possible: it is what showed that the two fields a shortcut would want to write are
-# outputs of the list group rather than inputs to it.
-#
-# OFF by default; `--continue-record` writes true. Only an exact `true` turns it on.
-{KEY_CONTINUE_RECORD} = {str(continue_record).lower()}
-# STARTUP-ONLY. The slot the character list opens on, 0-9. Negative leaves the game's own
-# selection alone, which is the default.
-#
-# Written in the list's own `enter`, before the list is built, because the list group reads this
-# field when it lays itself out and writes it back on every cursor move -- a later write would be
-# erased by the first press of a direction key. The list still opens and still does all of its own
-# setup: this is the cheap half of a continue flow, and if it is wrong you are looking at a
-# character list rather than a black screen.
-#
-# It refuses to select a slot the game would refuse: same bound the game applies, and the slot must
-# be occupied and not excluded. A rejected slot is named in the log and changes nothing.
-#
-# With a slot set, the game also skips the top menu: boot goes straight into that character with no
-# input at all, measured at 5841ms.
-{KEY_CONTINUE_SLOT} = {continue_slot}
-# STARTUP-ONLY. ON by default, and inert unless `slot` above is set.
-#
-# Holds FMOD's master channel group at zero from audio init until FeSubStateTitleStartIngame, so
-# the title music and the confirm sounds for the two menus nobody pressed do not play. The volume
-# is then restored to the number the game itself last applied -- read out of the sound manager
-# rather than reset to 1.0, so whatever you set in the options menu survives.
-#
-# Measured: armed during engine init, before the title state machine exists, and restored at
-# t=5740ms on the frame the game enters StartIngame. Both calls returned FMOD_OK.
-#
-# The lever is the game's own: [0x14166dfa8] is the MOFmodSoundManager singleton (named by RTTI),
-# +0x9f8 is the master channel group FMOD wrote there through getMasterChannelGroup, and setVolume
-# is called through the same fmodex64.dll import slot the game uses. Nothing in .text is patched
-# for the mute itself.
-#
-# Set to false to hear the title as the game plays it. Only an exact `false` turns it off.
-{KEY_CONTINUE_SILENCE} = {str(continue_silence).lower()}
-# STARTUP-ONLY. ON by default, and inert unless `slot` above is set.
-#
-# Calls the frontend's own FeGroupBase::close (0x1400f18b0) on the six-row top menu and on the
-# character list, from the detours the shortcut already owns -- so neither is drawn while the
-# autocontinue walks through it. It patches no extra sites.
-#
-# That close is nineteen instructions: play sequence 0x68 on the group's scene, bump a counter,
-# clear the group's open byte. Its mirror plays 0x66 to open, and ds2-dialog-skip already plays
-# 0x67 for settled, so 0x66/0x67/0x68 are one family. Both open and close test the open byte
-# first, which is what makes calling this from a per-frame detour safe.
-#
-# It hides two menus. It does NOT cover the logos or the title screen -- that wants the game's own
-# NOW LOADING page, and the call that raises it is still unknown.
-#
-# Set to false to watch the menus flash past. Only an exact `false` turns it off.
-{KEY_CONTINUE_HIDE_MENUS} = {str(continue_hide_menus).lower()}
+{KEY_CONTINUE_SLOT} = {continue_slot}  # boot straight into this character slot, 0-9; -1 = the normal title
+{KEY_CONTINUE_SILENCE} = {b(continue_silence)}  # mute the title while it auto-continues
+{KEY_CONTINUE_HIDE_MENUS} = {b(continue_hide_menus)}  # hide the menus while it auto-continues
+{KEY_CONTINUE_RECORD} = {b(continue_record)}  # log the character list's cursor and slot state
+
+# ============================================================================================
+# Online and co-op
+# ============================================================================================
 
 [{OFFLINE_SECTION}]
-# STARTUP-ONLY, all four. ON BY DEFAULT, and it is the only feature here whose default is on for a
-# reason that is not convenience: everything else in this mod patches `.text` in a running copy of
-# DARK SOULS II, which is exactly what FromSoftware's matchmaking servers watch for. A modded
-# client that logs in is a client that can be soft-banned.
-#
-# `{KEY_PIN_FLAG}` replaces `NetService::setOnline` (0x140513820) with `ret`. The service's own
-# constructor writes 0 into that flag four instructions in, so this does not IMPOSE offline -- it
-# prevents the game leaving the state it is built in.
-#
-# `{KEY_REPORT_OFFLINE}` replaces `NetService::isOnline` (0x140513600) with `xor eax,eax; ret`.
-# 34 call sites, every one followed by `test al,al`; `FeSubStateTitleOnlineCheck`'s own work
-# starter is one of them and returns without starting anything on a zero.
-#
-# `{KEY_BLOCK_SOCKETS}` fronts the game's own WS2_32 imports -- connect, sendto, getaddrinfo,
-# gethostbyname -- and refuses anything that is not loopback with WSAENETUNREACH, the error a
-# machine with no route gives. IT IS NOT REDUNDANT WITH THE OTHER TWO:
-# `FeSubStateTitleGameServerLogin`'s work starter (0x1400f9820) does NOT read the online flag, so
-# without this the login goes out on the wire while the menu says you are offline. Steam's own
-# sockets are untouched -- this patches one executable's import table, not the process.
-#
-# `--offline-no-socket-block` keeps the flag patches and drops the socket guard, which is the arm that measures how much
-# traffic the flag layer never reaches.
-{KEY_OFFLINE_ENABLED} = {str(offline).lower()}
-{KEY_PIN_FLAG} = {str(offline).lower()}
-{KEY_REPORT_OFFLINE} = {str(offline).lower()}
-{KEY_BLOCK_SOCKETS} = {str(offline and block_sockets).lower()}
-
-
-[{MENU_ROW_SECTION}]
-# NOT STARTUP. The only feature here whose hook is never reached during boot: it detours the item
-# builder for one PAUSE menu tab, which the game runs when FeGroupInGameTopSelect is constructed --
-# a game in progress and a press of the pause button away.
-#
-# OFF unless this says exactly `true`. The pause menu is six tabs; each tab's contents are a
-# DLFixedVector of (action, gate) entries, capacity five. The tab holding the quit item -- action 9,
-# FeGroupInGameReturnTitleCheck, the dialog that offers to save on the way to the title -- holds
-# three: Game Options, Screen Settings, Quit.
-#
-# THIS ADDS A FOURTH THAT QUITS TO DESKTOP WITHOUT ASKING. FeSubStateTitleShutdown::v1 is three
-# instructions -- load the title singleton, write 1 to +0x13a, return -- and GameManagerImp's
-# per-frame master update polls that byte, so the shutdown is the game's own. It does not save and
-# it does not ask; the quit-to-title row offers to save because THAT flow asks.
-#
-# FOUR HOOKS, and it is worth knowing which does what when a run disappoints:
-#   0x000a5900  the tab's item builder     appends the item
-#   0x000a6090  the tab's item dispatch    turns action 0x1000 into the shutdown
-#   0x000a5b50  the tab's cell namer       names the fourth cell, id 0x1eaccd
-#   0x00b54740  findDefinition             supplies that cell
-#
-# The last two are a pair. A row is drawn only if the grid's layout bind can resolve the cell's
-# scene path, so naming a cell the layout does not have is a measured null -- which is exactly what
-# an earlier run got, and which makes it this arm's control. The layout half substitutes the quit
-# tab's container definition with a copy declaring two more children (a row and its mark) whose
-# records are clones of row 0's, moved down one step. Nothing is written to disk.
-#
-# EVERY HOOK REFUSES RATHER THAN GUESSES. The builder demands (0x7,0) (0x8,0) (0x9,4); the namer
-# demands the quit tab's own base path; findDefinition demands seven children carrying seven known
-# ids. Read the log before believing a screen -- a refusal and a menu that was never opened look
-# identical there. `{MENU_ROW_LOG_PREFIX} container substituted ...` and `... cell named ...` are
-# the two lines that say the row should exist, and `row-extent` on the tab line is what says it
-# does.
-# {KEY_MENU_ROW_ENABLED} = true
-#
-# COMMENTED OUT BY THIS SCRIPT, ALWAYS, and it is the same reason the `{KEY_MENU_ROW_ROWS}` line below is.
-# Set, this key is the LEGACY spelling and the DLL's legacy branch adds ONE row -- quit-to-desktop --
-# and none of the other three. Every row is registered only when neither legacy key is set, which is
-# the `Default` source in the log. So `--menu-row`, a flag named after the rows, was the thing that
-# took three of them away: a run launched with it on 2026-09-23 to exercise a save-file row logged
-# `source=LegacyEnabled rows=[quit-to-desktop]` and did not have the row under test on screen. The
-# flag is gone and this line is a comment; uncomment it to get the one-row behaviour back.
-#
-# WHICH ROWS, and why this is a list. The ceiling is the grid's own layout bind, which stops looking
-# for cells after fifteen rows -- and the System tab ships three, so {MENU_ROW_MAX_ADDED} rows can be added and
-# there are {len(MENU_ROW_ROW_NAMES)} that want one. ALL OF THEM FIT; this key is now about ORDER and about turning
-# rows off, not about rationing slots. Naming more than {MENU_ROW_MAX_ADDED} is refused at registration with the
-# numbers in the log. A name this table does not know arms NOTHING and is reported: a typo must lose
-# a row you asked for, never add one you did not.
-#
-# It held TWO until the DLL stopped keeping its rows in the game's own item vector (capacity five)
-# and cell-namer list (capacity six), both of which are inline arrays whose sixth element would
-# land on their own count field. Nothing has measured how far down the banner stays legible, so
-# twelve is what the engine allows rather than a number anyone has looked at.
-#
-# Present, this key OVERRIDES `{KEY_MENU_ROW_ENABLED}` above and `[{BUILD_IMPORT_SECTION}] {KEY_BUILD_IMPORT_ENABLED}` below; absent,
-# those two still mean what they always did. The log line says which of the two a run read.
-#
-#   quit-to-desktop           quits to DESKTOP with no confirmation and no save
-#   load-build-from-url       the soulsplanner row described under [{BUILD_IMPORT_SECTION}]
-#   load-character-from-file  picks a .sl2/.zip/.7z/.rar for the NEXT launch to load
-#   save-game-to-file         asks the game to save, then copies the container where you say
-#
-# The load row takes effect on the next launch and not this one, and that is the GAME's doing rather
-# than a shortfall: DS2 saves on the way out of a game, so a session that re-points the save
-# directory and then quits writes the CURRENT character into the staged copy, and the LOAD GAME that
-# follows reads back the character you were replacing. So the row writes `{SAVE_FILE_HANDOFF_NAME}`
-# beside this file and the loader arms the redirect from it at attach, then DELETES it -- a handoff
-# that persisted would put you in somebody else's save on every launch from then on. Delete that file
-# by hand to cancel a pick.
-#
-# The save row refuses to write onto the container the game is playing, which is the DEFAULT path to
-# that mistake: its dialog opens in the save's own folder with the save's own name already filled in.
-# `{SAVE_FILE_LOG_PREFIX} exported bytes=... destination=...` is the line that says a copy happened,
-# and `... THE FLUSH WAS NEVER OBSERVED` is the one that says the copy is your last autosave rather
-# than the moment you pressed the row.
-{menu_row_rows_line}
-
-[{SAVE_BLOCK_SECTION}]
-# `true` refuses the game's own saves -- no autosave, nothing at a bonfire, nothing on the way out
-# -- so `save-game-to-file` is the only thing that writes the character. Honoured only while that
-# row is listed above. `--no-save-file-row` writes `false`.
-{KEY_SAVE_BLOCK_ENABLED} = {save_block_enabled}
-
-[{BUILD_IMPORT_SECTION}]
-# NOT STARTUP either, and a different kind of risk from the row above it. This one adds a "Load from
-# URL" row that reads a soulsplanner link off the clipboard (or takes a typed build number), fetches
-# the build over HTTPS, and APPLIES IT TO THE LIVE CHARACTER: soul memory, then the nine stats and
-# therefore the level, then the items, then every weapon, armour piece, ring, spell, hotbar slot and
-# the covenant, and finally the Estus Flask, taken to the maximum this game allows.
-#
-# EVERY WRITE IS A CALL INTO THE GAME'S OWN FUNCTION. Nothing here pokes a field the engine
-# maintains -- stats through PlayerParam::SetAllStats, souls through AddSouls, items through
-# ItemGive, slots through SetEquip, the covenant through PlayerCtrl's own setter, and the flask
-# through the same ItemInventory2::SetEstusProperty the Emerald Herald's dialogue calls. Each one is
-# read back afterwards, because several of them fail silently.
-#
-# OFF unless this says exactly `true`. It changes a character, and while a redirected save is
-# re-staged every launch, the game's own save is not.
-#
-# WHY IT NEEDS A NEWER STEAM INTERFACE. The game's own steam_api64.dll knows SteamUtils005, whose
-# ShowGamepadTextInput takes four arguments and cannot prefill; pchExistingText arrives in
-# SteamUtils007. ISteamClient012::GetISteamUtils takes a version STRING and passes it through to
-# steamclient64.dll, which vends up to 011 -- so this asks for 007 and gets a second interface whose
-# slot 0xa0 takes the prefill, while the game keeps its own 005 pointer untouched. Handing the game
-# the newer pointer would be a bug: 007 keeps the method at the SAME slot, so the game's four-arg
-# call would pass whatever was in r9 as a const char*.
-#
-# WHY IT WRITES THE GAME'S OWN KEYBOARD STATE. The game's GamepadTextInputDismissed_t listener
-# (0x00ff2040, fourteen branchless bytes) does not check whether the GAME asked for the keyboard,
-# and it is registered process-wide, so it fires for a session this mod opened. It writes m_state,
-# and that field is load-bearing twice over:
-#   * left dirty, SoftwareKeyboardManagerImpl::show refuses forever (it demands -1 at 0x140ff2317)
-#     and character naming silently falls back to the in-game widget for the rest of the process;
-#   * opened over the game's own session, FeSoftKeyImputJob harvests OUR text as the player's name.
-# So the mod refuses unless the field reads -1, claims it while open, and restores it on every path
-# including the error ones.
-#
-# READ THE LOG, NOT THE SCREEN. `{BUILD_IMPORT_LOG_PREFIX} field open, prefilled ...` is the line
-# that says the overlay drew something; `... no field: the Steam overlay is disabled` is the one
-# failure no amount of reading the executable could predict, because it is a property of the running
-# Steam client rather than of the game.
-# {KEY_BUILD_IMPORT_ENABLED} = true
-#
-# COMMENTED OUT BY THIS SCRIPT, ALWAYS, for the reason written under `[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ENABLED}`:
-# it is the other half of the DLL's legacy branch, and setting either one narrows the menu to the
-# rows those two keys name. The row itself is registered by the `{KEY_MENU_ROW_ROWS}` list -- or, as
-# here, by the default that list falls back to -- not by this key.
-
-[{INVENTORY_SORT_SECTION}]
-# NOT STARTUP. Four detours -- the constructor and destructor of the Inventory tab AND of the equip
-# screen's item picker -- installed in the same post-Arxan callback as everything else, plus a
-# per-frame tick borrowed from `ds2-menu-row`.
-#
-# IT ADDS NO FEATURE. DARK SOULS II already sorts the inventory -- `①：Sort`, the dialog headed
-# "How should the list be sorted?", and per-category keys including a real total attack rating
-# (the sum of all seven attack components). What the game does not ship is a way to MOVE that
-# button: `win32onlymessage.fmg` 10332..10341 is the complete list of rebindable menu actions and
-# sorting is not among them, riding instead on one of two generic Function keys, and there is no
-# controller remapping in this game at all. So this opens the shipped dialog from a button you
-# choose, and leaves the shipped `①` prompt working.
-#
-# THE EQUIP SCREEN IS THE OTHER HALF, and there the game ships no sort prompt at all -- so this is
-# not a rebinding there, it is the button that was never there. The sorting itself already is: the
-# picker's list is rebuilt by the same shared builder the Inventory tab uses, reading the same
-# per-category sort key, so a sort chosen in the Inventory tab already reorders the equip list.
-# What was missing is only a way to choose one without leaving the screen.
-#
-# It calls one function -- the shipped sort-dialog entry, which takes the group and nothing else and
-# refuses itself while another dialog is up. One copy serves both menus: they share a base class, so
-# the guard field and the dialog's parent mean the same thing in each, and everything else is
-# reached through virtual slots each class implements for itself. Nothing is injected into the input
-# path; a synthesised button press would also fire every OTHER thing the shipped Function key does
-# in whatever menu happened to be open.
-{KEY_INVENTORY_SORT_ENABLED} = {str(inventory_sort).lower()}
-# NOT startup-only, unlike everything above: these two are re-read about once a second while the
-# game runs, so a button can be moved without a restart. A value that does not parse keeps the one
-# already working and says so in the log.
-#
-# `{KEY_INVENTORY_SORT_KEY}` is a key NAME from `ds2-hotkey-config` ("F7", "]", "KP_Plus", "Insert"), empty for none.
-# `{KEY_INVENTORY_SORT_PAD}` is an XInput button: a b x y lb rb back start lthumb rthumb dpad_up dpad_down
-# dpad_left dpad_right. Empty for none. BOTH may be set; either one opens the dialog.
-#
-# `lthumb` -- LEFT STICK CLICK, L3 -- is the default because that is where ELDEN RING puts Sort, and
-# mirroring it is the whole point. That one value did NOT come out of a binary: ELDEN RING registers
-# its Sort prompt with menu-input id 0x2E and ships NO keyboard key-name strings at all (it draws
-# inputs as sprites), so there is no table to resolve the id against. The player named the button.
-# The keyboard default beside it, `F7`, is still just what the first test runs happened to use.
-{KEY_INVENTORY_SORT_KEY} = "{inventory_sort_key}"
-{KEY_INVENTORY_SORT_PAD} = "{inventory_sort_pad}"
-
-[{SAVE_REDIRECT_SECTION}]
-# Startup-only, and the one key here that can change where your progress is written. The game's own
-# save-directory builder is answered with this folder, so DS2 opens its own container name inside it
-# and both reads and writes that file for the rest of the session.
-#
-# Nothing is copied, and that is the whole design. The key this replaces named a `.sl2` file, and a
-# file cannot be played in place by a game that builds its own container name -- so it copied the
-# file into a staging folder, pointed the game there, and rewrote the copy from the same source on
-# the next launch. Every session started that way silently threw away its own progress. A folder
-# needs no copy, so there is no duplicate to play and nothing to overwrite.
-#
-# Empty means the game's own directory, which is the only safe default: a save location guessed on
-# the player's behalf is one they did not choose. `--save-dir` writes this; it takes a Linux path
-# and converts it, since the DLL runs inside the Proton prefix and sees `/home/you` as
-# `Z:\\home\\you`.
-#
-# A folder that is not there is refused, and the loader says so. It is not created, because DS2
-# hides the `LOAD GAME` row when it finds no container -- so a typo'd path would look exactly like
-# a save that had gone missing. A folder that exists but is empty is fine and starts a fresh
-# character there.
-{KEY_SAVE_REDIRECT_DIRECTORY} = "{save_directory}"
-
-[{SAVE_PICKER_SECTION}]
-# Read when a save-file row is pressed: what the "Load character from file" and "Save game to file"
-# rows open. The rows themselves are switched on by `[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS}`.
-# {KEY_SAVE_PICKER_OS_NATIVE}: true opens the Windows file dialog instead of the in-game panel.
-# {KEY_SAVE_PICKER_START_DIR}: the folder the panel opens in; empty means ~/Downloads.
-# {KEY_SAVE_PICKER_REMEMBER_DIR}: whether the panel reopens where the last pick was made.
-{KEY_SAVE_PICKER_OS_NATIVE} = false
-{KEY_SAVE_PICKER_START_DIR} = ""
-{KEY_SAVE_PICKER_REMEMBER_DIR} = true
-
-[{ITEM_WARN_SECTION}]
-# Read at startup. A red X on the icon of any weapon, armour piece or spell whose requirements the
-# character does not meet, and on spells there are no attunement slots for, drawn by
-# `ds2-item-warn`. On by default (user directive 2026-09-27); `--no-item-warn` writes false.
-#
-# The check it uses is the PRESENTATION one (`FUN_1400bcde0`, the detail pane's), not the mechanics
-# one (`FUN_14034d3c0`). The two disagree and share no predicate: the mechanics check honours grip
-# -- two-handing HALVES a weapon's Strength requirement (`shr cx,1` at `0x14034d44c`) -- and the
-# presentation one takes no grip argument at all. An item in a list is not being held, so it has no
-# grip, which is the argument for the pane's answer. `ds2-mods-rs-6tz` revisits it after a run.
-#
-# Grep the log for `{ITEM_WARN_LOG_PREFIX}`; it names every site it patched and every one it refused.
-{KEY_ITEM_WARN_ENABLED} = {str(item_warn).lower()}
-
-[{VOICE_CHAT_SECTION}]
-# STARTUP-ONLY. A keyboard key (default F8) that toggles the game's own Options > Game > Voice chat
-# setting, drawn on the HUD by `ds2-voice-chat`. Off unless `--voice-chat` asked for it. The key is
-# `key` in this section; leaving it out keeps the default. Grep the log for `{VOICE_CHAT_LOG_PREFIX}`.
-{KEY_VOICE_CHAT_ENABLED} = {str(voice_chat).lower()}
-
-[{NET_EFFECTS_SECTION}]
-# Read at startup. A keyboard key (default F9) that applies a SpEffect (default 140001010, an sfx
-# and nothing else) to the local player through the game's own apply function. Off unless
-# `--net-effects` asked for it. `key` and `effect` in this section move it while the game runs;
-# leaving them out keeps the defaults. The key is read on [{INVASION_PATH_SECTION}]'s Present
-# clock, so `--net-effects` turns that section on too. Grep the log for `{NET_EFFECTS_LOG_PREFIX}`.
-{KEY_NET_EFFECTS_ENABLED} = {str(net_effects).lower()}
-
-[{MUSIC_PROBE_SECTION}]
-# Read at startup only. `ds2-music-probe` is the region music player: F10 (or `key` here) opens the
-# Music panel, which shows the playing track, seeks it, turns its repeat off, and edits each region's
-# playlist from any music track the game ships. The playlists live in `ds2-music-playlist.toml`
-# beside the game, which this script never writes. It also logs every music event the game starts,
-# pauses and stops. It fronts four FMOD import slots. On unless `--no-music-probe`. Grep the log for
-# `{MUSIC_PROBE_LOG_PREFIX}`.
-{KEY_MUSIC_PROBE_ENABLED} = {str(music_probe).lower()}
-
-[{HP_GAUGE_SECTION}]
-# STARTUP-ONLY. The HP bar and damage number floating over other characters, drawn by
-# `ds2-hp-gauge`: the bar grown and moved to sit centred over the target, and the number grown,
-# lifted clear of the bar and centred on it as a block.
-#
-# ON unless `--no-hp-gauge`. Every tuning key is optional and falls back to the value the DLL was
-# built with, so they are left out here; add any of these under this section to override it.
-# Distances are 720p layout units, scaled with the resolution; screen y grows downward.
-#
-#   text_scale = 1.25     multiplier on the game's scale for the number (1.25 -> 2.5x at 1440p)
-#   text_lift = 12        how far to raise the number
-#   text_dx = 0           nudge the number after centring, negative = left
-#   digit_advance = 8     width of one digit, which is what centring divides by
-#   bar_scale = 2.25      multiplier on the game's scale for the bar
-#   bar_dx = -98.4        move the bar right (negative = left)
-#   bar_dy = 6            move the bar down
-#
-# Grep the log for `{HP_GAUGE_LOG_PREFIX}`.
-{KEY_HP_GAUGE_ENABLED} = {str(hp_gauge).lower()}
-
-[{SOUL_MEMORY_GUARD_SECTION}]
-# STARTUP-ONLY. On every character load, `ds2-soul-memory-guard` logs whether the character's soul
-# memory could have paid for its soul level. It logs and refuses nothing. OFF unless
-# `--soul-memory-guard`. Grep the log for `{SOUL_MEMORY_GUARD_LOG_PREFIX}`.
-{KEY_SOUL_MEMORY_GUARD_ENABLED} = {str(soul_memory_guard).lower()}
-
-[{ESTUS_MAX_SECTION}]
-# Read at startup only. On every character load, `ds2-estus-max` raises our Estus Flask's uses and
-# effect levels to the game's maximum through the Emerald Herald's own setter, and logs both levels
-# as the game reads them back. Solo; it reads nothing about other players. ON by default;
-# `--no-estus-max` writes false. Grep the log for `{ESTUS_MAX_LOG_PREFIX}`.
-{KEY_ESTUS_MAX_ENABLED} = {str(estus_max).lower()}
-# A test instrument, off unless `--estus-max-reload-test`: once the first load is at max, return to
-# the title through the quit confirm's own "yes" and let `[continue]` load the same slot once more,
-# so the second load's line is read in the same process.
-{KEY_ESTUS_MAX_RELOAD_TEST} = {str(estus_max_reload_test).lower()}
-
-[{CHANGE_APPEARANCE_SECTION}]
-# Read at startup only. `ds2-change-appearance` adds "Change Appearance" below Item box in the
-# bonfire menu: the game's own character creator, committing only face, sex and body. Class, stats,
-# gift and gear stay. ON by default; `--no-change-appearance` writes false. Grep the log for
-# `{CHANGE_APPEARANCE_LOG_PREFIX}`.
-{KEY_CHANGE_APPEARANCE_ENABLED} = {str(change_appearance).lower()}
-
-[{RENAME_CHARACTER_SECTION}]
-# Read at startup only. Adds "Rename Character" below that row (or below Item box): the game's own
-# name entry. ON by default; `--no-rename-character` writes false. Same log prefix.
-{KEY_CHANGE_APPEARANCE_ENABLED} = {str(rename_character).lower()}
-
-[{REALLOCATE_STATS_SECTION}]
-# Read at startup only. Adds "Reallocate Stats" below those rows: the Reallocate screen the Things
-# Betwixt firekeepers open, for a Soul Vessel, once the character has a level above its class base.
-# ON by default; `--no-reallocate-stats` writes false. Same log prefix.
-{KEY_CHANGE_APPEARANCE_ENABLED} = {str(reallocate_stats).lower()}
-
-[{WEAPON_SYNC_SECTION}]
-# `enabled` is startup-only. While another player is in the world, `ds2-weapon-sync` lowers every
-# weapon of ours above the highest weapon level any of them has equipped, and puts them back when
-# they are gone: every weapon in the inventory, pack and box, and what is equipped. The save always
-# gets the real levels: the save writer is detoured to put them back in what it writes. It shares the net session update with `[voice_chat]`; both can be on. Off
-# unless `--weapon-sync`. `key` turns it on and off in game (default `{WEAPON_SYNC_DEFAULT_KEY}`,
-# live-reloaded). `test_cap` pretends a remote player at that level is present
-# (`--weapon-sync-test-cap N`), also live. Grep the log for `{WEAPON_SYNC_LOG_PREFIX}`.
-{KEY_WEAPON_SYNC_ENABLED} = {str(weapon_sync).lower()}
-{KEY_WEAPON_SYNC_KEY} = "{WEAPON_SYNC_DEFAULT_KEY}"
-{"" if weapon_sync_test_cap is None else f"{KEY_WEAPON_SYNC_TEST_CAP} = {weapon_sync_test_cap}"}
-{"" if sync_test_invader is None else f"{KEY_SYNC_TEST_INVADER} = {sync_test_invader}"}
-
-[{ARMOR_SYNC_SECTION}]
-# A feature of its own, on or off regardless of `[{WEAPON_SYNC_SECTION}]`. `enabled` is
-# startup-only. While another player is in the world, `ds2-weapon-sync`'s armour half lowers every
-# armour piece of ours (head, chest, hands, legs; worn, pack and box) above the highest armour
-# reinforcement level any of them wears, and puts them back when they are gone. The save always
-# gets the real levels. Off unless `--armor-sync`. `key` turns it on and off in game (default
-# `{ARMOR_SYNC_DEFAULT_KEY}`, live-reloaded). `test_cap` pretends a remote player whose best piece is
-# at that level is present (`--armor-sync-test-cap N`), also live. Grep the log for
-# `{ARMOR_SYNC_LOG_PREFIX}`.
-{KEY_ARMOR_SYNC_ENABLED} = {str(armor_sync).lower()}
-{KEY_ARMOR_SYNC_KEY} = "{ARMOR_SYNC_DEFAULT_KEY}"
-{"" if armor_sync_test_cap is None else f"{KEY_ARMOR_SYNC_TEST_CAP} = {armor_sync_test_cap}"}
-{"" if sync_test_invader is None else f"{KEY_SYNC_TEST_INVADER} = {sync_test_invader}"}
+# Keeps a modded client off FromSoftware's servers. --seamless turns it off: co-op needs the network.
+{KEY_OFFLINE_ENABLED} = {b(offline)}
+{KEY_PIN_FLAG} = {b(offline)}  # never leave the offline state the game boots in
+{KEY_REPORT_OFFLINE} = {b(offline)}  # every "am I online?" check answers no
+{KEY_BLOCK_SOCKETS} = {b(offline and block_sockets)}  # refuse non-loopback connections, incl. the server login the flags miss
 
 [{SEAMLESS_SECTION}]
-# A SECOND MOD, written by someone else, loaded into this same process.
-#
-# NOTHING HERE SHIPS IT. This key is a path. The other mod is installed by you, from its own
-# download, under its own licence, next to `DarkSoulsII.exe`; if the file is not at the path below
-# the DLL says so in the log and the game runs with this repo's features alone.
-#
-# THIS KEY DOES NOT LOAD IT. It says that mod is in this run, and the only thing the DLL does
-# with that is follow the save file it renames: `save_file_extension` in `ds2sc_settings.ini` is
-# `co2` by default, so the container becomes `DS2SOFS0000.co2` and every save feature above -- load
-# from file, save to file, load a build -- has to open that name instead of `DS2SOFS0000.sl2`.
-#
-# The loading is done by `{STAGED_LAUNCHER_NAME}`, this repo's own injector, which
-# `scripts/ds2-run.py --seamless` runs in place of the mod's `ds2sc_launcher.exe`. An in-process
-# `LoadLibraryW` was tried from four slots and every one mapped the DLL and left it inert -- it
-# read no settings, installed no hooks, and the game went on opening `.sl2`. The injector creates
-# the process suspended, injects, then resumes, and that ordering is the thing that matters: a DLL
-# loaded by an import cannot reproduce it, because its own DllMain is part of the initialisation
-# that has to not have happened yet. See `[{LAUNCHER_SECTION}]` below for the list it works from.
-#
-# BEFORE THE FIRST CO-OP RUN, two things that have no in-game explanation:
-#   * `cooppassword` in `SeamlessCoop/ds2sc_settings.ini` must not be empty, or the mod stops the
-#     boot on its own dialog. Everyone in a session needs the same string.
-#   * the co-op save starts empty. `--seamless` copies `DS2SOFS0000.sl2` to the co-op extension
-#     when that file does not exist yet, and never overwrites one that does.
-#
-# `[offline]` above and this are mutually exclusive: that section fronts the socket imports, so a
-# co-op mod under it would run, report success and never connect. `--seamless` therefore turns
-# `[offline]` off for the run and says so.
-#
-# Grep the log for `{SEAMLESS_LOG_PREFIX}`.
-{KEY_SEAMLESS_ENABLED} = {str(seamless).lower()}
+# Seamless Co-op is someone else's mod, installed by you; this only points at it.
+{KEY_SEAMLESS_ENABLED} = {b(seamless)}  # inject it at launch and use its save file
+# Its DLL, relative to the game folder.
 {KEY_SEAMLESS_DLL} = "{seamless_dll}"
 
 [{LAUNCHER_SECTION}]
-# Extra DLLs that get into the game from OUTSIDE it, injected before it runs an instruction.
-#
-# Read by `{STAGED_LAUNCHER_NAME}` rather than by `{STAGED_DLL_NAME}`, because by the time this
-# repo's own DLL is running it is already too late: the process exists and its main thread has run
-# `LdrInitializeThunk`, which is exactly the state the four-slot measurement above showed a mod
-# cannot be loaded into. The injector is the only thing here that runs before that.
-#
-# Paths are relative to the game directory, or absolute. They are injected in the order written,
-# each fully loaded before the next is asked for, because two mods that hook the same function
-# resolve in load order and a list whose order did not survive would make that unfixable from
-# here. `[{SEAMLESS_SECTION}] {KEY_SEAMLESS_ENABLED}` puts its own DLL at the front of this list
-# and is deduplicated against it, so naming it in both places still loads it once.
-#
-# Every entry must exist before anything starts. A missing file is refused with the line to edit,
-# and no process is created -- a session gets the whole list or does not exist, because a game
-# that came up with some of its mods in it has no way to say from the inside which ones.
-#
-# `{STAGED_DLL_NAME}` is deliberately not in this list. It is a static import of
-# `DarkSoulsII.exe`, so the loader maps it unasked, and the injected thread runs process
-# initialisation before its own start routine -- meaning this repo's loader is in first and these
-# follow.
-#
-# Grep the log for `{LAUNCHER_LOG_PREFIX}`.
+# DLLs ds2-launcher.exe injects before the game starts, in load order; all must exist.
+# Never list dinput8.dll (the game loads it itself). [{SEAMLESS_SECTION}]'s DLL goes first on its own.
 {KEY_LAUNCHER_DLLS} = [{launcher_dll_list}]
 
+[{WEAPON_SYNC_SECTION}]
+# While another player is here, lower our weapons to their highest level. Saves keep the real ones.
+{KEY_WEAPON_SYNC_ENABLED} = {b(weapon_sync)}
+# (live) Toggle key.
+{KEY_WEAPON_SYNC_KEY} = "{WEAPON_SYNC_DEFAULT_KEY}"
+{weapon_test}
+[{ARMOR_SYNC_SECTION}]
+# The same for armour reinforcement, independent of [{WEAPON_SYNC_SECTION}].
+{KEY_ARMOR_SYNC_ENABLED} = {b(armor_sync)}
+# (live) Toggle key.
+{KEY_ARMOR_SYNC_KEY} = "{ARMOR_SYNC_DEFAULT_KEY}"
+{armor_test}
 [{INVASION_PATH_SECTION}]
-# A direction to every other player in your session, drawn over the world.
-#
-# THE ONLY FEATURE IN THIS FILE THAT DETOURS A RENDERING FUNCTION. Everything else here hooks a
-# menu method or reads memory; this one hooks `IDXGISwapChain::Present` -- in `dxgi.dll`, outside
-# the game image and therefore outside everything this repo has learned about Arxan -- and appends
-# triangles to a frame that was already finished. It is OFF by default for that reason and because
-# it draws through the screen during multiplayer, which is a thing to opt into rather than to
-# discover.
-#
-# What it draws is a walkable ROUTE along DARK SOULS II's own navigation mesh, and an arrow when
-# the planner reports no way to walk there. Asking for a route was believed impossible here for a
-# while -- the request takes navigation-graph ids, and the conversion from a world position was
-# recorded as an asynchronous engine job. It is not one: it is a plain synchronous call that
-# returns the id in a register. See `crates/ds2-invasion-path/src/navquery.rs`.
-{KEY_INVASION_PATH_ENABLED} = {str(invasion_path).lower()}
-# Live, like the two sort bindings above: re-read about once a second, so the key moves without a
-# restart. A name that does not parse keeps the one already working and says so in the log.
-#
-# `{KEY_INVASION_PATH_TOGGLE}` is a key NAME from `ds2-hotkey-config`. `semicolon` rather than a function key,
-# and that default was bought with a live failure in the sibling workspace: its overlay shipped on
-# F7, a 15-DLL run found another mod polling VK_F7 in the same process, and the key warped the
-# player instead of drawing anything with nothing warning about it.
-#
-# `{KEY_INVASION_PATH_START_ENABLED}` begins with the overlay already on, which is what a test run wants: it means
-# the roster and camera code runs without anyone having to press anything.
+# A trail along a walkable route to every other player in the session, drawn from Present.
+{KEY_INVASION_PATH_ENABLED} = {b(invasion_path)}
+# (live) Toggle key.
 {KEY_INVASION_PATH_TOGGLE} = "{invasion_path_key}"
-{KEY_INVASION_PATH_START_ENABLED} = {str(invasion_path_start_enabled).lower()}
-# THE PRISM STONE TRAIL. `0` is off. `833` is the Prism Stone's own effect -- the item DARK SOULS
-# II calls a Prism Stone and ELDEN RING renamed to Rainbow Stone, whose glowing pebble is the
-# whole reason the sibling crate places effects along its route at all. `833..=839` are its seven
-# colours, a seven-entry table the game reaches through an emevd instruction named
-# `七色石発射`, "fire seven-colour stone".
-#
-# ON by nothing: spawning an effect is the only thing this DLL does that changes the game rather
-# than drawing over it, and the stones are placed by the engine's own spawn from the game's own
-# tick. Live, like every setting here -- change the id with the game running.
-{KEY_INVASION_PATH_MARKER_EFFECT_ID} = {invasion_path_marker_effect_id}
-# THE ONLY WAY A SOLO PLAYER CAN SEE ANY OF THIS WORK.
-#
-# Everything above starts with ANOTHER PLAYER in your session. Alone, the roster reads
-# `remotes=0`, no route is ever asked for, no stone is ever placed, and every line in the log is
-# an install line -- "hooked", "armed", "requested" -- with not one execution line among them. A
-# real session read `characters=6 players=1 remotes=0`: six objects walked and nothing to point
-# at.
-#
-# The other five objects are the answer. Turn this on and the overlay routes to the nearest
-# NON-PLAYER character instead: a live object at a real world position, standing on the navmesh,
-# so the whole chain runs -- snap both ends, ask the planner, decode the path, space the stones
-# along it, spawn each one. A solo player standing in Majula exercises every line of it.
-#
-# It narrates. Three failures look identical on the ground -- an effect that is not in this map,
-# a spawn the engine's quality throttle discarded, and one that worked and is simply not where
-# you are looking -- so it reads the quality byte and the missing-effect tree AT the attempt,
-# when two of the three are still visible. It sweeps all seven colours, one per stone, so one run
-# says which of them appear. Then it watches them at 1 s, 3 s and 10 s -- which is what says
-# whether a Prism Stone LINGERS or merely flashes -- and takes them down again.
-#
-# OFF unless you are testing. It routes to something you did not ask for and spawns effects to do
-# it. Grep the log for `self-check:`.
-{KEY_INVASION_PATH_NPC_SELF_CHECK} = {str(invasion_path_npc_self_check).lower()}
+{KEY_INVASION_PATH_START_ENABLED} = {b(invasion_path_start_enabled)}  # start with the trail shown
+{KEY_INVASION_PATH_MARKER_EFFECT_ID} = {invasion_path_marker_effect_id}  # (live) Prism Stone per step: 833-839 are its colours, 0 = none
+{KEY_INVASION_PATH_NPC_SELF_CHECK} = {b(invasion_path_npc_self_check)}  # test: route to the nearest NPC, so it works solo
 
-[{INPUT_HARNESS_SECTION}]
-# LETS AN AGENT MOVE THE CAMERA, AND TAKES YOUR CONTROLLER AWAY WHILE IT DOES.
-#
-# It detours four device polls and, after each one has run, writes the fields the engine reads.
-# Three are the `DLUID` devices -- pad (XInput OR a DirectInput joystick OR a third backend, all
-# normalising into the same six floats), DirectInput mouse, keyboard. The fourth is the one that
-# actually matters for the camera: `WindowsMouseDevice`, which reads `GetCursorPos` and stores a
-# clamped client-space position that `parseCameraInput` DIFFERENCES frame to frame. Writing at
-# the device means the deadzone, the sensitivity setting and the key mapping all still apply, so
-# an injected input behaves like a real one.
-#
-# OFF by default because it is the only thing in this file that can stop your own input reaching
-# the game. Every command it takes is frame-bounded and the input block has a hard cap of about
-# ten minutes, so a harness that wedges lets go on its own.
-#
-# DRIVE IT while the game runs by writing two lines to `{INPUT_HARNESS_COMMAND_FILE}` beside the
-# exe: a sequence number, then a command. It runs when the NUMBER changes. Commands:
-#   block <frames> | unblock | release | status
-#   axis <index> <value> <frames> | mouse <dx> <dy> <frames> | buttons <hex> <frames>
-#   turn <degrees> [frames]   -- closed loop on the camera's own yaw
-#   probe [frames]            -- hold each channel and report what the camera did
-#   channel <name>            -- what `turn` drives: mouse-x (default), mouse-y, pad0..pad5
-#
-# `turn` and `probe` MEASURE against the camera `[{INVASION_PATH_SECTION}]` draws through, so they
-# need that feature on; without it they refuse rather than guess. `status` also reports how many
-# times each poll has fired, which is how you tell "pressed nothing" from "never reached". Grep
-# the log for `{INPUT_HARNESS_LOG_PREFIX}`.
-{KEY_INPUT_HARNESS_ENABLED} = {str(input_harness).lower()}
+[{NET_EFFECTS_SECTION}]
+# F9 applies a SpEffect to yourself. Its key is read on [{INVASION_PATH_SECTION}]'s clock, which --net-effects turns on.
+{KEY_NET_EFFECTS_ENABLED} = {b(net_effects)}
+# key = "F9"
+# effect = 140001010
 
-[{CRASH_SECTION}]
-{crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
-# that call patches code from static analysis and is the likeliest crash in the whole startup path
-# -- a logger installed after it could not report the crash it most exists to report.
-#
-# `{KEY_CRASH_ENABLED}` defaults to true in the DLL and is written explicitly here anyway: a crash logger
-# that has to be switched on is off on the run that needed it, so the file says so out loud.
-{KEY_CRASH_ENABLED} = true
-# RE-ASSERT THE TOP-LEVEL FILTER, and this is not optional in DARK SOULS II. The unhandled-exception
-# filter is ONE global slot, not a chain, and whoever sets it last owns it. This DLL sets it in
-# DllMain, before the entry point; the game's CRT then sets its own from an initializer and throws
-# ours away. Measured statically from the shipped binary: SetUnhandledExceptionFilter has exactly
-# one call site, 0x140c43293, in a function listed in the CRT initializer table at 0x1410ac2c8, and
-# it ends `CALL SetUnhandledExceptionFilter; XOR EAX,EAX` -- the previous filter is discarded, not
-# chained. Without this re-assert the vectored handler still sees first-chance exceptions and
-# NOTHING FATAL is ever recorded, which is exactly what the first in-game crash test measured.
-# 0 disables it. 5000ms is a loose bound on "CRT startup is over", not a measurement.
-{KEY_REINSTALL_FILTER_AFTER_MS} = {DEFAULT_REINSTALL_FILTER_AFTER_MS}
-# `{KEY_FAULT_AFTER_MS} = 0` means never. Anything else DELIBERATELY KILLS THE GAME after that many
-# milliseconds. Armed only by `--crash-test`.
-{KEY_FAULT_AFTER_MS} = {fault_after_ms}
+# ============================================================================================
+# Pause menu and saves
+# ============================================================================================
 
-# LIVE. Re-read by the probe's poller thread through `ds2_hotkey_config::reload::HotFile`, which
-# compares the file's TEXT rather than its mtime -- a Proton prefix sits on filesystems that stamp
-# mtime to a whole second, so two edits inside one second would be invisible to an mtime watcher.
-# An edit here takes effect within one poll interval, without restarting the game. Neither changes
-# WHAT is measured: the byte windows and their baselines are fixed when the hook goes in.
-#
-# Defaults shown. Uncomment to change.
+[{MENU_ROW_SECTION}]
+# Extra pause-menu rows, in this order. Keep the list on one line: the reader is line-based.
+#   load-build-from-url       apply a soulsplanner build to this character (raises soul memory)
+#   load-character-from-file  pick a save for the NEXT launch to load
+#   save-game-to-file         save, then copy the save file where you choose
+#   build-recommender         the PvP build recommender panel
+#   quit-to-desktop           quit at once, no confirmation and no save
+{rows_note}{KEY_MENU_ROW_ROWS} = [{row_list}]
+
+[{SAVE_BLOCK_SECTION}]
+{KEY_SAVE_BLOCK_ENABLED} = {b(not menu_rows_no_save)}  # refuse the game's own saves; save-game-to-file is the only save
+
+[{SAVE_PICKER_SECTION}]
+{KEY_SAVE_PICKER_OS_NATIVE} = false  # Windows file dialog instead of the in-game panel
+# Folder the panel opens in; empty = ~/Downloads.
+{KEY_SAVE_PICKER_START_DIR} = ""
+{KEY_SAVE_PICKER_REMEMBER_DIR} = true  # reopen where the last pick was made
+
+[{SAVE_REDIRECT_SECTION}]
+# Folder the game saves in; empty = its own. It must already exist. Set by --save-dir.
+{KEY_SAVE_REDIRECT_DIRECTORY} = "{save_directory}"
+
+# ============================================================================================
+# Gameplay and HUD
+# ============================================================================================
+
+[{ESTUS_MAX_SECTION}]
+{KEY_ESTUS_MAX_ENABLED} = {b(estus_max)}  # Estus Flask at max charges and heal on every load
+{KEY_ESTUS_MAX_RELOAD_TEST} = {b(estus_max_reload_test)}  # test: back to the title and load once more
+
+[{ITEM_WARN_SECTION}]
+{KEY_ITEM_WARN_ENABLED} = {b(item_warn)}  # red X on items your stats or attunement slots can't use
+
+[{INVENTORY_SORT_SECTION}]
+{KEY_INVENTORY_SORT_ENABLED} = {b(inventory_sort)}  # open the game's sort dialog from a button, in inventory and equip screens
+# (live) Keyboard key, e.g. "F7"; empty = none.
+{KEY_INVENTORY_SORT_KEY} = "{inventory_sort_key}"
+# (live) Pad button: a b x y lb rb back start lthumb rthumb dpad_up dpad_down dpad_left dpad_right; empty = none.
+{KEY_INVENTORY_SORT_PAD} = "{inventory_sort_pad}"
+
+[{CHANGE_APPEARANCE_SECTION}]
+{KEY_CHANGE_APPEARANCE_ENABLED} = {b(change_appearance)}  # bonfire row: the character creator, changing only face, sex and body
+
+[{RENAME_CHARACTER_SECTION}]
+{KEY_CHANGE_APPEARANCE_ENABLED} = {b(rename_character)}  # bonfire row: rename the character
+
+[{REALLOCATE_STATS_SECTION}]
+{KEY_CHANGE_APPEARANCE_ENABLED} = {b(reallocate_stats)}  # bonfire row: the Soul Vessel reallocate screen, greyed until it can be used
+
+[{HP_GAUGE_SECTION}]
+{KEY_HP_GAUGE_ENABLED} = {b(hp_gauge)}  # larger, centred HP bar and damage number over other characters
+# Tuning, in 720p units (y grows down). Defaults shown:
+# text_scale = 1.25
+# text_lift = 12
+# text_dx = 0
+# digit_advance = 8
+# bar_scale = 2.25
+# bar_dx = -98.4
+# bar_dy = 6
+
+[{MUSIC_PROBE_SECTION}]
+{KEY_MUSIC_PROBE_ENABLED} = {b(music_probe)}  # F10 opens the region music player
+# key = "F10"
+
+[{VOICE_CHAT_SECTION}]
+# A key that toggles the game's Voice chat option. key and announce ("en", "pl" or "") are live.
+{KEY_VOICE_CHAT_ENABLED} = {b(voice_chat)}
+# key = "F8"
+# announce = "en"
+
+# ============================================================================================
+# Diagnostics and test instruments
+# ============================================================================================
+
+[{CONFIG_SECTION}]
+# The Arxan probe arm, set by --probe.
+{KEY_ENABLED} = {b(settings[KEY_ENABLED])}
+{KEY_SKIP_NEUTER} = {b(settings[KEY_SKIP_NEUTER])}
+# "m1" = a clean control function; "redirected" = applySpEffect, whose entry Arxan redirects.
+{KEY_SITE} = "{site}"
+# (live) Defaults shown.
 # {KEY_POLL_INTERVAL_MS} = {DEFAULT_POLL_INTERVAL_MS}
 # {KEY_HEARTBEAT_INTERVAL_MS} = {DEFAULT_HEARTBEAT_INTERVAL_MS}
+
+[{TIMELINE_SECTION}]
+{KEY_TIMELINE_ENABLED} = {b(boot_timeline)}  # log every boot substate with timestamps
+
+[{SOUL_MEMORY_GUARD_SECTION}]
+{KEY_SOUL_MEMORY_GUARD_ENABLED} = {b(soul_memory_guard)}  # log whether each loaded character's soul memory could pay for its level
+
+[{INPUT_HARNESS_SECTION}]
+# Lets an agent drive input through {INPUT_HARNESS_COMMAND_FILE}, and blocks yours while it does.
+{KEY_INPUT_HARNESS_ENABLED} = {b(input_harness)}
+
+[{CRASH_SECTION}]
+{crash_banner}{KEY_CRASH_ENABLED} = true
+{KEY_REINSTALL_FILTER_AFTER_MS} = {DEFAULT_REINSTALL_FILTER_AFTER_MS}  # re-claim the crash filter after the game's CRT replaces it; 0 = off
+{KEY_FAULT_AFTER_MS} = {fault_after_ms}  # crash on purpose after this many ms; 0 = never (--crash-test)
 """
 
 
