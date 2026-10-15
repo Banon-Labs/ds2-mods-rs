@@ -82,6 +82,17 @@
 #     measured was refused. Nothing but Frida reaches `ds2-rva`. The reader now prints one
 #     verdict line per scope an unspent record covers, and this rule opens a path when any
 #     one line opens it. What each record opens is unchanged.
+#
+#     Four more Bash spellings, 2026-10-14 (bd ds2-mods-rs-4axg). With the reader saying
+#     `UNPROVEN spent-by-commit`, three commands wrote `crates/darksouls2/src/param/
+#     generated.rs` and all three were allowed: `f=<that path> && sed -i -E <expr> $f`,
+#     the same binding then `rustfmt --edition 2024 $f`, and a generator run with
+#     `--output /home/.../crates/darksouls2/src/param/generated.rs`. A plain `rm` of the
+#     same file was refused. The Bash half only recognised a word that was itself an
+#     unquoted crate path, so `$f`, `${f}` and `"crates/x.rs"` never matched, and it had
+#     no clause for `rustfmt` or an output flag. It now resolves `NAME=value` and `for NAME
+#     in ...` bindings, strips quotes, treats `rustfmt` without `--check` or `--emit stdout`
+#     as a write, and treats a path after `-o`, `--out` or `--output` as one.
 #   routing:
 #     required_events: ["PreToolUse"]
 #     required_tools: ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"]
@@ -293,15 +304,23 @@ tool_name := object.get(input, "tool_name", "")
 # every read alone, because a gate whose purpose is to make an agent go and look must never
 # be the thing that stops it looking -- the same reasoning that put `Read` in the list above.
 #
-# RESIDUE, stated rather than hidden. Three write paths are invisible here and none is
+# RESIDUE, stated rather than hidden. These write paths are invisible here and none is
 # closed by pretending otherwise:
 #   * `git apply <patch>` and `patch < <diff>`, where the target path lives in the patch
 #     file and not in the command;
 #   * `cargo fmt` / `cargo clippy --fix`, which rewrite sources while naming none;
 #   * a committed `python3 scripts/<name>.py` that writes a crate source, which the
-#     sibling `bash_no_python_file_write` exempts by design.
+#     sibling `bash_no_python_file_write` exempts by design;
+#   * a path the shell computes rather than spells: `f=$(...)`, `read f`, `xargs`, `find
+#     -exec`, a variable anywhere but the front of a word (`$dir/$file`), or a path relative
+#     to a `cd` into a crate (`cd crates/x/src && sed -i ... lib.rs`);
+#   * a program that writes a crate path it takes positionally rather than after `-o`,
+#     `--out` or `--output`.
 # The first two are mechanical transformations rather than the guessed change this gate
-# exists to stop. The third is a reviewed script, which is the same argument.
+# exists to stop. The third is a reviewed script, which is the same argument. The last two
+# are gaps (bd ds2-mods-rs-4axg; the `cd` case is open as ds2-mods-rs-63m3): a guard that
+# read every computed path would have to run the shell, and a guard that called every
+# positional operand a write would refuse `cat`.
 
 # Words of one segment. Tabs folded first, because a segment arrives as raw shell text and
 # `split` on a single space would otherwise weld a tab-separated pair into one word.
@@ -366,12 +385,102 @@ last_operand_index(words) := index if {
 	index := max(indexes)
 }
 
-# A Rust source under `crates/`, with any leading redirect character stripped so `>file`
-# and `> file` are the same target.
-crate_rust_path(word) := path if {
-	path := trim_left(word, ">|")
+# A Rust source under `crates/`. The word arrives through `word_paths` below, already bare.
+crate_rust_path(path) := path if {
 	endswith(path, ".rs")
 	contains(path, "crates/")
+}
+
+# A word as the file system will see it: leading redirect characters stripped so `>file` and
+# `> file` are the same target, every quote character stripped so `"crates/x.rs"` is the same
+# path as `crates/x.rs`, and a `--flag=` prefix stripped so `--output=crates/x.rs` names its
+# value. Until 2026-10-14 the quotes stayed on, and `sed -i 's/a/b/' "crates/x/src/lib.rs"`
+# ended in `.rs"` and was not a Rust path at all (bd ds2-mods-rs-4axg).
+bare_word(word) := flag_value(replace(replace(trim_left(word, ">|"), `"`, ""), "'", ""))
+
+flag_value(word) := value if {
+	startswith(word, "-")
+	split_at := indexof(word, "=")
+	split_at > 0
+	value := trim_prefix(word, concat("", [substring(word, 0, split_at), "="]))
+} else := word
+
+# SHELL VARIABLES (2026-10-14, bd ds2-mods-rs-4axg). Measured: `f=crates/darksouls2/src/param/
+# generated.rs && sed -i -E <expr> $f` rewrote that file and was allowed, because no word of the
+# `sed` segment was a crate path -- the path was in the segment before it. So every binding the
+# command makes is collected, and a word that starts with a reference to one is read as each value
+# bound to it.
+#
+# `NAME=value` anywhere in a segment, which covers a bare assignment, `export`, `local` and the
+# env prefix of a command. Validating NAME as an identifier buys nothing: a binding is only ever
+# used by a `$NAME` reference, and a word like `--output=x` produces a name no reference spells.
+# A name bound twice keeps both values, which errs toward reading a write -- the safe direction.
+#
+# Only a value naming `crates` is kept. Resolution prepends the value to the rest of the word, so
+# a value without `crates` in it can only make a crate path if the rest already spells one, and
+# such a word is a crate path before any resolution. The filter is what keeps a heredoc full of
+# `x=1` lines from multiplying against every `$` word in it: this module runs in wasm, and a
+# quadratic rule here has already aborted the whole rulebook once (see `program_index` below).
+shell_bindings contains [name, value] if {
+	some text in commands.input_executed_texts
+	some segment in commands.shell_segments(text)
+	some word in segment_words(segment)
+	contains(word, "crates")
+	split_at := indexof(word, "=")
+	split_at > 0
+	name := substring(word, 0, split_at)
+	value := replace(replace(trim_prefix(word, concat("", [name, "="])), `"`, ""), "'", "")
+	contains(value, "crates")
+}
+
+# `for NAME in a b c; do ...; done` binds NAME to every word after `in`.
+shell_bindings contains [words[1], value] if {
+	some text in commands.input_executed_texts
+	some segment in commands.shell_segments(text)
+	words := segment_words(segment)
+	words[0] == "for"
+	words[2] == "in"
+	some j, word in words
+	j > 2
+	contains(word, "crates")
+	value := replace(replace(word, `"`, ""), "'", "")
+}
+
+identifier_chars := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+
+# `$f` is a reference to `f` only when the next character cannot continue the name: `$f/lib.rs`
+# and `$f` are, `$foo` is not.
+continues_name(rest) if {
+	first := substring(rest, 0, 1)
+	first != ""
+	contains(identifier_chars, first)
+}
+
+# A bare word starting with `${NAME}` or `$NAME`, with the reference replaced by every value bound
+# to NAME. Only the front of the word is resolved; see RESIDUE above.
+resolved_words(bare) := braced | plain if {
+	braced := {concat("", [binding[1], trim_prefix(bare, reference)]) |
+		startswith(bare, "${")
+		some binding in shell_bindings
+		reference := concat("", ["${", binding[0], "}"])
+		startswith(bare, reference)
+	}
+	plain := {concat("", [binding[1], rest]) |
+		startswith(bare, "$")
+		some binding in shell_bindings
+		reference := concat("", ["$", binding[0]])
+		startswith(bare, reference)
+		rest := trim_prefix(bare, reference)
+		not continues_name(rest)
+	}
+}
+
+# Every crate Rust path a word can stand for: itself, bare, and whatever a variable at its front
+# resolves to.
+word_paths(word) := {path |
+	bare := bare_word(word)
+	some candidate in ({bare} | resolved_words(bare))
+	path := crate_rust_path(candidate)
 }
 
 redirect_token(word) if {
@@ -437,13 +546,69 @@ segment_writes(words, _) if {
 	subcommand(words) in {"apply", "checkout", "restore", "clean", "stash", "rm", "mv"}
 }
 
+# `rustfmt` rewrites every file it is handed unless it is told only to look (2026-10-14, bd
+# ds2-mods-rs-4axg). `--check` and `--emit stdout` print instead of writing, and are the read.
+segment_writes(words, index) if {
+	program_is(words, "rustfmt")
+	index > program_index(words)
+	not rustfmt_only_reads(words)
+}
+
+rustfmt_only_reads(words) if "--check" in words
+
+rustfmt_only_reads(words) if "--emit=stdout" in words
+
+rustfmt_only_reads(words) if {
+	some i, word in words
+	word == "--emit"
+	words[i + 1] == "stdout"
+}
+
+# A path handed to an output flag is the file the program writes, whatever the program is
+# (2026-10-14, bd ds2-mods-rs-4axg). Measured: `cargo run -p param-generator -- --output
+# /home/.../crates/darksouls2/src/param/generated.rs` created a crate source past this gate.
+#
+# Outside a quoted span only. `bd create --description "... --output crates/x.rs ..."` is
+# prose about a write, and the quote count of the words before the path is what tells it from
+# `--output "crates/x.rs"`, whose opening quote is in the path's own word.
+segment_writes(words, index) if {
+	index > 0
+	output_flag(words, words[index - 1])
+	outside_quotes(words, index)
+}
+
+segment_writes(words, index) if {
+	some prefix in {"--output=", "--out="}
+	startswith(words[index], prefix)
+	outside_quotes(words, index)
+}
+
+output_flag(_, flag) if flag in {"--output", "--out"}
+
+# `-o` is an output flag almost everywhere, and these are the readers where it is not: `ls -o`
+# is a long listing, `grep -o` and `rg -o` print only the match, `find -o` is a disjunction.
+output_flag(words, "-o") if not dash_o_is_not_output(words)
+
+dash_o_is_not_output(words) if {
+	some name in {"ls", "grep", "egrep", "fgrep", "rg", "find"}
+	program_is(words, name)
+}
+
+# Balanced quotes in every word before `index`. Computed only for a word that is already a crate
+# path after an output flag, so the slice is not paid per word.
+outside_quotes(words, index) if {
+	before := concat(" ", array.slice(words, 0, index))
+	count(split(before, `"`)) % 2 == 1
+	count(split(before, "'")) % 2 == 1
+}
+
 # Every `crates/**/*.rs` path this command would write.
 written_crate_paths contains path if {
 	some text in commands.input_executed_texts
 	some segment in commands.shell_segments(text)
 	words := segment_words(segment)
 	some index, word in words
-	path := crate_rust_path(word)
+	some path in word_paths(word)
 	segment_writes(words, index)
 }
 
@@ -507,7 +672,7 @@ deny contains decision if {
 		"severity": "HIGH",
 		"reason": concat("", [
 			block_reason,
-			"\n\nThis is the Bash spelling of the same edit. A `sed -i`, a `> file`, a `tee`, a `cp` or a `git checkout --` writes the file exactly as the Edit tool does, and until 2026-09-22 this rule could not see any of them because it read `tool_input.file_path` and a Bash call has none.\n\nTarget: ",
+			"\n\nThis is the Bash spelling of the same edit. A `sed -i`, a `> file`, a `tee`, a `cp`, a `git checkout --`, a `rustfmt` without `--check` or a program's `--output`/`-o` writes the file exactly as the Edit tool does, and so does any of them reaching the path through a `$variable`. Until 2026-09-22 this rule could not see any of them because it read `tool_input.file_path` and a Bash call has none.\n\nTarget: ",
 			path,
 			evidence_report,
 		]),
