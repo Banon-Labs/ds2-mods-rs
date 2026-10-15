@@ -631,6 +631,157 @@ test_deny_the_sed_loop_when_telemetry_licensed_a_different_crate if {
 	denied(bash_event("sed -i 's/a/b/' crates/er-title-flow/src/lib.rs", PROVEN_TELEMETRY))
 }
 
+# --- a variable, an in-place rustfmt, an output flag, a quoted path (bd ds2-mods-rs-4axg) ----
+#
+# Measured 2026-10-14 with the reader saying `UNPROVEN spent-by-commit`: the first three commands
+# below, verbatim, each wrote `crates/darksouls2/src/param/generated.rs` and each was allowed. A
+# plain `rm` of the same file was refused. The fourth shape was found while reproducing them.
+
+written(cmd) := paths if {
+	paths := guard.written_crate_paths with input as bash_event(cmd, UNPROVEN_SPENT)
+}
+
+GAP_SED_THROUGH_A_VARIABLE := `cd /home/banon/projects/ds2-mods-rs && f=crates/darksouls2/src/param/generated.rs && sed -i -E '/^\s*#\[allow\((non_camel_case_types|clippy::identity_op)\)\]$/d' $f && rustfmt --edition 2024 --check $f`
+
+GAP_RUSTFMT_THROUGH_A_VARIABLE := "cd /home/banon/projects/ds2-mods-rs && f=crates/darksouls2/src/param/generated.rs && wc -l $f && rustfmt --edition 2024 $f && cmp $f /tmp/generated.rs.orig"
+
+GAP_GENERATOR_OUTPUT := "cd /home/banon/projects/fromsoftware-rs && cargo run -q -p param-generator --target x86_64-unknown-linux-gnu -- --input /home/banon/projects/ds2-mods-rs/crates/darksouls2/paramdefs --output /home/banon/projects/ds2-mods-rs/crates/darksouls2/src/param/generated.rs"
+
+test_deny_sed_in_place_through_a_shell_variable if {
+	denied(bash_event(GAP_SED_THROUGH_A_VARIABLE, UNPROVEN_SPENT))
+}
+
+test_the_variable_resolves_to_the_file_sed_rewrote if {
+	written(GAP_SED_THROUGH_A_VARIABLE) == {"crates/darksouls2/src/param/generated.rs"}
+}
+
+test_deny_rustfmt_in_place_through_a_shell_variable if {
+	denied(bash_event(GAP_RUSTFMT_THROUGH_A_VARIABLE, UNPROVEN_SPENT))
+}
+
+test_deny_a_generator_writing_a_crate_source_through_output if {
+	denied(bash_event(GAP_GENERATOR_OUTPUT, UNPROVEN_SPENT))
+}
+
+test_the_output_flag_names_the_file_it_created if {
+	written(GAP_GENERATOR_OUTPUT) == {"/home/banon/projects/ds2-mods-rs/crates/darksouls2/src/param/generated.rs"}
+}
+
+test_deny_sed_in_place_on_a_quoted_literal_path if {
+	denied(bash_event(`sed -i 's/a/b/' "crates/ds2-hook/src/lib.rs"`, UNPROVEN_SPENT))
+}
+
+test_deny_a_braced_quoted_variable_as_a_copy_target if {
+	denied(bash_event(`f="crates/ds2-hook/src/lib.rs"; cp -f /tmp/x.rs "${f}"`, UNPROVEN_SPENT))
+}
+
+test_deny_an_exported_variable_as_a_redirect_target if {
+	denied(bash_event(`export f=crates/ds2-hook/src/lib.rs; echo x > "$f"`, UNPROVEN_SPENT))
+}
+
+test_deny_a_directory_variable_at_the_front_of_the_path if {
+	written(`d=crates/ds2-hook/src && sed -i 's/a/b/' $d/lib.rs`) == {"crates/ds2-hook/src/lib.rs"}
+}
+
+test_deny_a_for_loop_variable if {
+	written(`for f in crates/ds2-hook/src/lib.rs crates/ds2-rva/src/lib.rs; do sed -i 's/a/b/' "$f"; done`) == {
+		"crates/ds2-hook/src/lib.rs",
+		"crates/ds2-rva/src/lib.rs",
+	}
+}
+
+test_deny_rustfmt_in_place_on_a_literal_path if {
+	denied(bash_event("rustfmt --edition 2024 crates/ds2-hook/src/lib.rs", UNPROVEN_SPENT))
+}
+
+test_deny_an_output_equals_flag if {
+	written("gen --output=crates/ds2-hook/src/lib.rs") == {"crates/ds2-hook/src/lib.rs"}
+}
+
+test_deny_an_output_flag_with_a_quoted_path if {
+	denied(bash_event(`gen --output "crates/ds2-hook/src/lib.rs"`, UNPROVEN_SPENT))
+}
+
+test_deny_dash_o if {
+	denied(bash_event("sort -o crates/ds2-hook/src/lib.rs crates/ds2-hook/src/lib.rs", UNPROVEN_SPENT))
+}
+
+test_deny_dash_o_after_a_cargo_run_separator if {
+	denied(bash_event("cargo run -p gen -- -o crates/ds2-hook/src/lib.rs", UNPROVEN_SPENT))
+}
+
+# The resolved path carries the scope of the literal one: a measurement for one crate opens the
+# variable spelling of that crate's file and no other.
+test_allow_rustfmt_through_a_variable_with_a_frida_verdict if {
+	not denied(bash_event("f=crates/ds2-hook/src/lib.rs && rustfmt $f", PROVEN))
+}
+
+test_allow_a_variable_into_the_build_licensed_crate if {
+	not denied(bash_event("f=crates/ds2-invasion-path/src/lib.rs && sed -i 's/a/b/' $f", PROVEN_BUILD))
+}
+
+test_deny_a_variable_outside_the_build_licensed_crate if {
+	denied(bash_event("f=crates/ds2-hook/src/lib.rs && sed -i 's/a/b/' $f", PROVEN_BUILD))
+}
+
+# --- and the reads of the same files stay free ----------------------------------------------
+
+test_allow_grep_of_a_crate_source if {
+	not denied(bash_event("grep -n x crates/ds2-hook/src/lib.rs", UNPROVEN_SPENT))
+}
+
+test_allow_wc_of_a_crate_source if {
+	not denied(bash_event("wc -l crates/ds2-hook/src/lib.rs", UNPROVEN_SPENT))
+}
+
+test_allow_rustfmt_check_on_a_literal_path if {
+	not denied(bash_event("rustfmt --edition 2024 --check crates/ds2-hook/src/lib.rs", UNPROVEN_SPENT))
+}
+
+test_allow_rustfmt_emit_stdout if {
+	not denied(bash_event("rustfmt --edition 2024 --emit stdout crates/ds2-hook/src/lib.rs", UNPROVEN_SPENT))
+	not denied(bash_event("rustfmt --emit=stdout crates/ds2-hook/src/lib.rs", UNPROVEN_SPENT))
+}
+
+test_allow_cargo_build_clippy_and_fmt_check if {
+	not denied(bash_event("cargo build -p ds2-hook", UNPROVEN_SPENT))
+	not denied(bash_event("cargo xwin clippy -p ds2-hook --target x86_64-pc-windows-msvc", UNPROVEN_SPENT))
+	not denied(bash_event("cargo fmt --check", UNPROVEN_SPENT))
+}
+
+test_allow_every_read_through_a_variable if {
+	not denied(bash_event(
+		`cd /home/banon/projects/ds2-mods-rs && f=crates/darksouls2/src/param/generated.rs && wc -l $f && rustfmt --edition 2024 --check $f && grep -n allow "$f" && cat ${f} && cp $f /tmp/before.rs`,
+		UNPROVEN_SPENT,
+	))
+}
+
+test_allow_a_variable_bound_outside_crates if {
+	not denied(bash_event("f=/tmp/scratch.rs && sed -i 's/a/b/' $f", UNPROVEN_SPENT))
+}
+
+test_allow_a_longer_name_that_starts_with_a_bound_one if {
+	not denied(bash_event("f=crates/ds2-hook/src/lib.rs; foo=/tmp/x.rs; sed -i 's/a/b/' $foo", UNPROVEN_SPENT))
+}
+
+test_allow_an_output_flag_outside_crates if {
+	not denied(bash_event(
+		"cargo run -q -p param-generator -- --input crates/darksouls2/paramdefs --output /tmp/generated.rs",
+		UNPROVEN_SPENT,
+	))
+}
+
+test_allow_ls_dash_o if {
+	not denied(bash_event("ls -o crates/ds2-hook/src/lib.rs", UNPROVEN_SPENT))
+}
+
+test_allow_an_output_flag_quoted_in_prose if {
+	not denied(bash_event(
+		`bd create --title "guard gap" --description "a generator run with --output crates/ds2-hook/src/lib.rs wrote it"`,
+		UNPROVEN_SPENT,
+	))
+}
+
 # A rebase conflict resolved by keeping lines from either side writes nothing new, so it needs no
 # measurement. Adding any line that was not in the conflicted hunk still does.
 conflict_edit(old, new) := {

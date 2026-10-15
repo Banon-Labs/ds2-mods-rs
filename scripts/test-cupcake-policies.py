@@ -623,6 +623,42 @@ def cases() -> list[PolicyCase]:
             frida_evidence="none",
             expected_text="Bash spelling of the same edit",
         ),
+        # The three commands that wrote a crate source past the gate on 2026-10-14, with this
+        # checkout as the root and the generator's own `cd` dropped: a path through `$f`, an
+        # in-place rustfmt, a generator's --output.
+        PolicyCase(
+            "deny-bash-sed-into-a-crate-through-a-shell-variable",
+            False,
+            f"cd {REPO_ROOT} && f=crates/darksouls2/src/param/generated.rs && "
+            r"sed -i -E '/^\s*#\[allow\((non_camel_case_types|clippy::identity_op)\)\]$/d' $f"
+            " && rustfmt --edition 2024 --check $f",
+            frida_evidence="none",
+            expected_text="Bash spelling of the same edit",
+        ),
+        PolicyCase(
+            "deny-bash-rustfmt-in-place-through-a-shell-variable",
+            False,
+            f"cd {REPO_ROOT} && f=crates/darksouls2/src/param/generated.rs && wc -l $f"
+            " && rustfmt --edition 2024 $f && cmp $f /tmp/generated.rs.orig",
+            frida_evidence="none",
+            expected_text="Bash spelling of the same edit",
+        ),
+        PolicyCase(
+            "deny-bash-generator-output-into-a-crate",
+            False,
+            "cargo run -q -p param-generator --target x86_64-unknown-linux-gnu -- --input "
+            f"{REPO_ROOT}/crates/darksouls2/paramdefs --output "
+            f"{REPO_ROOT}/crates/darksouls2/src/param/generated.rs",
+            frida_evidence="none",
+            expected_text="Bash spelling of the same edit",
+        ),
+        PolicyCase(
+            "allow-bash-reads-of-a-crate-through-a-shell-variable",
+            True,
+            f"cd {REPO_ROOT} && f=crates/darksouls2/src/param/generated.rs && wc -l $f"
+            " && rustfmt --edition 2024 --check $f && grep -n allow $f",
+            frida_evidence="none",
+        ),
         PolicyCase(
             "allow-crate-edit-in-the-crate-a-build-error-blamed",
             True,
