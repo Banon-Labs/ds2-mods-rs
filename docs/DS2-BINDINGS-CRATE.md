@@ -277,8 +277,8 @@ feature's existing evidence lines, and the crate's `GAME_MANAGER_*` / `FLO_*` im
 ### Stage 4 -- the next areas
 
 `SaveLoadSystem` (second by reach in section 2a), then navigation and SFX (a single consumer
-each, so lowest priority by this measure), then `param` from the paramdef slice already drafted on the
-`fromsoftware-rs` fork. Each gets the same acceptance as stage 3.
+each, so lowest priority by this measure), then `param`, generated from the defs vendored in
+`crates/darksouls2/paramdefs/` (`DS2-PARAMDEFS.md`). Each gets the same acceptance as stage 3.
 
 ### Stage 5 -- upstream
 

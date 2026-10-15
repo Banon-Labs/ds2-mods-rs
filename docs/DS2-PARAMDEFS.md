@@ -4,7 +4,8 @@ Where a Scholar of the First Sin paramdef set can come from, whether `tools/para
 read it, what licence it carries, and how to check it against the game's own rows.
 
 Researched 2026-09-25 by reading the upstream repositories through the GitHub API. Nothing was
-downloaded into this repo or into fromsoftware-rs, and the game install was not touched.
+downloaded into this repo or into fromsoftware-rs, and the game install was not touched. The defs
+have since been vendored into `crates/darksouls2/paramdefs/` (see "Recommended path").
 
 ## Answer
 
@@ -114,13 +115,28 @@ shipping data. The PARAM header's paramdef data version can also be compared wit
 
 ## Recommended path
 
-1. In the fromsoftware-rs fork (`chozandrias76/fromsoftware-rs`), copy
-   `src/Smithbox.Data/Assets/PARAM/DS2S/Defs/*.xml` from a pinned Smithbox commit into
-   `tools/param-generator/params/darksouls2/`, add Smithbox's MIT notice beside them, and record
-   the commit hash in the README line that documents the rebuild command.
-2. Run `param-generator --input tools/param-generator/params/darksouls2 --output
-   crates/darksouls2/src/param/generated.rs` unchanged, then `rustfmt`. The static check above
-   predicts no parser change is needed.
+1. **Done, in this repo.** The defs are in `crates/darksouls2/paramdefs/`, copied unmodified
+   from Smithbox `src/Smithbox.Data/Assets/PARAM/DS2S/Defs` at
+   [`7a3281009bcc`](https://github.com/vawser/Smithbox/commit/7a3281009bccd4fb295fc4198043ae7413b17bdb),
+   with Smithbox's MIT `LICENSE` beside them. They first landed on the fromsoftware-rs fork
+   (`chozandrias76/fromsoftware-rs#4`, closed), which was the wrong repo: `crates/darksouls2` lives
+   here (`DS2-BINDINGS-PLAN.md`), and nothing in the fork compiled the output.
+2. **Not done.** From the `../fromsoftware-rs` checkout (its `tools/param-generator`, unchanged):
+
+   ```sh
+   cargo run -q -p param-generator --target x86_64-unknown-linux-gnu -- \
+     --input  ../ds2-mods-rs/crates/darksouls2/paramdefs \
+     --output ../ds2-mods-rs/crates/darksouls2/src/param/generated.rs
+   rustfmt --edition 2024 ../ds2-mods-rs/crates/darksouls2/src/param/generated.rs
+   ```
+
+   MEASURED 2026-10-14: the generator rejects none of the defs, and its output is byte-identical
+   to the file on the fork. That output puts a lint allow on every struct (`non_camel_case_types`)
+   and every bitfield accessor (`clippy::identity_op`), and `scripts/check-allow-debt.py` refuses
+   each one because none names an issue. The fix is to delete those lines and put one tracked allow,
+   also covering `missing_docs`, on `mod generated`. Nothing is wired in yet: the Frida-first gate
+   refuses a `crates/**/*.rs` edit with no measurement behind it, and step 3 is the measurement
+   these layouts actually need.
 3. Before anything reads a row through those structs, build the host-side validator described
    above as a small tool in this repo, reading `enc_regulation.bnd.dcx` read-only, and fail on any
    stride that disagrees with `size_of`. Community-reversed defs are the likeliest place for a
