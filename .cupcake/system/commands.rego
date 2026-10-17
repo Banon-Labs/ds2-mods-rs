@@ -276,7 +276,19 @@ has_output_redirect(command) if {
 
 # Escaped quotes are removed first so that quote-index parity below cannot be
 # desynchronised by `\"` / `\'`. Same shape as the launch guard's scrub.
-escaped_quotes_stripped(text) := replace(replace(text, `\"`, ""), `\'`, "")
+#
+# ESCAPED BACKSLASHES GO FIRST (2026-10-17). A shell reads `\\` as one literal backslash, so in
+# `\\"` the quote is REAL and in `\\\"` it is escaped. Stripping `\"` and `\'` alone got both
+# wrong, and the two passes chained: `\\\\\"'` lost its `\"` in pass one, leaving `\\\\'`, and
+# pass two then ate the real closing `'` as if it were `\'`. Quote parity broke, and
+# unparsed_shell_payload's unbalanced-quote branch failed closed on a command that runs no
+# wrapper at all. Measured: a `sed -i "...|bash -c 'exec \\\\\"...\\\\\"' _ %command%|" $F`
+# that WRITES a Steam launch option into localconfig.vdf was denied by DS2-MODS-LAUNCH-GUARD
+# as an opaque launch payload. Consuming `\\` pairs left to right first is the shell's own
+# reading, so every `\"` / `\'` left afterwards really is an escaped quote. Inside single quotes a
+# backslash is literal and `'x\'` still closes; that is stripped as `\'` now exactly as before,
+# which leaves the quote unbalanced -- the fail-closed side, unchanged.
+escaped_quotes_stripped(text) := replace(replace(replace(text, `\\`, ""), `\"`, ""), `\'`, "")
 
 quote_parity_ok(text) if {
 	count(split(text, `"`)) % 2 == 1

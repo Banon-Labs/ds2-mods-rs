@@ -146,6 +146,25 @@ test_apostrophe_in_a_quoted_body_does_not_force_the_raw_fallback if {
 	commands.executed_texts(text) == {concat("", [`bd remember --key k "it s about `, push_main, `"`])}
 }
 
+# `\\` is one literal backslash to a shell, so the quote after it is real and the one after
+# `\\\` is escaped. The old scrub stripped `\"` then `\'` only, which turned `\\\\\"'` into
+# `\\\` and ate the closing single quote.
+test_escaped_backslash_before_a_quote_keeps_parity if {
+	commands.quote_parity_ok(commands.escaped_quotes_stripped(`sed -i "s|x|bash -c 'exec \\\\\"y\\\\\"' _|" f`))
+}
+
+test_escaped_backslash_then_real_quote_closes_the_span if {
+	commands.escaped_quotes_stripped(`echo "a\\" b`) == `echo "a" b`
+}
+
+test_escaped_backslash_then_escaped_quote_stays_escaped if {
+	commands.escaped_quotes_stripped(`echo "a\\\" b"`) == `echo "a b"`
+}
+
+test_bash_c_inside_a_double_quoted_sed_replacement_is_not_unparsed if {
+	not commands.unparsed_shell_payload(`sed -i "s|x|bash -c 'exec \\\\\"y\\\\\"' _|" f`)
+}
+
 # --- quoted operand spans lose their command positions ------------------------
 
 test_newline_inside_quotes_is_neutralised if {

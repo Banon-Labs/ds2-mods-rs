@@ -333,6 +333,14 @@ def cases() -> list[PolicyCase]:
             False,
             "bash <<'EOF'\nsteam -applaunch 335300\nEOF",
         ),
+        # 2026-10-17: a `sed -i` WRITING a `bash -c '...'` Steam launch option into
+        # localconfig.vdf was denied as an opaque launch payload. The escaped-quote scrub read
+        # `\\\\\"'` as `\\\`, ate the real closing quote, and failed quote parity. Verbatim.
+        PolicyCase(
+            "allow-sed-writing-a-bash-c-launch-option",
+            True,
+            r"""F=~/.local/share/Steam/userdata/26191038/config/localconfig.vdf; N=$(grep -n -F 'WINEDLLOVERRIDES=\"dinput8=n,b\" %command%' $F | cut -d: -f1); echo "line $N"; [ "$(echo "$N" | wc -l)" = 1 ] && sed -n "$((N-5)),$((N))p" $F | grep -q '"335300"' && sed -i "${N}s|%command%\"\$|bash -c 'exec \\\\\"\${@/%DarkSoulsII.exe/ds2-launcher.exe}\\\\\"' _ %command%\"|" $F; sed -n "$((N-5)),$((N+1))p" $F""",
+        ),
         # --- ds2_run_preset_guard ------------------------------------------------------------
         # 2026-09-28: launchers from worktrees cut before ENGINE_SHIPPED_PRESETS overwrote the
         # user's F1-saved lighting presets, twice. The signal reads the real files.
