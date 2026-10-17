@@ -89,6 +89,27 @@ test_allows_bd_issue_quoting_the_command if allowed("bd create --title=\"Launch 
 
 test_allows_grepping_the_repo_for_the_appid if allowed("grep -rn 335300 scripts/")
 
+# --- WRITING a launch option is not running one (2026-10-17) -------------------------------------
+# Measured false positive, verbatim. The `bash -c '...'` is inside sed's double-quoted
+# replacement: it is the VALUE of a Steam launch option being written into localconfig.vdf, and
+# nothing in this command runs a shell on it. It was denied as an opaque payload because the
+# escaped-quote scrub read `\\\\\"'` as `\\\` -- eating the real closing `'` -- so quote parity
+# failed and the unbalanced-quote branch of unparsed_shell_payload fired.
+localconfig_launch_option_edit := `F=~/.local/share/Steam/userdata/26191038/config/localconfig.vdf; N=$(grep -n -F 'WINEDLLOVERRIDES=\"dinput8=n,b\" %command%' $F | cut -d: -f1); echo "line $N"; [ "$(echo "$N" | wc -l)" = 1 ] && sed -n "$((N-5)),$((N))p" $F | grep -q '"335300"' && sed -i "${N}s|%command%\"\$|bash -c 'exec \\\\\"\${@/%DarkSoulsII.exe/ds2-launcher.exe}\\\\\"' _ %command%\"|" $F; sed -n "$((N-5)),$((N+1))p" $F`
+
+test_allows_sed_writing_a_bash_c_launch_option_into_localconfig if allowed(localconfig_launch_option_edit)
+
+# The same edit chained with a REAL launch is still a launch. The fix reads escapes the way a
+# shell does; it does not exempt `sed -i` or anything else by name.
+test_denies_localconfig_edit_followed_by_a_bare_applaunch if denied(concat(" && ", [localconfig_launch_option_edit, "steam -applaunch 335300"]))
+
+test_denies_localconfig_edit_followed_by_a_bash_c_applaunch if denied(concat("; ", [localconfig_launch_option_edit, "bash -c 'steam -applaunch 335300'"]))
+
+# Escaped backslashes before a real quote must not hide an executed payload either.
+test_denies_bash_c_applaunch_after_escaped_backslashes if denied(`echo "a\\\\"; bash -c "steam -applaunch 335300"`)
+
+test_denies_opaque_payload_after_escaped_backslashes if denied(`echo "\\\\"; bash -c $STEAM_CMD # steam 335300`)
+
 # --- events this policy does not own -------------------------------------------------------------
 
 test_ignores_non_bash_tools if {
