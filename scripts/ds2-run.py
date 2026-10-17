@@ -492,20 +492,22 @@ KEY_SEAMLESS_PASSWORD = "cooppassword"
 #: Nothing here ships or downloads it. The archive is the one the owner fetched from Nexus into
 #: `~/DS2`; when it is not there, a run with a matching install proceeds and a run without one is
 #: refused with the path it looked for.
-SEAMLESS_VERSION = "0.0.4"
+SEAMLESS_VERSION = "0.0.5"
 SEAMLESS_ARCHIVE = (
     Path.home()
     / "DS2"
-    / "Dark Souls II SoTFS - Seamless Co-op v0.0.4 1468 0.0.4 2026-10-01T21-00Z Sbulrnj0.zip"
+    / "Dark Souls II SoTFS - Seamless Co-op v0.0.5 1468 0.0.5 2026-10-04T23-30Z nUt1ZkmJ.zip"
 )
 #: Archive member (which is also the path under the game directory) -> SHA-256 of that member.
-#: `ds2sc_launcher.exe` and `crashpad_handler.exe` are byte-identical from 0.0.1 through 0.0.4;
-#: each release changed the DLL and the locale file. 0.0.4 (2026-10-01) adds the critical-battle
-#: invasion strings and a map pre-initialisation string to the locale file, and its settings
-#: template adds no key: it only raises the defaults of `enemy_damage_scaling` (0 -> 15) and
-#: `boss_damage_scaling` (0 -> 25), which the merge does not apply over an existing value.
+#: `ds2sc_launcher.exe` and `crashpad_handler.exe` are byte-identical from 0.0.1 through 0.0.5;
+#: each release through 0.0.4 changed the DLL and the locale file. 0.0.4 (2026-10-01) adds the
+#: critical-battle invasion strings and a map pre-initialisation string to the locale file, and its
+#: settings template adds no key: it only raises the defaults of `enemy_damage_scaling` (0 -> 15)
+#: and `boss_damage_scaling` (0 -> 25), which the merge does not apply over an existing value.
+#: 0.0.5 (2026-10-04) changes only the DLL; its locale file and settings template are 0.0.4's
+#: bytes. 0.0.4 has refused to boot with the author's "Update required" box since 2026-10-14.
 SEAMLESS_FILES: dict[str, str] = {
-    "SeamlessCoop/ds2sc.dll": "70dfc68f740c9bbf474ba2c6569ca230131df95f3afdcae11bef309cad126b44",
+    "SeamlessCoop/ds2sc.dll": "5df6c51fae1c0a177090e39831402120a7913fe42c2625da32767de562d17a71",
     "SeamlessCoop/locale/english.json":
         "540df58e565a5dd9f21834ae99584a998204c1908042aec18409f3700b86240c",
     "SeamlessCoop/crashpad/crashpad_handler.exe":
@@ -513,7 +515,7 @@ SEAMLESS_FILES: dict[str, str] = {
     "ds2sc_launcher.exe": "4fb07cd36e17fba7755597395bc1b44a0809358128e8c8353e8add65583fa88c",
 }
 #: The settings file is merged, never replaced: it holds the owner's `cooppassword`, and the
-#: template (0.0.3 and 0.0.4 alike) ships that key empty -- which is itself a boot-stopping dialog.
+#: template (0.0.3 through 0.0.5 alike) ships that key empty -- which is itself a boot-stopping dialog.
 SEAMLESS_SETTINGS_MEMBER = f"SeamlessCoop/{SEAMLESS_SETTINGS_NAME}"
 
 #: Files and directories other people's mods own in the game directory. This script writes none
