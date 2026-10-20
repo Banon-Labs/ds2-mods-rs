@@ -110,6 +110,39 @@ CASES = [
               "/home/banon/projects/ds2-mods-rs/.claude/worktrees/estus-default"),),
     ),
     Case(
+        "idle_game_after_evidence.jsonl",
+        "DarkSoulsII.exe (pid 760735) is the game this session launched",
+        "2026-10-20 03:25: d5e5404 launched, its live-config lines grepped from ds2-loader.log, the "
+        "commit amended, and the turn ended with the game idle and no reason given -- halts with the "
+        "bare teardown. Machine pinned alive (started 13 s after the launch), transcript read for real",
+        env=(("CUPCAKE_IDLE_GAME_MACHINE_OVERRIDE", "760735|1792466500"),),
+    ),
+    Case(
+        "idle_game_after_evidence.jsonl",
+        None,
+        "the same turn with the game not running must NOT halt",
+        env=(("CUPCAKE_IDLE_GAME_MACHINE_OVERRIDE", "dead"),),
+    ),
+    Case(
+        "idle_game_after_evidence.jsonl",
+        None,
+        "the same turn with the game started 20 minutes after this session's launch (somebody else's "
+        "run) must NOT halt",
+        env=(("CUPCAKE_IDLE_GAME_MACHINE_OVERRIDE", "760735|1792467700"),),
+    ),
+    Case(
+        "idle_game_user_keep.jsonl",
+        None,
+        "the user asked to leave the game running before the launch -- must NOT halt",
+        env=(("CUPCAKE_IDLE_GAME_MACHINE_OVERRIDE", "760735|1792466500"),),
+    ),
+    Case(
+        "idle_game_agent_reason.jsonl",
+        None,
+        "the agent is mid-experiment and says why it keeps the game up -- must NOT halt",
+        env=(("CUPCAKE_IDLE_GAME_MACHINE_OVERRIDE", "760735|1792466500"),),
+    ),
+    Case(
         "unexecuted_promise.jsonl",
         "promise nothing is going to keep",
         "turn ends on 'I'll re-run the gate...' with no tool call, no background work, no handoff",
@@ -798,6 +831,7 @@ def run_hook(
             "CUPCAKE_MERGEABLE_CI_VERDICT_OVERRIDE": "UNKNOWN",
             # Nor whether a game happens to be running on this machine: set-but-empty is silence.
             "CUPCAKE_UNSPENT_EVIDENCE_OVERRIDE": "",
+            "CUPCAKE_IDLE_GAME_MACHINE_OVERRIDE": "dead",
             **dict(extra_env),
         }
         payload = {

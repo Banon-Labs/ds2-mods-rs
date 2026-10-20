@@ -300,6 +300,10 @@ else
   # remote branch, game code) and when the user is hand-testing it instead is decided in
   # scripts/cupcake_unspent_evidence.py; `opa test` above only pins that a spoken signal halts.
   python3 scripts/cupcake_unspent_evidence.py --selftest | tail -1
+  # Same half for the idle-game guard: when the game this session launched counts as finished
+  # (ds2-loader.log read since the last launch) and what keeps it up (the user asked, the user is
+  # hand-testing it, the agent said why) is decided in scripts/cupcake_idle_game.py.
+  python3 scripts/cupcake_idle_game.py --selftest | tail -1
   # And the same half for the property-grant guard, whose whole decision is idiom recognition: a
   # closing sentence that stages the agent handing the user control over something already theirs.
   # The lexicon and the quoting carve-out live in scripts/cupcake_property_grant.py; `opa test`
