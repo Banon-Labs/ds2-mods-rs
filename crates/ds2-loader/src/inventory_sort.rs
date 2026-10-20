@@ -18,11 +18,17 @@ pub const CONFIG_SECTION: &str = "inventory_sort";
 /// Whether to bind a button to the sort dialog at all.
 pub const KEY_ENABLED: &str = "enabled";
 
+/// Whether UP on the Inventory tab's category strip enters the item list.
+pub const KEY_UP_ENTERS_LIST: &str = "up_enters_list";
+
 /// `[inventory_sort]`, resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InventorySortConfig {
     /// Open the shipped inventory sort dialog from a configurable key or controller button.
     pub enabled: bool,
+    /// UP on the Inventory tab's category strip enters the item list at its bottom row. On by
+    /// default (user directive 2026-09-29); a literal `false` leaves the strip as shipped.
+    pub up_enters_list: bool,
 }
 
 impl Default for InventorySortConfig {
@@ -42,7 +48,10 @@ impl Default for InventorySortConfig {
     /// done nothing while another dialog is up, and with no item list on screen there is no
     /// recorded group and the press is dropped here.
     fn default() -> Self {
-        Self { enabled: false }
+        Self {
+            enabled: false,
+            up_enters_list: true,
+        }
     }
 }
 
@@ -74,15 +83,24 @@ impl InventorySortConfig {
                 _ => Self::default().enabled,
             },
         };
-        Self { enabled }
+        // Defaults ON, so only a literal `false` turns it off and a typo leaves it on.
+        let up_enters_list = match parsed.get(CONFIG_SECTION, KEY_UP_ENTERS_LIST) {
+            None => Self::default().up_enters_list,
+            Some(raw) => !matches!(raw.trim().trim_matches('"'), "false"),
+        };
+        Self {
+            enabled,
+            up_enters_list,
+        }
     }
 
     /// One line for the attach log, written before anything acts on it.
     pub fn describe(&self) -> String {
         format!(
-            "{} config [{CONFIG_SECTION}] {KEY_ENABLED}={}",
+            "{} config [{CONFIG_SECTION}] {KEY_ENABLED}={} {KEY_UP_ENTERS_LIST}={}",
             ds2_inventory_sort::LOG_PREFIX,
-            self.enabled
+            self.enabled,
+            self.up_enters_list
         )
     }
 }

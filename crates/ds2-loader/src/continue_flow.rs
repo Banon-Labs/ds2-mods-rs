@@ -27,6 +27,9 @@ pub const KEY_SILENCE: &str = "silence";
 /// Whether to close the top menu and the character list as the shortcut passes through them.
 pub const KEY_HIDE_MENUS: &str = "hide_menus";
 
+/// Whether to stop a hollow save slot's load walk from hanging the game.
+pub const KEY_HOLLOW_SLOT_GUARD: &str = "hollow_slot_guard";
+
 /// `[continue]`, resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContinueConfig {
@@ -42,6 +45,9 @@ pub struct ContinueConfig {
     /// Call the frontend's own `FeGroupBase::close` on the top menu and the character list as the
     /// shortcut passes through them, so neither is drawn.
     pub hide_menus: bool,
+    /// Stop the save-stream walk for a hollow slot instead of letting it spin forever. Independent
+    /// of the shortcut: it guards the game's own character list too.
+    pub hollow_slot_guard: bool,
 }
 
 impl Default for ContinueConfig {
@@ -65,6 +71,9 @@ impl Default for ContinueConfig {
             // shortcut on, and a menu that flashes past for one frame with nobody pressing
             // anything is the surprising behaviour.
             hide_menus: true,
+            // ON: without it, picking a hollow slot hard-locks the game whether or not anything
+            // else here is enabled. `false` restores the shipped hang.
+            hollow_slot_guard: true,
         }
     }
 }
@@ -100,11 +109,17 @@ impl ContinueConfig {
             None => Self::default().hide_menus,
             Some(raw) => !matches!(raw.trim().trim_matches('"'), "false"),
         };
+        // Defaults ON, so like `silence` only a literal `false` turns it off.
+        let hollow_slot_guard = match parsed.get(CONFIG_SECTION, KEY_HOLLOW_SLOT_GUARD) {
+            None => Self::default().hollow_slot_guard,
+            Some(raw) => !matches!(raw.trim().trim_matches('"'), "false"),
+        };
         Self {
             record,
             slot,
             silence,
             hide_menus,
+            hollow_slot_guard,
         }
     }
 
@@ -112,12 +127,13 @@ impl ContinueConfig {
     pub fn describe(&self) -> String {
         format!(
             "{} config [{CONFIG_SECTION}] {KEY_RECORD}={} {KEY_SLOT}={} {KEY_SILENCE}={} \
-             {KEY_HIDE_MENUS}={}",
+             {KEY_HIDE_MENUS}={} {KEY_HOLLOW_SLOT_GUARD}={}",
             ds2_continue::LOG_PREFIX,
             self.record,
             self.slot,
             self.silence,
-            self.hide_menus
+            self.hide_menus,
+            self.hollow_slot_guard
         )
     }
 }

@@ -19,7 +19,7 @@
 //! consumed the press). The `+0x2040 == 1` mode, in which the shipped code does not enter the list
 //! on DOWN either, is left alone.
 
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use crate::LOG_PREFIX;
 use crate::install::log_line;
@@ -28,6 +28,15 @@ use crate::install::log_line;
 static CURRENT_INDEX: AtomicUsize = AtomicUsize::new(0);
 /// `FEX_GRID_SET_CURSOR`, resolved and prologue-checked at install. `0` disables the feature.
 static SET_CURSOR: AtomicUsize = AtomicUsize::new(0);
+/// `[inventory_sort] up_enters_list`, live. Off leaves UP on the strip as shipped.
+static ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Turn UP-enters-list on or off. It acts only once the crate's install has armed the two grid
+/// functions.
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, Ordering::Release);
+}
+
 /// How many entries have been logged. Each UP entry is a deliberate press, so the cap is generous.
 static LOGGED: AtomicU32 = AtomicU32::new(0);
 const LOG_CAP: u32 = 24;
@@ -109,7 +118,8 @@ pub(crate) struct Before {
 /// Read, before the original update, whether this event is a fresh UP on a focused strip.
 pub(crate) fn before(this: *mut u8, vtable: usize, event: usize) -> Before {
     let this = this as usize;
-    let armed = SET_CURSOR.load(Ordering::Acquire) != 0
+    let armed = ENABLED.load(Ordering::Acquire)
+        && SET_CURSOR.load(Ordering::Acquire) != 0
         && event != 0
         && read_usize(this) == Some(vtable)
         && read_i32(event + ds2_rva::FE_MENU_EVENT_PRESSED_OFFSET)

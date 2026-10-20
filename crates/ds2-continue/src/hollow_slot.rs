@@ -30,7 +30,7 @@
 //! slot count is known. Any other stream runs the original untouched.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ds2_game_base::mem::{game_rva, read_bytes};
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
@@ -51,6 +51,23 @@ static STREAM_VTABLE: AtomicUsize = AtomicUsize::new(0);
 
 /// How many walks the escape has ended.
 static FIRED: AtomicUsize = AtomicUsize::new(0);
+
+/// `[continue] hollow_slot_guard`, live. Off runs the walk untouched through the installed detour.
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Whether [`install_hollow_slot_guard`] has already hooked the walk.
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Turn the guard on or off without unhooking it. A walk already in progress keeps the setting it
+/// started with.
+pub fn set_enabled(on: bool) {
+    ENABLED.store(on, Ordering::Release);
+}
+
+/// Whether the walk is hooked, so the loader knows whether turning the guard on needs an install.
+pub fn installed() -> bool {
+    INSTALLED.load(Ordering::Acquire)
+}
 
 /// Slots in front of the shadow's function slots: the original read, then the RTTI locator.
 ///
@@ -124,7 +141,7 @@ unsafe extern "system" fn detour_walk(
     // SAFETY: stored before the hook was enabled, so it is MinHook's trampoline for this target.
     let original: WalkFn = unsafe { std::mem::transmute::<usize, WalkFn>(trampoline) };
     let expected = STREAM_VTABLE.load(Ordering::Acquire);
-    if stream.is_null() || expected == 0 {
+    if stream.is_null() || expected == 0 || !ENABLED.load(Ordering::Acquire) {
         // SAFETY: the original, with the arguments it was given.
         return unsafe { original(unused, stream, handlers) };
     }
@@ -155,13 +172,17 @@ unsafe extern "system" fn detour_walk(
     }
 }
 
-/// Detour the walk. Call from the loader's install position; it is on for every run, because the
-/// only thing it changes is a walk that would otherwise never return.
+/// Detour the walk, once. Call from the loader's install position, or later when
+/// `[continue] hollow_slot_guard` is first turned on live; a second call returns `true` and does
+/// nothing.
 ///
 /// # Safety
 ///
-/// Patches executable memory in the game image. Must run where the other install paths run.
+/// Patches executable memory in the game image.
 pub unsafe fn install_hollow_slot_guard() -> bool {
+    if INSTALLED.load(Ordering::Acquire) {
+        return true;
+    }
     let site = match game_rva(ds2_rva::SL_SECTION_WALK) {
         Ok(site) => site,
         Err(error) => {
@@ -227,6 +248,7 @@ pub unsafe fn install_hollow_slot_guard() -> bool {
          fails to load instead of hanging",
         ds2_rva::SL_SECTION_WALK
     ));
+    INSTALLED.store(true, Ordering::Release);
     true
 }
 

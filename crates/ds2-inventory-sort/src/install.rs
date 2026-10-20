@@ -59,9 +59,11 @@ pub struct Request {
     /// The config file to watch for the binding. `None` disables live rebinding and leaves the
     /// built-in defaults in force -- which is a degraded mode, not the normal one.
     pub config_path: Option<PathBuf>,
-    /// Arm the sort button (`[inventory_sort] enabled`). The menu detours, and UP-enters-list with
-    /// them, install either way.
+    /// Arm the sort button (`[inventory_sort] enabled`).
     pub sort_button: bool,
+    /// Arm UP-enters-list on the Inventory tab (`[inventory_sort] up_enters_list`). It rides on the
+    /// same menu detours as the button, so either one installs them.
+    pub up_enters_list: bool,
 }
 
 /// What [`install`] managed to do.
@@ -949,6 +951,8 @@ pub unsafe fn install(request: &Request) -> Outcome {
     // findings on independent addresses; if the equip pair ever stops matching its prologue on some
     // other build, the Inventory button should keep working rather than the whole feature vanish.
     // Independent of the sort button: a failed prologue check here disarms only UP-enters-list.
+    // Armed whatever `up_enters_list` says, so the key can be turned on live; the key gates it.
+    crate::up_enter::set_enabled(request.up_enters_list);
     if inventory {
         crate::up_enter::install(base);
     }
@@ -961,12 +965,13 @@ pub unsafe fn install(request: &Request) -> Outcome {
         return Outcome::default();
     }
 
-    // UP-enters-list rides on the detours above and is always on; `[inventory_sort] enabled`
-    // governs the sort button alone, which is everything below.
+    // UP-enters-list rides on the detours above and is armed by its own key; `[inventory_sort]
+    // enabled` governs the sort button alone, which is everything below.
     if !request.sort_button {
         log(format_args!(
             "{LOG_PREFIX} armed inventory={inventory} equip={equip} -- sort button off by config; \
-             UP-enters-list stays on"
+             up_enters_list={}",
+            request.up_enters_list
         ));
         return Outcome { installed: true };
     }
