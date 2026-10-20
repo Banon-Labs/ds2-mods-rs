@@ -951,7 +951,9 @@ pub unsafe fn install(request: &Request) -> Outcome {
     // findings on independent addresses; if the equip pair ever stops matching its prologue on some
     // other build, the Inventory button should keep working rather than the whole feature vanish.
     // Independent of the sort button: a failed prologue check here disarms only UP-enters-list.
-    if inventory && request.up_enters_list {
+    // Armed whatever `up_enters_list` says, so the key can be turned on live; the key gates it.
+    crate::up_enter::set_enabled(request.up_enters_list);
+    if inventory {
         crate::up_enter::install(base);
     }
     if !inventory && !equip {

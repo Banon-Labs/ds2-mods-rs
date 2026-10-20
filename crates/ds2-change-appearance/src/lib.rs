@@ -162,7 +162,7 @@ pub mod tabs;
 mod install;
 
 #[cfg(windows)]
-pub use install::{Outcome, install, set_logger};
+pub use install::{Outcome, install, set_logger, set_rows};
 
 #[cfg(test)]
 mod tests {

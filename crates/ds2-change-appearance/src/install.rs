@@ -60,8 +60,63 @@ const NOTHING: u8 = 0;
 const APPEARANCE: u8 = 1;
 const RENAME: u8 = 2;
 const REALLOCATE: u8 = 4;
-/// The rows [`install`] was asked for, as the bits above.
+/// The rows to add, as the bits above: set by [`install`], changed live by [`set_rows`], and read
+/// each time the bonfire menu is built.
 static ROWS: AtomicU8 = AtomicU8::new(0);
+/// Whether the set-text hook that greys the Reallocate row has been tried. It is registered only
+/// once that row is first wanted, at install or live.
+static SET_TEXT_TRIED: AtomicBool = AtomicBool::new(false);
+
+const fn row_bits(rows: Rows) -> u8 {
+    (if rows.change_appearance {
+        APPEARANCE
+    } else {
+        0
+    }) | (if rows.rename { RENAME } else { 0 })
+        | (if rows.reallocate { REALLOCATE } else { 0 })
+}
+
+/// Change which rows the bonfire menu gets, after [`install`] succeeded. Takes effect the next
+/// time the menu is built; a menu already open keeps the rows it was built with.
+///
+/// # Safety
+///
+/// Registers the set-text hook the first time `reallocate` is on, which patches executable memory
+/// in the loaded game image. Call only after [`install`] returned `installed: true`.
+pub unsafe fn set_rows(rows: Rows) {
+    if rows.reallocate {
+        // SAFETY: the caller's contract.
+        unsafe { hook_set_text() };
+    }
+    ROWS.store(row_bits(rows), Ordering::Release);
+    log(format_args!("{LOG_PREFIX} rows now {rows:?}"));
+}
+
+/// Register the set-text hook that draws a disabled Reallocate row grey, once.
+///
+/// # Safety
+///
+/// Patches executable memory in the loaded game image.
+unsafe fn hook_set_text() {
+    if SET_TEXT_TRIED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    // SAFETY: `(proxy*, const wchar_t*)`, two integer arguments; `ORIG_SET_TEXT` is the static
+    // the handler calls through.
+    if let Err(status) = unsafe {
+        register_union_hook(
+            rva(ds2_rva::FE_SCENE_PROXY_SET_TEXT),
+            set_text_handler,
+            &ORIG_SET_TEXT,
+        )
+    } {
+        // The row still works without it; only its grey is lost.
+        log(format_args!(
+            "{LOG_PREFIX} set-text hook failed status={status:?}: a disabled Reallocate row will \
+             not be drawn grey"
+        ));
+    }
+}
 /// Soul Vessels held when the Reallocate screen opened, while a spend is still being watched for;
 /// [`u32::MAX`] when nothing is.
 static VESSELS_BEFORE: AtomicU32 = AtomicU32::new(u32::MAX);
@@ -894,15 +949,7 @@ pub unsafe fn install(rows: Rows) -> Outcome {
         creator[ds2_rva::FE_JOB_CREATOR_REFCOUNT_OFFSET / 8]
             .store(CREATOR_REFCOUNT, Ordering::Release);
     }
-    ROWS.store(
-        if rows.change_appearance {
-            APPEARANCE
-        } else {
-            0
-        } | if rows.rename { RENAME } else { 0 }
-            | if rows.reallocate { REALLOCATE } else { 0 },
-        Ordering::Release,
-    );
+    ROWS.store(row_bits(rows), Ordering::Release);
 
     if let Err(error) = {
         // SAFETY: the caller's contract.
@@ -983,21 +1030,8 @@ pub unsafe fn install(rows: Rows) -> Outcome {
     }
 
     if rows.reallocate {
-        // SAFETY: `(proxy*, const wchar_t*)`, two integer arguments; `ORIG_SET_TEXT` is the
-        // static the handler calls through.
-        if let Err(status) = unsafe {
-            register_union_hook(
-                rva(ds2_rva::FE_SCENE_PROXY_SET_TEXT),
-                set_text_handler,
-                &ORIG_SET_TEXT,
-            )
-        } {
-            // The row still works without it; only its grey is lost.
-            log(format_args!(
-                "{LOG_PREFIX} set-text hook failed status={status:?}: a disabled Reallocate row \
-                 will not be drawn grey"
-            ));
-        }
+        // SAFETY: the caller's contract.
+        unsafe { hook_set_text() };
     }
 
     log(format_args!(

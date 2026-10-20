@@ -87,6 +87,8 @@ mod up_enter;
 
 #[cfg(windows)]
 pub use install::{LogFn, Outcome, Request, install, set_logger};
+#[cfg(windows)]
+pub use up_enter::set_enabled as set_up_enters_list;
 
 /// Where UP from the category strip puts the item list's cursor: the bottom row, in the cursor's
 /// column, or on the last item when that column has no cell in the bottom row.
