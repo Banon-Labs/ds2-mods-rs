@@ -241,6 +241,7 @@ KEY_CONTINUE_RECORD = "record"
 KEY_CONTINUE_SLOT = "slot"
 KEY_CONTINUE_SILENCE = "silence"
 KEY_CONTINUE_HIDE_MENUS = "hide_menus"
+KEY_CONTINUE_HOLLOW_SLOT_GUARD = "hollow_slot_guard"
 
 MENU_SECTION = "title_menu"
 KEY_SHOW_UNAVAILABLE = "show_unavailable"
@@ -326,6 +327,7 @@ BUILD_IMPORT_SECTION = "build_import"
 #: two binding keys in `crates/ds2-inventory-sort/src/lib.rs`.
 INVENTORY_SORT_SECTION = "inventory_sort"
 KEY_INVENTORY_SORT_ENABLED = "enabled"
+KEY_INVENTORY_SORT_UP_ENTERS_LIST = "up_enters_list"
 KEY_INVENTORY_SORT_KEY = "key"
 KEY_INVENTORY_SORT_PAD = "pad"
 
@@ -1853,6 +1855,7 @@ def config_text(
 {KEY_CONTINUE_SLOT} = {continue_slot}  # boot straight into this character slot, 0-9; -1 = the normal title
 {KEY_CONTINUE_SILENCE} = {b(continue_silence)}  # mute the title while it auto-continues
 {KEY_CONTINUE_HIDE_MENUS} = {b(continue_hide_menus)}  # hide the menus while it auto-continues
+{KEY_CONTINUE_HOLLOW_SLOT_GUARD} = true  # stop a hollow save slot from hanging the game on load
 {KEY_CONTINUE_RECORD} = {b(continue_record)}  # log the character list's cursor and slot state
 
 # ============================================================================================
@@ -1943,6 +1946,7 @@ def config_text(
 
 [{INVENTORY_SORT_SECTION}]
 {KEY_INVENTORY_SORT_ENABLED} = {b(inventory_sort)}  # open the game's sort dialog from a button, in inventory and equip screens
+{KEY_INVENTORY_SORT_UP_ENTERS_LIST} = true  # UP on the inventory category strip enters the item list
 # (live) Keyboard key, e.g. "F7"; empty = none.
 {KEY_INVENTORY_SORT_KEY} = "{inventory_sort_key}"
 # (live) Pad button: a b x y lb rb back start lthumb rthumb dpad_up dpad_down dpad_left dpad_right; empty = none.

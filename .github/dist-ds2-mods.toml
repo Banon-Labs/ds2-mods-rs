@@ -74,3 +74,9 @@ enabled = true  # Estus Flask at max charges and heal (12 and +6) on every load
 
 [item_warn]
 enabled = true  # red X on items your stats or attunement slots can't use
+
+[inventory_sort]
+up_enters_list = true  # UP on the inventory category strip enters the item list
+
+[continue]
+hollow_slot_guard = true  # stop a hollow save slot from hanging the game on load

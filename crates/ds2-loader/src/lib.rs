@@ -835,8 +835,8 @@ fn install_build_import() {
     ));
 }
 
-/// Install the Inventory tab's detours: UP-enters-list always, and a button bound to the game's own
-/// inventory sort dialog if `<Game>/ds2-mods.toml` asked for it.
+/// Install the Inventory tab's detours: UP-enters-list unless `[inventory_sort] up_enters_list =
+/// false`, and a button bound to the game's own inventory sort dialog if `enabled = true`.
 ///
 /// **Before [`install_menu_row`], for the same reason [`install_build_import`] is**: the button is
 /// read from a per-frame tick that `ds2_menu_row::install` seals the registry for. A tick
@@ -844,12 +844,16 @@ fn install_build_import() {
 fn install_inventory_sort() {
     let config = inventory_sort::InventorySortConfig::load();
     log_line(format_args!("{}", config.describe()));
-    // Installed whatever `enabled` says: UP-enters-list on the Inventory tab rides on the same
-    // detours and is always on (user directive 2026-09-29). `enabled` arms the sort button only.
+    // UP-enters-list on the Inventory tab rides on the same detours as the sort button, so either
+    // key installs them; `enabled` arms the button and `up_enters_list` the UP entry.
+    if !config.enabled && !config.up_enters_list {
+        return;
+    }
     ds2_inventory_sort::set_logger(log_line);
     let request = ds2_inventory_sort::Request {
         config_path: crash_logging::config_file_path(),
         sort_button: config.enabled,
+        up_enters_list: config.up_enters_list,
     };
     // SAFETY: both targets are function starts recorded in `ds2-rva` with the five bytes they must
     // begin with, and the crate re-reads those bytes and refuses to patch anything that does not
@@ -1835,12 +1839,14 @@ fn install_continue_record() {
     let config = continue_flow::ContinueConfig::load();
     log_line(format_args!("{}", config.describe()));
     ds2_continue::set_logger(log_line);
-    // On for every run, whatever `[continue]` says: a player picking a hollow slot from the game's
-    // own list hangs the game with or without this crate's shortcut, and the guard changes nothing
-    // but a walk that would never return.
-    // SAFETY: the target's prologue is checked against `ds2-rva` before anything is patched, and
-    // this runs at the same install position as every other detour.
-    unsafe { ds2_continue::install_hollow_slot_guard() };
+    // On unless `[continue] hollow_slot_guard = false`, whatever the other keys say: a player
+    // picking a hollow slot from the game's own list hangs the game with or without this crate's
+    // shortcut, and the guard changes nothing but a walk that would never return.
+    if config.hollow_slot_guard {
+        // SAFETY: the target's prologue is checked against `ds2-rva` before anything is patched,
+        // and this runs at the same install position as every other detour.
+        unsafe { ds2_continue::install_hollow_slot_guard() };
+    }
     // The third reason to patch, and it is not a `[continue]` key at all. The Load Character from
     // File row does its work at the title screen -- point the loads at a staged container, re-read
     // it, open the character list for it -- and the two detours that drive that are this crate's.
