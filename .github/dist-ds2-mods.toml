@@ -80,3 +80,12 @@ up_enters_list = true  # UP on the inventory category strip enters the item list
 
 [continue]
 hollow_slot_guard = true  # stop a hollow save slot from hanging the game on load
+
+[change_appearance]
+enabled = false  # bonfire row: the character creator, changing only face, sex and body
+
+[rename_character]
+enabled = false  # bonfire row: rename the character
+
+[reallocate_stats]
+enabled = false  # bonfire row: the Soul Vessel reallocate screen, greyed until it can be used
