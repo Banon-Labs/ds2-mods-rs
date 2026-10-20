@@ -12,6 +12,11 @@
 # 2026-09-25 with the reader renamed to `ds2-frida-evidence.py`.
 set -uo pipefail
 
+# Drain the event cupcake writes to stdin before printing anything: the engine reads output only
+# after the whole event is written, so a signal that skips this can deadlock the hook (see
+# repo_paths.sh, 2026-10-19). Enforced by run_signal_stdin_drain_checks.
+cat >/dev/null
+
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)" || exit 0
 reader="$repo_root/scripts/ds2-frida-evidence.py"
 [ -f "$reader" ] || exit 0

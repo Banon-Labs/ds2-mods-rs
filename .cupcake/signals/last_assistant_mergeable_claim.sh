@@ -36,6 +36,11 @@
 # (the worst across the targets) and targets a comma list of PR numbers or `branch`, and nothing
 # when the transcript cannot be read or the closing prose makes no claim.
 set -uo pipefail
+
+# Drain the event cupcake writes to stdin before printing anything: the engine reads output only
+# after the whole event is written, so a signal that skips this can deadlock the hook (see
+# repo_paths.sh, 2026-10-19). Enforced by run_signal_stdin_drain_checks.
+cat >/dev/null
 CUPCAKE_SIGNAL_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 export CUPCAKE_SIGNAL_REPO_ROOT
 

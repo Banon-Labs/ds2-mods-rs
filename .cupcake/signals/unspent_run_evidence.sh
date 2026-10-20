@@ -22,6 +22,11 @@
 # and takes precedence, so the hand-test exemption (the user wrote after a launch from that worktree)
 # is still decided from the real transcript.
 set -uo pipefail
+
+# Drain the event cupcake writes to stdin before printing anything: the engine reads output only
+# after the whole event is written, so a signal that skips this can deadlock the hook (see
+# repo_paths.sh, 2026-10-19). Enforced by run_signal_stdin_drain_checks.
+cat >/dev/null
 if [ -z "${CUPCAKE_UNSPENT_EVIDENCE_MACHINE_OVERRIDE:-}" ] && [ -n "${CUPCAKE_UNSPENT_EVIDENCE_OVERRIDE+set}" ]; then
     [ -n "$CUPCAKE_UNSPENT_EVIDENCE_OVERRIDE" ] && printf '%s\n' "$CUPCAKE_UNSPENT_EVIDENCE_OVERRIDE"
     exit 0
