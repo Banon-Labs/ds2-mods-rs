@@ -9231,6 +9231,24 @@ pub const INPUT_UPDATE_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x08];
 /// visibility.
 pub const INPUT_UPDATE_CURSOR_WANTED_OFFSET: usize = 0x66c;
 
+/// Why [`INPUT_UPDATE`] must not re-centre the OS pointer: a `u32` bitmask at `this+0x684`.
+///
+/// The update's one `SetCursorPos` (return address `0x140af452b`) runs only while this mask is 0
+/// and bit 0 of `this+0x680` is set (`cmp DWORD PTR [rbx+0x684],0x0` / `jne` at `0x140af50d6`). The
+/// game keeps its own reasons in it, each set and cleared by its own case: `0x01`, `0x02`, `0x04`,
+/// `0x08` in the window-message switch at `0x140af51df`..`0x140af52b2`, and `0x10` while the system
+/// object's quit byte (`+0x13a`, the one quit-to-desktop writes) is set, at `0x140af50c6`.
+///
+/// Measured 2026-10-21 (`scripts/frida/cursor-pin-watch.js`): in the world, with no menu open, the
+/// game calls `SetCursorPos(960, 540)` from that site every frame, 88 calls in two seconds, which
+/// pins a pointer a panel has freed to the window's centre. The pause menu stops it, which is why a
+/// panel opened over the menu did not see it.
+pub const INPUT_UPDATE_RECENTRE_SUPPRESS_OFFSET: usize = 0x684;
+
+/// The bit of [`INPUT_UPDATE_RECENTRE_SUPPRESS_OFFSET`] `ds2-input-harness` adds while a panel
+/// holds the input: the top bit, far from the game's five, set around each update and cleared after.
+pub const INPUT_UPDATE_RECENTRE_SUPPRESS_PANEL_BIT: u32 = 0x8000_0000;
+
 /// The display count the last `ShowCursor` returned, stored at `this+0x668` by
 /// [`INPUT_UPDATE`] (`0x140af4490`, `0x140af44b0`).
 pub const INPUT_UPDATE_CURSOR_COUNT_OFFSET: usize = 0x668;
