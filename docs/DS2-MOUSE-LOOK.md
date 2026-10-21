@@ -138,7 +138,12 @@ cursorObj+0x00 / +0x08        pointer position now / previous   <- menu pointer 
   set and `inputObj+0x684` is zero, and clears `+0x680` afterwards (`0x140af452b`). The only
   writer of bit 0 is `FUN_140af4230`, whose only call site is `FUN_1400533d0` (`0x1400534af`), the
   `FeSceneCommonCursor` show/hide path, which requests the window centre when the menu cursor is
-  hidden. There is no per-frame re-centre.
+  hidden. **Measured 2026-10-21, and it contradicts what this line used to say ("there is no
+  per-frame re-centre"):** in the world with no menu open, `SetCursorPos(960, 540)` is called from
+  this site every frame (88 calls in two seconds, `scripts/frida/cursor-pin-watch.js`), and the
+  pause menu stops it. The skip mask at `inputObj+0x684`
+  (`ds2_rva::INPUT_UPDATE_RECENTRE_SUPPRESS_OFFSET`) is what `ds2-input-harness` uses to stop it
+  while a panel holds the input.
 - **verified in binary**: `FUN_140af4230` also writes the requested point into each input block's
   previous-position field (`FUN_140b08540`: `+0x22c` and `+0x4b4`) so that re-centring does not
   register as motion.
