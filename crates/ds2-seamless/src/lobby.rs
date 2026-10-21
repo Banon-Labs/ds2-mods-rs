@@ -44,8 +44,7 @@ pub const BRACKET_KEY: &str = "8c1e0aea8218b194b8598fc57ec01ccf4c5444e3522d367f1
 
 /// The regulation the host plays on. Only hosts with the searcher's own value can be invaded, so
 /// this is the pool.
-pub const REGULATION_KEY: &str =
-    "404e9b227e020645fc8424868eee50ab0e87b0699ba0df674fa7aa0f1646185f";
+pub const REGULATION_KEY: &str = "404e9b227e020645fc8424868eee50ab0e87b0699ba0df674fa7aa0f1646185f";
 /// The regulation value every 0.0.5 host and search measured carried. A census uses it until
 /// Seamless has been seen writing or filtering on the key this session.
 pub const REGULATION_VALUE_MEASURED: &str = "test_regulation_type";
