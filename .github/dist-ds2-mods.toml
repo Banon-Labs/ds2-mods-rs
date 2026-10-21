@@ -45,6 +45,15 @@ enabled = false
 toggle_key = "semicolon"
 marker_effect_id = 833  # (live) 833-839 are the stone's seven colours, 0 = none
 
+[invadable_hosts]
+# A panel counting the Seamless Co-op hosts you could invade now, per invasion bracket, and how
+# many new ones open each minute. Needs [seamless]. Nothing is joined or published to count them,
+# and Steam is asked only after you first open the panel. The per-minute average is kept in
+# ds2-invadable-hosts.txt beside this file; delete it to start over.
+enabled = true
+key = "F4"       # (live) opens and closes the panel; Esc also closes it
+view_key = "R"   # (live) while it is open: hosts now <-> new hosts per minute
+
 # ============================================================================================
 # Pause menu and saves
 # ============================================================================================

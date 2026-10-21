@@ -5429,6 +5429,63 @@ pub const STEAM_UTILS_VERSION_WITH_PREFILL: &str = "SteamUtils007";
 /// makes [`STEAM_UTILS_VERSION_WITH_PREFILL`] reachable from a binary that only knows `005`.
 pub const STEAM_CLIENT_GET_ISTEAM_UTILS_SLOT: usize = 0x48;
 
+/// `ISteamUtils::IsAPICallCompleted(SteamAPICall_t, bool *pbFailed)`. Vtable slot `+0x58`.
+///
+/// Method 11 of `SteamUtils005` (the version the game's own `SteamUtils()` export returns), counted
+/// in the same table that puts [`STEAM_UTILS_IS_OVERLAY_ENABLED_SLOT`] at method 17 (`+0x88`), the
+/// slot DS2's own call proves.
+pub const STEAM_UTILS_IS_API_CALL_COMPLETED_SLOT: usize = 0x58;
+
+/// `ISteamUtils::GetAPICallResult(SteamAPICall_t, void *, int cub, int iCallback, bool *pbFailed)`.
+/// Vtable slot `+0x68`, method 13, by the same count as [`STEAM_UTILS_IS_API_CALL_COMPLETED_SLOT`].
+pub const STEAM_UTILS_GET_API_CALL_RESULT_SLOT: usize = 0x68;
+
+/// `LobbyMatchList_t`'s callback id, `k_iSteamMatchmakingCallbacks + 10`. Its one field is
+/// `uint32 m_nLobbiesMatching`.
+pub const STEAM_LOBBY_MATCH_LIST_CALLBACK: i32 = 510;
+
+/// `ISteamMatchmaking` as the game's own `steam_api64.dll` export `SteamMatchmaking()` returns it,
+/// `SteamMatchMaking009`. Each slot below is a byte offset into its vtable.
+///
+/// Measured 2026-10-21 in a live game (`scripts/frida/ds2sc-lobby-watch.js`): with Interceptor
+/// observers on these slots of that object, slot 5 received Seamless Co-op's string filters (key,
+/// value, comparison 0), slot 9 its distance `3`, slot 4 its request, slot 13 its `CreateLobby`, slot
+/// 20 its `SetLobbyData` key/value pairs, and slot 14 the `JoinLobby` after a search. Seamless calls
+/// through this same object (its `this` was the pointer the export returned), so the vtable is the
+/// one place every lobby call from either mod passes through.
+///
+/// `SteamMatchMaking009` declares 38 methods (`GetFavoriteGameCount` .. `SetLinkedLobby`). A copy of
+/// the table takes this many entries, more than declared, so a client that serves a longer table
+/// under the same name loses nothing; the extra entries past the real end are never called.
+pub const STEAM_MATCHMAKING_VTABLE_COPY_ENTRIES: usize = 64;
+/// `RequestLobbyList()`, method 4. Returns the `SteamAPICall_t`.
+pub const STEAM_MATCHMAKING_REQUEST_LOBBY_LIST_SLOT: usize = 4 * 8;
+/// `AddRequestLobbyListStringFilter(key, value, ELobbyComparison)`, method 5.
+pub const STEAM_MATCHMAKING_ADD_STRING_FILTER_SLOT: usize = 5 * 8;
+/// `AddRequestLobbyListNumericalFilter(key, int value, ELobbyComparison)`, method 6.
+pub const STEAM_MATCHMAKING_ADD_NUMERICAL_FILTER_SLOT: usize = 6 * 8;
+/// `AddRequestLobbyListNearValueFilter(key, int value)`, method 7.
+pub const STEAM_MATCHMAKING_ADD_NEAR_VALUE_FILTER_SLOT: usize = 7 * 8;
+/// `AddRequestLobbyListFilterSlotsAvailable(int)`, method 8.
+pub const STEAM_MATCHMAKING_ADD_SLOTS_AVAILABLE_FILTER_SLOT: usize = 8 * 8;
+/// `AddRequestLobbyListDistanceFilter(ELobbyDistanceFilter)`, method 9.
+pub const STEAM_MATCHMAKING_ADD_DISTANCE_FILTER_SLOT: usize = 9 * 8;
+/// `AddRequestLobbyListResultCountFilter(int)`, method 10.
+pub const STEAM_MATCHMAKING_ADD_RESULT_COUNT_FILTER_SLOT: usize = 10 * 8;
+/// `AddRequestLobbyListCompatibleMembersFilter(CSteamID)`, method 11.
+pub const STEAM_MATCHMAKING_ADD_COMPATIBLE_MEMBERS_FILTER_SLOT: usize = 11 * 8;
+/// `GetLobbyByIndex(int)`, method 12. Returns the lobby's `CSteamID` as a `u64`.
+pub const STEAM_MATCHMAKING_GET_LOBBY_BY_INDEX_SLOT: usize = 12 * 8;
+/// `SetLobbyData(CSteamID, key, value)`, method 20.
+pub const STEAM_MATCHMAKING_SET_LOBBY_DATA_SLOT: usize = 20 * 8;
+
+/// `ELobbyComparison`: `k_ELobbyComparisonEqualToOrLessThan`.
+pub const STEAM_LOBBY_COMPARISON_AT_MOST: i32 = -2;
+/// `ELobbyComparison`: `k_ELobbyComparisonEqual`.
+pub const STEAM_LOBBY_COMPARISON_EQUAL: i32 = 0;
+/// `ELobbyComparison`: `k_ELobbyComparisonGreaterThan`.
+pub const STEAM_LOBBY_COMPARISON_ABOVE: i32 = 1;
+
 /// `ISteamUtils::IsOverlayEnabled()`. Vtable slot `+0x88`.
 ///
 /// Read out of DS2 itself: [`SOFTWARE_KEYBOARD_IMPL_SHOW`] gates on it before it will ask for a
