@@ -65,7 +65,10 @@ type NearFilterFn = unsafe extern "system" fn(usize, *const c_char, i32);
 type OneIntFn = unsafe extern "system" fn(usize, i32);
 type CompatFn = unsafe extern "system" fn(usize, u64);
 type RequestFn = unsafe extern "system" fn(usize) -> u64;
-type ByIndexFn = unsafe extern "system" fn(usize, i32) -> u64;
+// `CSteamID GetLobbyByIndex(int)`. `CSteamID` is a class, so MSVC returns it through a hidden pointer
+// passed after `this` (measured: called as `(this, index) -> u64` it wrote through the index and
+// faulted in `lsteamclient.dll` at 0xbeef, 2026-10-21).
+type ByIndexFn = unsafe extern "system" fn(usize, *mut u64, i32) -> *mut u64;
 type SetDataFn = unsafe extern "system" fn(usize, u64, *const c_char, *const c_char) -> bool;
 type CompletedFn = unsafe extern "system" fn(usize, u64, *mut bool) -> bool;
 type ResultFn = unsafe extern "system" fn(usize, u64, *mut c_void, i32, i32, *mut bool) -> bool;
@@ -494,9 +497,14 @@ pub(crate) fn poll(sent: &Sent, now_ms: u64) -> Option<Answer> {
     let by_index = original(ds2_rva::STEAM_MATCHMAKING_GET_LOBBY_BY_INDEX_SLOT);
     let ids = (0..matching)
         .filter_map(|index| i32::try_from(index).ok())
-        // SAFETY: `GetLobbyByIndex(this, index)` with an index below the count Steam reported for
-        // this very query, read before any other request could replace the list (the lock).
-        .map(|index| unsafe { std::mem::transmute::<usize, ByIndexFn>(by_index)(iface, index) })
+        .map(|index| {
+            let mut id = 0u64;
+            // SAFETY: `GetLobbyByIndex(this, &out, index)` with an index below the count Steam
+            // reported for this very query, read before any other request could replace the list
+            // (the lock); `out` is a local `u64`, the size of a `CSteamID`.
+            unsafe { std::mem::transmute::<usize, ByIndexFn>(by_index)(iface, &raw mut id, index) };
+            id
+        })
         .filter(|id| *id != 0)
         .collect();
     Some(Answer::Lobbies(ids))
