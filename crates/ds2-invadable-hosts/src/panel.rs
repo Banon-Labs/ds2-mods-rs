@@ -56,6 +56,8 @@ const LABEL_COLUMN: f32 = 150.0;
 const CELL_SHADE_ALPHA: f32 = 0.55;
 
 const TITLE: &str = "Invadable hosts";
+/// The space between the two footer lines.
+const FOOTER_GAP: f32 = 12.0;
 
 static OPEN: AtomicBool = AtomicBool::new(false);
 /// Closed, but still holding input until every key the panel reads is up.
@@ -377,7 +379,8 @@ fn draw_panel(ui: &Ui) {
         + 10.0
         + grid_height
         + 12.0
-        + (line + 4.0) * 2.0;
+        + line * 2.0
+        + FOOTER_GAP;
     let left = ((display[0] - width) * 0.5).round();
     let top = (display[1] * 0.12)
         .round()
@@ -473,45 +476,49 @@ fn draw_panel(ui: &Ui) {
 
     // "Press [R] to see new hosts per minute": the line is a button as well as a hint, so a player
     // with the mouse in hand need not reach for the key.
-    let press = "Press ";
-    let press_width = ui.calc_text_size(press)[0];
-    list.add_text([inner_left, y], style::TEXT_DIM, press);
     let verb = if rate {
-        "to see hosts now"
+        " to see hosts now"
     } else {
-        "to see new hosts per minute"
+        " to see new hosts per minute"
     };
-    ds2_overlay::panels::hint_bar(
+    let prompt = [Span::Text("Press "), Span::Key(&view_key), Span::Text(verb)];
+    let hovered = inside(
+        [inner_left, y - FOOTER_GAP * 0.5],
+        [
+            inner_left + spans_width(ui, &prompt),
+            y + line + FOOTER_GAP * 0.5,
+        ],
+    );
+    draw_spans(
         ui,
         &list,
-        [inner_left + press_width, y],
-        inner_right,
-        &[(view_key.as_str(), verb)],
+        [inner_left, y],
+        &prompt,
+        if hovered {
+            style::TEXT
+        } else {
+            style::TEXT_DIM
+        },
     );
-    let prompt_width =
-        press_width + ui.calc_text_size(&view_key)[0] + ui.calc_text_size(verb)[0] + line;
-    let prompt_min = [inner_left, y - 2.0];
-    let prompt_max = [inner_left + prompt_width, y + line + 2.0];
-    if inside(prompt_min, prompt_max) {
-        list.add_line(
-            [prompt_min[0], prompt_max[1]],
-            [prompt_max[0], prompt_max[1]],
-            style::BRONZE_DIM,
-        )
-        .build();
+    if hovered {
         tooltip.get_or_insert_with(|| vec![format!("Click, or press {view_key}.")]);
         if clicked {
             CLICKS.fetch_add(1, Ordering::Relaxed);
             switch_view();
         }
     }
-    y += line + 4.0;
-    ds2_overlay::panels::hint_bar(
+    y += line + FOOTER_GAP;
+    draw_spans(
         ui,
         &list,
         [inner_left, y],
-        inner_right,
-        &[(menu_key.as_str(), "or"), ("Esc", "Close")],
+        &[
+            Span::Key(&menu_key),
+            Span::Text(" or "),
+            Span::Key("Esc"),
+            Span::Text(" to close"),
+        ],
+        style::TEXT_DIM,
     );
 
     if let Some(lines) = tooltip {
@@ -634,6 +641,59 @@ fn draw_row(
     Some(lines)
 }
 
+/// One piece of a footer line: words, or a key drawn as a framed chip.
+enum Span<'a> {
+    Text(&'a str),
+    Key(&'a str),
+}
+
+/// The inner padding of a key chip, either side of its name.
+fn chip_pad(ui: &Ui) -> f32 {
+    (ui.current_font_size() * 0.25).round()
+}
+
+fn span_width(ui: &Ui, span: &Span<'_>) -> f32 {
+    match span {
+        Span::Text(text) => ui.calc_text_size(text)[0],
+        Span::Key(name) => ui.calc_text_size(name)[0] + chip_pad(ui) * 2.0,
+    }
+}
+
+fn spans_width(ui: &Ui, spans: &[Span<'_>]) -> f32 {
+    spans.iter().map(|span| span_width(ui, span)).sum()
+}
+
+/// A line of words and key chips from `origin`: one baseline, the game's key-help chip (a bronze
+/// frame around the name), and only the spaces the words themselves carry.
+fn draw_spans(
+    ui: &Ui,
+    list: &hudhook::imgui::DrawListMut<'_>,
+    origin: [f32; 2],
+    spans: &[Span<'_>],
+    colour: [f32; 4],
+) {
+    let line = ui.current_font_size();
+    let pad = chip_pad(ui);
+    let mut x = origin[0];
+    for span in spans {
+        let width = span_width(ui, span);
+        match span {
+            Span::Text(text) => list.add_text([x, origin[1]], colour, text),
+            Span::Key(name) => {
+                list.add_rect(
+                    [x, origin[1] - 1.0],
+                    [x + width, origin[1] + line + 1.0],
+                    style::BRONZE,
+                )
+                .thickness(style::FRAME_PX)
+                .build();
+                list.add_text([x + pad, origin[1]], style::TEXT, name);
+            }
+        }
+        x += width;
+    }
+}
+
 fn draw_tooltip(
     ui: &Ui,
     list: &hudhook::imgui::DrawListMut<'_>,
@@ -650,7 +710,13 @@ fn draw_tooltip(
         + pad * 2.0;
     let height = lines.len() as f32 * line + pad * 2.0;
     let left = (mouse[0] + line).min(display[0] - width).max(0.0);
-    let top = (mouse[1] + line).min(display[1] - height).max(0.0);
+    // Above the pointer where it fits, so it never lies over the line it describes or the frame.
+    let above = mouse[1] - height - pad;
+    let top = if above >= 0.0 {
+        above
+    } else {
+        (mouse[1] + line).min(display[1] - height).max(0.0)
+    };
     list.add_rect([left, top], [left + width, top + height], style::INK_0)
         .filled(true)
         .build();

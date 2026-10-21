@@ -34,8 +34,9 @@ use std::collections::BTreeSet;
 /// values levels 1 and 838 search for).
 pub const BRACKET_COUNT: usize = 9;
 
-/// The first soul level of each bracket, measured 2026-10-21 by `scripts/frida/bracket-scout.js`:
-/// the bracket Seamless's own search asked for at each of 52 probed levels (stats set so the game's
+/// The first soul level of each bracket.
+///
+/// Measured 2026-10-21 by `scripts/frida/bracket-scout.js`: the bracket Seamless's own search asked for at each of 52 probed levels (stats set so the game's
 /// own level was the probe), bisected until every edge was two adjacent levels. Not Elden Ring
 /// Seamless's table: the cuts at 156 and 251 differ from its 151 and 301.
 pub const BRACKET_FIRST_LEVEL: [u32; BRACKET_COUNT] = [1, 21, 41, 71, 101, 126, 156, 201, 251];
