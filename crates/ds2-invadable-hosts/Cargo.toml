@@ -1,0 +1,31 @@
+# The Invadable hosts panel: how many DARK SOULS II Seamless Co-op hosts this player could invade
+# now in each invasion bracket, and how often new ones open, counted from Steam's lobby list.
+#
+# The census arithmetic and the key settings build everywhere and are tested on the host
+# (`census`, `keys`); the Steam calls, the driver and the panel need Windows.
+[package]
+name = "ds2-invadable-hosts"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# The panel's two keys: names, the binding rules, and the text-watched reload.
+ds2-hotkey-config.workspace = true
+# Seamless's measured lobby schema (`ds2_seamless::lobby`): the hashed keys and their values.
+ds2-seamless.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ds2-rva.workspace = true
+ds2-game-base.workspace = true
+# The panel draws on its `Present` clock and imgui frame, in the shared palette.
+ds2-overlay.workspace = true
+# `hold` keeps the game still while the panel has the mouse and keyboard.
+ds2-input-harness.workspace = true
+# The panel's `imgui::Ui`, and the `windows` re-export it reads the keyboard through.
+hudhook.workspace = true
+
+[lints]
+workspace = true

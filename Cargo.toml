@@ -111,6 +111,8 @@ ds2-estus-max = { path = "crates/ds2-estus-max" }
 ds2-change-appearance = { path = "crates/ds2-change-appearance" }
 # Logs the music events the game starts and stops, through the FMOD import slots.
 ds2-music-probe = { path = "crates/ds2-music-probe" }
+# The Invadable hosts panel: Seamless hosts per invasion bracket, counted from Steam's lobby list.
+ds2-invadable-hosts = { path = "crates/ds2-invadable-hosts" }
 
 # Arxan neutering. DS2 SOTFS carries 48 Arxan stubs; every MinHook detour patches a prologue
 # in `.text`, which is what their integrity checks look for. Path dep on the local checkout

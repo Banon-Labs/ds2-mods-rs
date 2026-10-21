@@ -60,8 +60,22 @@ unsafe extern "system" fn detour_update(this: *mut u8, dt: f32) -> u64 {
     let kept = unsafe { wanted.read_unaligned() };
     // SAFETY: as above.
     unsafe { wanted.write_unaligned(1) };
+    // In the world the same update re-centres the pointer every frame, which pins the pointer this
+    // just freed to the window's middle. The game has a mask of reasons not to, and skips the
+    // `SetCursorPos` while any is set: add the harness's own reason for the call and take only that
+    // bit back afterwards, so the game's reasons are never touched.
+    // SAFETY: the same object, the mask at its recorded offset; this thread is the update's.
+    let suppress = unsafe {
+        this.add(ds2_rva::INPUT_UPDATE_RECENTRE_SUPPRESS_OFFSET)
+            .cast::<u32>()
+    };
+    let bit = ds2_rva::INPUT_UPDATE_RECENTRE_SUPPRESS_PANEL_BIT;
+    // SAFETY: as above.
+    unsafe { suppress.write_unaligned(suppress.read_unaligned() | bit) };
     // SAFETY: the game's own arguments, passed through.
     let result = unsafe { original(this, dt) };
+    // SAFETY: as above.
+    unsafe { suppress.write_unaligned(suppress.read_unaligned() & !bit) };
     // SAFETY: as above.
     unsafe { wanted.write_unaligned(kept) };
     result

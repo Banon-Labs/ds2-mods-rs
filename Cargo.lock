@@ -645,6 +645,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds2-invadable-hosts"
+version = "0.1.0"
+dependencies = [
+ "ds2-game-base",
+ "ds2-hotkey-config",
+ "ds2-input-harness",
+ "ds2-overlay",
+ "ds2-rva",
+ "ds2-seamless",
+ "hudhook",
+]
+
+[[package]]
 name = "ds2-invasion-path"
 version = "0.1.0"
 dependencies = [
@@ -706,6 +719,7 @@ dependencies = [
  "ds2-hp-gauge",
  "ds2-input-harness",
  "ds2-intro-skip",
+ "ds2-invadable-hosts",
  "ds2-invasion-path",
  "ds2-inventory-sort",
  "ds2-item-warn",

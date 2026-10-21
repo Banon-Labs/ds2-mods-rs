@@ -40,6 +40,8 @@ use std::path::Path;
 
 use ds2_hotkey_config::kv::KeyValues;
 
+pub mod lobby;
+
 /// The section this crate reads out of `ds2-mods.toml`. Mirrored in `scripts/ds2-run.py`.
 pub const CONFIG_SECTION: &str = "seamless";
 

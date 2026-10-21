@@ -385,6 +385,12 @@ MUSIC_PROBE_SECTION = "music_probe"
 KEY_MUSIC_PROBE_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-music-probe/src/lib.rs`.
 MUSIC_PROBE_LOG_PREFIX = "ds2-music-probe:"
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-invadable-hosts/src/keys.rs`. OFF in the DLL;
+#: ON here while the panel is being built, and `--no-invadable-hosts` writes false.
+INVADABLE_HOSTS_SECTION = "invadable_hosts"
+KEY_INVADABLE_HOSTS_ENABLED = "enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-invadable-hosts/src/lib.rs`.
+INVADABLE_HOSTS_LOG_PREFIX = "ds2-invadable-hosts:"
 
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/soul_memory_guard.rs`. OFF by
 #: default here, matching the DLL; `--soul-memory-guard` turns it on.
@@ -1773,6 +1779,7 @@ def config_text(
     sync_test_invader: int | None = None,
     net_effects: bool = False,
     music_probe: bool = True,
+    invadable_hosts: bool = True,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1976,6 +1983,11 @@ def config_text(
 {KEY_MUSIC_PROBE_ENABLED} = {b(music_probe)}  # F10 opens the region music player
 # key = "F10"
 
+[{INVADABLE_HOSTS_SECTION}]
+{KEY_INVADABLE_HOSTS_ENABLED} = {b(invadable_hosts)}  # F4 opens the Invadable hosts panel (Seamless hosts per bracket)
+# key = "F4"  # opens and closes the panel; live
+# view_key = "R"  # hosts now <-> new hosts per minute, while the panel is open; live
+
 [{VOICE_CHAT_SECTION}]
 # A key that toggles the game's Voice chat option. key and announce ("en", "pl" or "") are live.
 {KEY_VOICE_CHAT_ENABLED} = {b(voice_chat)}
@@ -2066,6 +2078,7 @@ def write_config(
     sync_test_invader: int | None = None,
     net_effects: bool = False,
     music_probe: bool = True,
+    invadable_hosts: bool = True,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -2121,6 +2134,7 @@ def write_config(
         sync_test_invader=sync_test_invader,
         net_effects=net_effects,
         music_probe=music_probe,
+        invadable_hosts=invadable_hosts,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -2633,6 +2647,7 @@ def dry_run(
     sync_test_invader: int | None = None,
     net_effects: bool = False,
     music_probe: bool = True,
+    invadable_hosts: bool = True,
     path_tracing: bool = True,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
@@ -2732,6 +2747,7 @@ def dry_run(
             sync_test_invader=sync_test_invader,
             net_effects=net_effects,
             music_probe=music_probe,
+            invadable_hosts=invadable_hosts,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -2801,6 +2817,7 @@ def dry_run(
                 sync_test_invader=sync_test_invader,
                 net_effects=net_effects,
                 music_probe=music_probe,
+                invadable_hosts=invadable_hosts,
             ),
             indent="[dry-run]   | ",
         )
@@ -3371,6 +3388,7 @@ def launch(
     sync_test_invader: int | None = None,
     net_effects: bool = False,
     music_probe: bool = True,
+    invadable_hosts: bool = True,
     path_tracing: bool = True,
 ) -> int:
     report_environment(probe)
@@ -3455,6 +3473,7 @@ def launch(
         sync_test_invader=sync_test_invader,
         net_effects=net_effects,
         music_probe=music_probe,
+        invadable_hosts=invadable_hosts,
     )
     print(f"[config] {config_path}")
 
@@ -5575,6 +5594,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-invadable-hosts",
+        dest="invadable_hosts",
+        action="store_false",
+        default=True,
+        help=(
+            "turn off ds2-invadable-hosts, the F4 panel counting Seamless hosts per invasion "
+            "bracket. Registering it touches nothing; Steam is asked only after the panel is "
+            "first opened. OFF in the DLL without a config."
+        ),
+    )
+    parser.add_argument(
         "--no-music-probe",
         dest="music_probe",
         action="store_false",
@@ -6099,6 +6129,7 @@ def main() -> int:
             sync_test_invader=args.sync_test_invader,
             net_effects=args.net_effects,
             music_probe=args.music_probe,
+            invadable_hosts=args.invadable_hosts,
             path_tracing=args.path_tracing,
         )
     return launch(
@@ -6154,6 +6185,7 @@ def main() -> int:
         sync_test_invader=args.sync_test_invader,
         net_effects=args.net_effects,
         music_probe=args.music_probe,
+        invadable_hosts=args.invadable_hosts,
         path_tracing=args.path_tracing,
     )
 

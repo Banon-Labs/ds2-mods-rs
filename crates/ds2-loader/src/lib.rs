@@ -385,6 +385,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_estus_max();
                 install_change_appearance();
                 install_music_probe();
+                install_invadable_hosts();
                 arm_fault(crash_config);
                 finish_boot_batch();
                 ds2_boot_timeline::mark("installs-done");
@@ -439,6 +440,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_estus_max();
                 install_change_appearance();
                 install_music_probe();
+                install_invadable_hosts();
                 arm_fault(crash_config);
                 finish_boot_batch();
             });
@@ -1101,6 +1103,52 @@ fn install_change_appearance() {
 ///
 /// Off unless `[music_probe] enabled = true`. It fronts four FMOD import slots in `.idata` and
 /// changes no call; `ds2-continue` fronts a different FMOD slot (`ChannelGroup::setVolume`).
+/// The Invadable hosts panel (`ds2-invadable-hosts`): Seamless hosts per invasion bracket.
+///
+/// Off unless `[invadable_hosts] enabled = true`. Installing it registers a panel and a frame hook
+/// and nothing else; the Steam matchmaking interface is wrapped, and counting starts, the first
+/// time the player opens the panel. Its keys are re-read from the file while the game runs, so the
+/// file's path and its text at attach go to the crate.
+fn install_invadable_hosts() {
+    let path = crash_logging::config_file_path();
+    let text = path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    if !ds2_invadable_hosts::keys::enabled(&text) {
+        log_line(format_args!(
+            "{} config [{}] enabled=false",
+            ds2_invadable_hosts::LOG_PREFIX,
+            ds2_invadable_hosts::keys::CONFIG_SECTION
+        ));
+        return;
+    }
+    let Some(path) = path else {
+        return;
+    };
+    ds2_invadable_hosts::set_logger(log_line);
+    // The panel takes the game's input through the harness while it is open, like the Music panel.
+    ds2_input_harness::set_logger(log_line);
+    // SAFETY: called from the post-Arxan position like every other install here; the harness checks
+    // each site against the prologue `ds2-rva` records, refuses a moved one, and is idempotent.
+    let hooked = unsafe { ds2_input_harness::install() };
+    if hooked != INPUT_HARNESS_SITES {
+        log_line(format_args!(
+            "{} only {hooked}/{INPUT_HARNESS_SITES} input devices can be held -- the game may move \
+             under the panel",
+            ds2_invadable_hosts::LOG_PREFIX
+        ));
+    }
+    if !start_overlay() {
+        log_line(format_args!(
+            "{} ds2-overlay could not start, so there is no Invadable hosts panel this run",
+            ds2_invadable_hosts::LOG_PREFIX
+        ));
+        return;
+    }
+    ds2_invadable_hosts::install(path, &text);
+}
+
 fn install_music_probe() {
     let config = music_probe::MusicProbeConfig::load();
     log_line(format_args!("{}", config.describe()));

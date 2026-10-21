@@ -100,6 +100,8 @@ ds2-estus-max.workspace = true
 ds2-change-appearance.workspace = true
 # Off by default; installed only when `[music_probe] enabled = true`.
 ds2-music-probe.workspace = true
+# Off by default; registered only when `[invadable_hosts] enabled = true`.
+ds2-invadable-hosts.workspace = true
 ds2-rva.workspace = true
 dearxan = { workspace = true, features = ["disabler", "rayon"] }
 # The facade dearxan reports its own analysis and patch timings through; see `DearxanLog`.
