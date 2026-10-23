@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""The recommender's best build at the top level of every Seamless Co-op invasion bracket, as the
+JSON `scripts/ds2-sl2-builds.py` writes into a save.
+
+    # 1. rank every weapon of every infusion at each level (slow: run in the background)
+    for inf in No_Infusion Fire Magic Lightning Dark Poison Bleed Raw Enchanted Mundane; do
+      python3 scripts/ds2-builds-recommend.py --best-weapons $inf --sweep 20,40,70,100,125,155,200,250,838 \\
+          --top 5 --json --jobs 8 > DIR/$inf.json
+    done
+    # 2. pick the top row per level across infusions and generate its whole build
+    python3 scripts/ds2-bracket-builds.py --best-dir DIR -o builds.json
+    # check the max-HP arithmetic against a live character (scripts/frida/build-check.js)
+    python3 scripts/ds2-bracket-builds.py --max-hp "VIG=10,END=8,VIT=8,ATT=6,STR=12,DEX=14,INT=6,FTH=6,ADP=3" \\
+        --rings "Life Ring+3,Chloranthy Ring+2"
+
+THE LEVELS are each bracket's highest: Seamless 0.0.5's brackets by soul level are 1-20, 21-40,
+41-70, 71-100, 101-125, 126-155, 156-200, 201-250 and 251+ (measured 2026-10-21 with
+scripts/frida/bracket-scout.js; `crates/ds2-invadable-hosts/src/census.rs` BRACKET_FIRST_LEVEL),
+and the last one's highest is the game's ceiling, 838.
+
+"BEST" is the recommender's own measure, nothing added here: `--best-weapons` ranks each weapon of
+an infusion at the build `optimize_build` makes for it, by the R1 damage it lands in 1.5 s against
+the bracket's average defender, which answers each attack with its best counter ring. Scores
+compare across infusions, so the top row over all ten files is the level's weapon, and
+`generate_build` makes its whole build: class, stats, rings, armour under 70% load.
+
+WHAT GOES ON THE BODY: the primary in RH1, the next one-handed weapon `generate_build` lists in
+RH2, the four rings it wears, its armour, and the Estus Flask in the first item slot. The other
+weapons it lists are already in the mule's bag.
+
+HP is the game's MAX, because the save's HP field is the CURRENT value and the game recomputes
+the max on load (measured 2026-10-23: a save written with 800 came up 800/1064): the recommender's
+`hit_points` at the stats the rings give, times each worn ring's max-HP factor.
+"""
+
+from __future__ import annotations
+
+import argparse
+import importlib.util
+import json
+import math
+import re
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+LEVELS = [20, 40, 70, 100, 125, 155, 200, 250, 838]
+INFUSIONS = ["No_Infusion", "Fire", "Magic", "Lightning", "Dark", "Poison", "Bleed", "Raw", "Enchanted",
+             "Mundane"]
+SHORT = {"No_Infusion": "", "Lightning": "Ltng", "Enchanted": "Ench", "Mundane": "Mund"}
+NAME_MAX = 16  # the game's own name field takes 16 characters
+
+
+def _load(name: str, file: str):
+    spec = importlib.util.spec_from_file_location(name, HERE / file)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def load_data(rec):
+    sp, mm = rec.dump_site_tables(rec.CACHE / "site-tables")
+    data = rec.Data(json.loads(sp.read_text()), json.loads(mm.read_text()))
+    print(rec.apply_regulation(data)[:120] + " ...", file=sys.stderr)
+    return data
+
+
+def norm(name: str) -> str:
+    return re.sub(r"[^a-z0-9+]", "", name.lower())
+
+
+def ring_key(data, name: str) -> str:
+    for k, v in data.rings.items():
+        if norm(v["name"]) == norm(name):
+            return k
+    raise SystemExit(f"unknown ring {name!r}")
+
+
+def max_hp(rec, data, stats: dict, rings: list[str]) -> int:
+    gear = rec.ring_gear(data)
+    factor = math.prod(gear[r]["hp"] for r in rings if r in gear)
+    return int(rec.hit_points(data, rec.gear_stats(data, stats, rings)) * factor)
+
+
+def top_rows(best_dir: Path, level: int) -> list[tuple[float, str, dict]]:
+    rows = []
+    for inf in INFUSIONS:
+        f = best_dir / f"{inf}.json"
+        if not f.exists() or not f.stat().st_size:
+            raise SystemExit(f"{f}: missing or empty -- the --best-weapons sweep for {inf} has not finished")
+        for r in json.loads(f.read_text()).get(str(level), []):
+            rows.append((r["score"], inf, r))
+    return sorted(rows, key=lambda x: -x[0])
+
+
+def short_name(level: int, weapon: str, inf: str) -> str:
+    tag = SHORT.get(inf, inf)
+    name = f"{level} {tag + ' ' if tag else ''}{weapon}"
+    return name[:NAME_MAX].rstrip()
+
+
+def build_for(rec, data, corpus, level: int, slot: int, inf: str, row: dict) -> dict:
+    g = rec.generate_build(data, corpus, row["key"], inf, level)
+    if g is None:
+        raise SystemExit(f"SL {level}: generate_build made no build for {row['weapon']} ({inf})")
+    worn = list(dict.fromkeys(g["rings"]))[:4]
+    keys = [ring_key(data, n) for n in worn]
+    equip = {"rh1": {"name": g["primary"][0], "infusion": g["primary"][1]}}
+    if g["weapons_1h"]:
+        name, winf, _ = g["weapons_1h"][0]
+        equip["rh2"] = {"name": name, "infusion": winf}
+    for slot_name, piece in zip(("head", "chest", "hands", "legs"), g["armor"]):
+        if piece != "Naked":
+            equip[slot_name] = {"name": piece}
+    for i, ring in enumerate(worn):
+        equip[f"ring{i + 1}"] = {"name": ring}
+    equip["item1"] = {"name": "Estus Flask"}
+    cls = data.classes[g["class"]]
+    return {"slot": slot, "name": short_name(level, g["primary"][0], inf), "class": g["class"],
+            "class_level": int(cls["level"]), "soul_level": level, "stats": g["stats"],
+            "hp": max_hp(rec, data, g["stats"], keys), "two_handed": g["two_handed"],
+            "score": row["score"], "equip": equip,
+            "generated": {k: g[k] for k in ("primary", "weapons_1h", "weapons_2h_only", "rings", "armor",
+                                            "armor_note", "value", "objective")}}
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--best-dir", type=Path, help="the ten --best-weapons --json files, <infusion>.json")
+    ap.add_argument("-o", "--out", type=Path)
+    ap.add_argument("--levels", default=",".join(map(str, LEVELS)))
+    ap.add_argument("--first-slot", type=int, default=1, help="the save slot the first level goes in")
+    ap.add_argument("--max-hp", metavar="STATS", help="print the max HP of these stats and --rings, and stop")
+    ap.add_argument("--rings", default="", help="with --max-hp: worn rings, comma-separated names")
+    a = ap.parse_args()
+    rec = _load("ds2_builds_recommend", "ds2-builds-recommend.py")
+    data = load_data(rec)
+    if a.max_hp:
+        stats = {s: int(v) for s, v in (kv.split("=") for kv in a.max_hp.split(","))}
+        alias = {"VGR": "VIG", "ADA": "ADP", "FAI": "FTH"}
+        stats = {next(n for n in rec.STATS if rec.LABEL[n] == alias.get(s, s)): v for s, v in stats.items()}
+        rings = [ring_key(data, n.strip()) for n in a.rings.split(",") if n.strip()]
+        print(max_hp(rec, data, stats, rings))
+        return 0
+    if not (a.best_dir and a.out):
+        ap.error("--best-dir and -o are required")
+    corpus, _ = rec.load_corpus(data)
+    builds = []
+    for i, level in enumerate(int(x) for x in a.levels.split(",")):
+        rows = top_rows(a.best_dir, level)
+        if not rows:
+            raise SystemExit(f"SL {level}: no ranked weapon in {a.best_dir}")
+        score, inf, row = rows[0]
+        b = build_for(rec, data, corpus, level, a.first_slot + i, inf, row)
+        builds.append(b)
+        print(f"SL {level:3}  slot {b['slot']}  {b['name']:16}  {b['class']:9} score {score:7.1f}  "
+              f"runner-up {rows[1][2]['weapon']} ({rows[1][1]}) {rows[1][0]:.1f}" if len(rows) > 1 else "")
+    a.out.write_text(json.dumps({"levels": a.levels, "builds": builds}, indent=1))
+    print(f"wrote {a.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
