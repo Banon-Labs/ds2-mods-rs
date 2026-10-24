@@ -242,6 +242,57 @@ pub struct WeaponMetrics {
     /// What the scored hits cost in stamina and what a full bar of it pays for, for damage over a
     /// window; `None` otherwise, or without stamina costs or attack timing.
     pub stamina: Option<StaminaMetrics>,
+    /// The whole moveset's `PvP` rate, under [`crate::model::Rank::Moveset`] only.
+    pub moveset: Option<MovesetMetrics>,
+}
+
+/// A weapon's whole moveset in its grip: the script's `moveset_metrics`.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct MovesetMetrics {
+    /// sum(s^2) / sum(s) over the families' positive rates: what
+    /// [`crate::model::Rank::Moveset`] ranks by, in HP a second.
+    pub moveset: f64,
+    /// Per family (r1, r2, move, jump) with an attack, its best engagement.
+    pub families: Vec<FamilyRate>,
+}
+
+/// One family's best engagement: an opener, or an opener and its chained follow-up.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct FamilyRate {
+    /// `r1`, `r2`, `move` or `jump`.
+    pub family: String,
+    /// Its attacks' slots joined by `+`: `Normal1st+Normal2nd`.
+    pub engagement: String,
+    /// The rate: net damage per committed second times the factors and the family's weight.
+    pub rate: f64,
+    /// Net damage per committed second, before the factors and the weight.
+    pub raw: f64,
+    /// Every hit's damage, a follow-up's times its chance to land.
+    pub damage: f64,
+    /// Poison and bleed proc damage those hits deal over the engagement.
+    pub status: f64,
+    /// What the landed hits cost the wielder.
+    pub self_damage: f64,
+    /// Seconds to the opener's first hit.
+    pub startup_s: f64,
+    /// Seconds from the input (a movement attack's entry included) to when the next action can
+    /// start.
+    pub commit_s: f64,
+    /// Menu stamina the attacks cost; `None` without the costs.
+    pub stamina: Option<f64>,
+    /// The opener's reach in metres.
+    pub reach_m: Option<f64>,
+    /// The opener's reach over the bracket's median R1 reach, square-rooted and clamped.
+    pub f_reach: f64,
+    /// 1 + half the share of the bracket's poises the opener's first hit breaks.
+    pub f_stagger: f64,
+    /// 1 + a quarter of (won - lost) over the bracket's R1 counter-hits pressed at once.
+    pub f_trade: f64,
+    /// 1 + a quarter of (2 x cover - 1), cover the share of the bracket's R1 recoveries the
+    /// opener's startup fits inside.
+    pub f_punish: f64,
+    /// The share of ten seconds of these attacks the build's stamina keeps paying for.
+    pub f_stamina: f64,
 }
 
 /// The stamina side of a row's R1 chain (a launcher's: one shot), in menu points: the script's

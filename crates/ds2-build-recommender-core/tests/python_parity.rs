@@ -255,6 +255,25 @@ type BestRow = (
     StatusMetrics,
     Option<f64>,
     StaminaMetrics,
+    MovesetMetrics,
+);
+/// Under `--rank moveset`: the rate, then per family its best engagement -- family, engagement,
+/// rate, raw rate, damage, status, self-damage, startup, commit, stamina, reach, and the reach,
+/// stagger, trade, punish and stamina factors.
+type MovesetMetrics = Option<(f64, &'static [FamilyRow])>;
+type FamilyRow = (
+    &'static str,
+    &'static str,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    f64,
+    Option<f64>,
+    Option<f64>,
+    (f64, f64, f64, f64, f64),
 );
 /// infusion code, sl, objective, grip, weapon class, window, rank, with status, defender keys,
 /// who answers (`static` or a buff setting), rows.
@@ -301,6 +320,28 @@ fn backend() -> &'static CorpusBackend {
         CorpusBackend::parse(include_str!("fixtures/corpus-sample.dat"))
             .expect("the fixture parses")
     })
+}
+
+/// The fixture backend holding a build to the rings `keys` names (the script's `HELD_RINGS`).
+fn holding_rings(keys: &[&str]) -> CorpusBackend {
+    let mut held = backend().clone();
+    held.hold_rings(Some(keys))
+        .expect("the held rings are rings");
+    held
+}
+
+/// A ring key's name as a generated build lists it, from the fixture's `R` records.
+fn ring_name(key: &str) -> &'static str {
+    include_str!("fixtures/corpus-sample.dat")
+        .lines()
+        .filter_map(|line| line.strip_prefix("R\t"))
+        .find_map(|rest| {
+            let mut fields = rest.split('\t');
+            (fields.next() == Some(key))
+                .then(|| fields.next())
+                .flatten()
+        })
+        .unwrap_or_else(|| panic!("no ring {key} in the fixture"))
 }
 
 fn stats(values: &[u16]) -> [u16; STAT_COUNT] {
@@ -603,9 +644,22 @@ fn optimize_is_the_scripts() {
             expected::ADAPTIVE_OPTIMIZE
                 .iter()
                 .map(|(buff, keys, case)| (case, Grip::TwoHanded, *keys, reply(buff))),
+        )
+        .map(|(case, grip, keys, reply)| (case, grip, keys, reply, &[][..]))
+        .chain(
+            expected::HELD_OPTIMIZE
+                .iter()
+                .map(|(held, case)| (case, Grip::TwoHanded, &[][..], Reply::Static, *held)),
         );
-    for (&(weapon, code, sl, goal, want), grip, keys, reply) in cases {
-        let got = backend().optimize(
+    for (&(weapon, code, sl, goal, want), grip, keys, reply, held) in cases {
+        let holding;
+        let backend = if held.is_empty() {
+            backend()
+        } else {
+            holding = holding_rings(held);
+            &holding
+        };
+        let got = backend.optimize(
             weapon,
             infusion(code),
             sl,
@@ -690,9 +744,33 @@ fn generate_build_is_the_scripts() {
             expected::ADAPTIVE_GENERATE
                 .iter()
                 .map(|(buff, keys, case)| (case, Grip::TwoHanded, None, *keys, reply(buff))),
+        )
+        .map(|(case, grip, only, keys, reply)| (case, grip, only, keys, reply, &[][..]))
+        .chain(
+            expected::HELD_GENERATE
+                .iter()
+                .map(|(held, case)| (case, Grip::TwoHanded, None, &[][..], Reply::Static, *held)),
         );
-    for (&(weapon, code, sl, goal, naked, want), grip, only, keys, reply) in cases {
-        let got = backend().generate_build(
+    let mut held_rings = 0;
+    for (&(weapon, code, sl, goal, naked, want), grip, only, keys, reply, held) in cases {
+        let holding;
+        let backend = if held.is_empty() {
+            backend()
+        } else {
+            holding = holding_rings(held);
+            &holding
+        };
+        if let (false, Some(want)) = (held.is_empty(), want) {
+            // Every ring granted or listed is one the bag holds.
+            for ring in want.5.iter().chain(want.6) {
+                assert!(
+                    held.iter().any(|key| ring_name(key) == *ring),
+                    "{weapon} SL {sl}: {ring} is not held"
+                );
+                held_rings += 1;
+            }
+        }
+        let got = backend.generate_build(
             weapon,
             infusion(code),
             sl,
@@ -829,6 +907,10 @@ fn generate_build_is_the_scripts() {
         "no case where the equip-load cap bound the choice"
     );
     assert!(traded, "no case wore a ring in place of stat points");
+    assert!(
+        held_rings >= 6,
+        "{held_rings} rings checked against the held ones"
+    );
     assert!(
         poise_drove,
         "no case where the R1 trades bought a higher-poise set"
@@ -1553,6 +1635,7 @@ fn rank(name: &str) -> Rank {
         "window" => Rank::Window,
         "per-stamina" => Rank::PerStamina,
         "bar" => Rank::Bar,
+        "moveset" => Rank::Moveset,
         other => panic!("rank {other}"),
     }
 }
@@ -1565,6 +1648,7 @@ fn rank(name: &str) -> Rank {
 fn best_weapons_is_the_scripts() {
     let (mut compared, mut launchers, mut timed, mut poised, mut procs) = (0, 0, 0, 0, 0);
     let (mut held, mut staggered, mut barred) = (0, 0, 0);
+    let (mut ranked_moveset, mut self_charged, mut moved) = (0, 0, 0);
     for &(code, sl, goal, grip, class, window, by, with_status, keys, who, want) in
         expected::BEST_WEAPONS
     {
@@ -1607,6 +1691,7 @@ fn best_weapons_is_the_scripts() {
                 status,
                 with,
                 stamina,
+                moveset,
             ) = *want;
             let at = format!("{case}: {key}");
             assert_eq!(row.weapon, key, "{case}");
@@ -1687,6 +1772,36 @@ fn best_weapons_is_the_scripts() {
                 (per.to_vec(), window, dps, max, attacks, damage, seconds)
             });
             assert_eq!(got_stamina, want_stamina, "{at}: stamina metrics");
+            let got_moveset = m.moveset.as_ref().map(|s| {
+                let families: Vec<_> = s
+                    .families
+                    .iter()
+                    .map(|f| {
+                        (
+                            f.family.as_str(),
+                            f.engagement.as_str(),
+                            f.rate,
+                            f.raw,
+                            f.damage,
+                            f.status,
+                            f.self_damage,
+                            f.startup_s,
+                            f.commit_s,
+                            f.stamina,
+                            f.reach_m,
+                            (f.f_reach, f.f_stagger, f.f_trade, f.f_punish, f.f_stamina),
+                        )
+                    })
+                    .collect();
+                (s.moveset, families)
+            });
+            let want_moveset = moveset.map(|(rate, families)| (rate, families.to_vec()));
+            assert_eq!(got_moveset, want_moveset, "{at}: moveset metrics");
+            if let Some((_, families)) = moveset {
+                ranked_moveset += 1;
+                self_charged += usize::from(families.iter().any(|f| f.6 > 0.0));
+                moved += usize::from(families.iter().any(|f| f.0 == "move"));
+            }
             procs += status.map_or(0, |(_, per, ..)| per.len());
             compared += 1;
             launchers += usize::from(ammo.is_some());
@@ -1706,5 +1821,10 @@ fn best_weapons_is_the_scripts() {
         held >= 1 && staggered >= 4 && barred >= 10,
         "{held} rows whose hyperarmor holds, {staggered} that take more than a hit to stagger, \
          {barred} with a full bar's damage"
+    );
+    assert!(
+        ranked_moveset >= 10 && self_charged >= 1 && moved >= 5,
+        "{ranked_moveset} rows ranked by moveset, {self_charged} charging their wielder, {moved} \
+         with a movement attack"
     );
 }

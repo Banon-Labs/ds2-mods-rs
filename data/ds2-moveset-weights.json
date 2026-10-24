@@ -1,0 +1,53 @@
+{
+ "factor_exponents": {
+  "f_reach": 0.25,
+  "f_stagger": 0.0,
+  "f_trade": 1.25,
+  "f_punish": 6.0,
+  "f_stamina": 0.0
+ },
+ "family_weights": {
+  "r2": 0.25,
+  "move": 0.75,
+  "jump": 0.0
+ },
+ "ridge": {
+  "features": [
+   "log_r1",
+   "log_r2",
+   "log_move",
+   "log_jump",
+   "log_r1_f_reach",
+   "log_r1_f_stagger",
+   "log_r1_f_trade",
+   "log_r1_f_punish",
+   "log_r1_f_stamina"
+  ],
+  "exponents": [
+   0.0222,
+   -0.0164,
+   -0.0531,
+   0.2544,
+   0.0201,
+   -0.804,
+   0.4786,
+   0.7855,
+   -0.0774
+  ]
+ },
+ "held_out_rho": {
+  "ridge": 0.2708,
+  "anchored": 0.261,
+  "window": 0.1608,
+  "hand": 0.0944
+ },
+ "brackets": [
+  40,
+  70,
+  100,
+  125,
+  150,
+  200,
+  250
+ ]
+}

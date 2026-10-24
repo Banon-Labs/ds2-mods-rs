@@ -87,13 +87,11 @@ impl CorpusBackend {
         // window; a row without it is left out, as the script's is.
         let window_damage = ask.objective == Objective::Damage && ask.window != 0.0;
         let by = (window_damage && ask.rank != Rank::Window).then_some(ask.rank);
-        let ranked = |metrics: &WeaponMetrics| {
-            let stamina = metrics.stamina.as_ref()?;
-            match by? {
-                Rank::PerStamina => Some(stamina.damage_per_stamina),
-                Rank::Bar => stamina.bar_damage,
-                Rank::Window => None,
-            }
+        let ranked = |metrics: &WeaponMetrics| match by? {
+            Rank::PerStamina => Some(metrics.stamina.as_ref()?.damage_per_stamina),
+            Rank::Bar => metrics.stamina.as_ref()?.bar_damage,
+            Rank::Moveset => Some(metrics.moveset.as_ref()?.moveset),
+            Rank::Window => None,
         };
         let ammo = if weapon.ranged.is_some() {
             // One shot with its best ammunition at the optimized stats, window or not: the fire
@@ -160,6 +158,18 @@ impl CorpusBackend {
                     &stats,
                     &worn,
                 );
+                if ask.rank == Rank::Moveset {
+                    metrics.moveset = self.moveset_metrics(
+                        weapon,
+                        ask.infusion,
+                        two,
+                        &eff,
+                        &worn,
+                        ask.sl,
+                        &defending.base,
+                        ask.against.worn,
+                    );
+                }
                 if by.is_some() {
                     score = ranked(&metrics)?;
                 }
