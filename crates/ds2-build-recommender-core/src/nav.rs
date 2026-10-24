@@ -61,6 +61,8 @@ pub enum Control {
     AllowNaked,
     /// Optimize for weapon and Generate Build drop the soul level's floors.
     IgnoreFloors,
+    /// How Optimize for weapon, Generate Build and Best weapons spend the free points.
+    Spend,
     /// One of a refusal's fix buttons, by index into its fixes.
     Fix(usize),
     /// The spells Generate Build must cast: the list to choose them from.
@@ -172,6 +174,7 @@ pub fn layout(shape: Shape) -> Vec<Vec<Control>> {
         Control::AllowNaked,
         Control::Spells,
         Control::IgnoreFloors,
+        Control::Spend,
     ];
     if shape.generated {
         footer.push(Control::ShowToggle);
@@ -575,9 +578,21 @@ mod tests {
             walk(
                 &rows,
                 Control::Generate,
-                &[Dir::Right, Dir::Right, Dir::Right, Dir::Right, Dir::Right]
+                &[
+                    Dir::Right,
+                    Dir::Right,
+                    Dir::Right,
+                    Dir::Right,
+                    Dir::Right,
+                    Dir::Right
+                ]
             ),
             Control::Apply
+        );
+        assert_eq!(
+            step(&rows, Control::IgnoreFloors, Dir::Right),
+            Control::Spend,
+            "the spend choice sits beside the floors"
         );
         assert_eq!(
             walk(&rows, Control::Generate, &[Dir::Right, Dir::Right]),

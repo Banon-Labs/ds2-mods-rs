@@ -411,6 +411,13 @@ impl CorpusBackend {
                 }
             }
         }
+        let out = self.armor_defense(&eff, pieces);
+        self.with_ring_defense(out, rings)
+    }
+
+    /// The script's `_armor_defense`: the armour and stat part of a defense, `pieces` worn at
+    /// effective stats `eff`.
+    pub(super) fn armor_defense(&self, eff: &Stats, pieces: &[&Wearable]) -> Defense {
         let tables = &self.tables.defense;
         let pb = tables[0].at(eff[END] + eff[VIT] + eff[STR] + eff[DEX]);
         let mut out = [0.0; 8];
@@ -436,6 +443,11 @@ impl CorpusBackend {
             out[1 + element] = tables[1 + element].at(index)
                 + py_sum(pieces.iter().map(|piece| piece.defense[1 + element]));
         }
+        out
+    }
+
+    /// `out` plus each of `rings`' defense changes, a physical one on every physical type too.
+    pub(super) fn with_ring_defense(&self, mut out: Defense, rings: &[usize]) -> Defense {
         for &ring in rings {
             for &(kind, value) in self.ring_change(ring).map_or(&[][..], Vec::as_slice) {
                 out[kind] += value;

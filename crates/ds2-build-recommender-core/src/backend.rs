@@ -22,8 +22,8 @@
 use ds2_build_import_core::{Build, Infusion, StartingClass, Stats, check_build};
 
 use crate::model::{
-    Defender, Grip, Mode, Objective, PanelState, Reply, STAT_COUNT, STAT_LABELS, StatusFilter,
-    WeaponsForOpts,
+    Defender, Grip, Mode, Objective, PanelState, Reply, STAT_COUNT, STAT_LABELS, Spend,
+    StatusFilter, WeaponsForOpts,
 };
 use crate::weapons;
 
@@ -534,6 +534,9 @@ pub struct Limits<'a> {
     /// How that defender answers the weapon. [`RecommenderBackend::refusal`] reads it only for the
     /// class it offers instead, which is the best build's.
     pub reply: Reply,
+    /// How the free points are spent (the script's `--spend`). It changes which build scores best,
+    /// never whether one exists.
+    pub spend: Spend,
 }
 
 impl Limits<'static> {
@@ -545,6 +548,7 @@ impl Limits<'static> {
         floors: true,
         defender: &Defender::Average,
         reply: Reply::Ring,
+        spend: Spend::Curves,
     };
 }
 
@@ -557,6 +561,7 @@ impl<'a> Limits<'a> {
             floors: !state.ignore_floors,
             defender: &state.defender,
             reply: state.reply,
+            spend: state.spend,
         }
     }
 }

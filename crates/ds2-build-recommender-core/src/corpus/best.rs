@@ -12,7 +12,7 @@ use super::{
     Against, CorpusBackend, Defense, EMPTY, Hit, Stats, Weapon, norm, py_max, py_round, py_sum,
 };
 use crate::backend::{BestWeaponRow, WeaponMetrics};
-use crate::model::{Grip, Objective, Rank};
+use crate::model::{Grip, Objective, Rank, Spend};
 
 /// How long the sustained-damage metric repeats the R1 chain: the script's `SUSTAIN_HORIZON`.
 const SUSTAIN_HORIZON: f64 = 5.0;
@@ -29,6 +29,7 @@ pub(super) struct Ask<'a> {
     pub(super) class: Option<&'a str>,
     pub(super) floors: bool,
     pub(super) against: Against,
+    pub(super) spend: Spend,
     /// Seconds; `0` scores the optimizer's own value.
     pub(super) window: f64,
     pub(super) rank: Rank,
@@ -78,6 +79,7 @@ impl CorpusBackend {
             ask.class,
             ask.floors,
             ask.against,
+            ask.spend,
         )?;
         let eff = self.gear_stats(&stats, &worn);
         let defending = self.defending(ask.sl, ask.against);

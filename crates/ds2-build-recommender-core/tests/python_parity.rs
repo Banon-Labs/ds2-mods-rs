@@ -21,7 +21,7 @@ use ds2_build_recommender_core::backend::{
 };
 use ds2_build_recommender_core::corpus::CorpusBackend;
 use ds2_build_recommender_core::model::{
-    BestWeaponsOpts, Defender, Grip, Mode, Objective, PanelState, Rank, Reply, STAT_COUNT,
+    BestWeaponsOpts, Defender, Grip, Mode, Objective, PanelState, Rank, Reply, STAT_COUNT, Spend,
     StatusFilter, WeaponsForOpts, soul_level,
 };
 use ds2_build_recommender_core::weapons;
@@ -650,8 +650,19 @@ fn optimize_is_the_scripts() {
             expected::HELD_OPTIMIZE
                 .iter()
                 .map(|(held, case)| (case, Grip::TwoHanded, &[][..], Reply::Static, *held)),
-        );
-    for (&(weapon, code, sl, goal, want), grip, keys, reply, held) in cases {
+        )
+        .map(|(case, grip, keys, reply, held)| (case, grip, keys, reply, held, Spend::Curves))
+        .chain(expected::EHP_OPTIMIZE.iter().map(|case| {
+            (
+                case,
+                Grip::TwoHanded,
+                &[][..],
+                Reply::Static,
+                &[][..],
+                Spend::Ehp,
+            )
+        }));
+    for (&(weapon, code, sl, goal, want), grip, keys, reply, held, spend) in cases {
         let holding;
         let backend = if held.is_empty() {
             backend()
@@ -668,6 +679,7 @@ fn optimize_is_the_scripts() {
             &Limits {
                 defender: &defender(keys),
                 reply,
+                spend,
                 ..STATIC
             },
         );
@@ -750,9 +762,23 @@ fn generate_build_is_the_scripts() {
             expected::HELD_GENERATE
                 .iter()
                 .map(|(held, case)| (case, Grip::TwoHanded, None, &[][..], Reply::Static, *held)),
-        );
+        )
+        .map(|(case, grip, only, keys, reply, held)| {
+            (case, grip, only, keys, reply, held, Spend::Curves)
+        })
+        .chain(expected::EHP_GENERATE.iter().map(|case| {
+            (
+                case,
+                Grip::TwoHanded,
+                None,
+                &[][..],
+                Reply::Static,
+                &[][..],
+                Spend::Ehp,
+            )
+        }));
     let mut held_rings = 0;
-    for (&(weapon, code, sl, goal, naked, want), grip, only, keys, reply, held) in cases {
+    for (&(weapon, code, sl, goal, naked, want), grip, only, keys, reply, held, spend) in cases {
         let holding;
         let backend = if held.is_empty() {
             backend()
@@ -781,6 +807,7 @@ fn generate_build_is_the_scripts() {
                 class: only,
                 defender: &defender(keys),
                 reply,
+                spend,
                 ..STATIC
             },
         );

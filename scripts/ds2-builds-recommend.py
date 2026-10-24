@@ -692,18 +692,32 @@ def threat_sums(opponents: list[tuple[dict, list[dict], float]]) -> dict:
     x attack / 1000. Floors and the 0.99 cap are left out (the linear range). A melee hit is an R1
     (damageRate 1.0, the median one-handed R1), times its weapon's WeaponParam.damageScale
     (threat_opponents' third field; regulation_damage_scale); a spell hit is the spell's biggest
-    hit, each castable attack spell as likely."""
-    sums = {g: {k: 0.0 for k in DMG} for g in ("melee", "spell", "both_melee", "both_spell")}
+    hit, each castable attack spell as likely.
+
+    "at0" holds the same four groups' hits against no defense at all -- damageRate x attack x 10 / 12
+    physical, damageRate x attack x 0.9 of an element -- and "count" how many opponents there are,
+    so the mean hit one opponent lands on a defense D is (at0 - D x per point) / count summed over
+    the types (threat_hit, hit_taken), in the same linear range."""
+    groups = ("melee", "spell", "both_melee", "both_spell")
+    sums = {g: {k: 0.0 for k in DMG} for g in groups}
+    at0 = {g: {k: 0.0 for k in DMG} for g in groups}
     for melee, spells, scale in opponents:
         if melee:
-            g = sums["both_melee" if spells else "melee"]
+            key = "both_melee" if spells else "melee"
+            g, z = sums[key], at0[key]
             g["physical"] += scale / 12 if melee.get("physical", 0) > 0 else 0
+            z["physical"] += scale * melee.get("physical", 0) * 10 / 12
             for e in ELEMENTS:
                 g[e] += scale * melee.get(e, 0) / 1000
+                z[e] += scale * melee.get(e, 0) * 0.9
         for sp in spells:
-            g = sums["both_spell" if melee else "spell"]
+            key = "both_spell" if melee else "spell"
+            g, z = sums[key], at0[key]
             for t, attack in sp["attack"].items():
                 g[t] += sp["rate"] * (1 / 12 if t == "physical" else attack / 1000) / len(spells)
+                z[t] += sp["rate"] * attack * (10 / 12 if t == "physical" else 0.9) / len(spells)
+    sums["at0"] = at0
+    sums["count"] = len(opponents)
     return sums
 
 
@@ -738,8 +752,43 @@ def threat_key(data: Data, corpus: list[Build]) -> str:
 
 def threat_mix(data: Data, corpus: list[Build]) -> dict:
     """Per-type weight of one point of armour defense, for best_armor: threat_weights at
-    SPELL_HIT_SHARE. threat_opponents costs about half a minute, so its sums are kept in
-    THREAT_CACHE under threat_key and in memory for the run."""
+    SPELL_HIT_SHARE."""
+    return threat_weights(_threat_sums(data, corpus), SPELL_HIT_SHARE)
+
+
+def threat_hit(data: Data, corpus: list[Build]) -> tuple[dict, dict]:
+    """The corpus's mean hit on one build by type, as (its damage against no defense, what one
+    point of that type's defense takes off it): threat_sums' "at0" and per-point sums, builds that
+    both swing and cast landing SPELL_HIT_SHARE of their hits as spells, over the opponent count.
+    hit_taken reads it at a defense."""
+    sums = _threat_sums(data, corpus)
+    n = max(sums["count"], 1)
+    mix = lambda by: {k: (by["melee"][k] + by["spell"][k] + (1 - SPELL_HIT_SHARE) * by["both_melee"][k]
+                          + SPELL_HIT_SHARE * by["both_spell"][k]) / n for k in DMG}
+    return mix(sums["at0"]), mix(sums)
+
+
+def hit_taken(threat: tuple[dict, dict], dfn: dict) -> float:
+    """The mean hit threat_hit's opponents land on defense `dfn`, summed over the types, in the
+    linear range threat_sums is written in; never below 1e-9, so it can divide."""
+    at0, per = threat
+    return max(sum(at0[k] - per[k] * dfn[k] for k in DMG), 1e-9)
+
+
+def own_defense(data: Data, eff: dict, rings=()) -> dict:
+    """The defense a build has before generate_armor picks its armour: _armor_defense with the
+    Naked piece in every slot at effective stats `eff` (the physical defense a bare body's
+    END+VIT+STR+DEX gives through Naked's physicalDEFBonus, and the elemental bases INT and FTH
+    give), plus the worn `rings`' defense."""
+    out = _armor_defense(data, Build("", eff, ["Naked"] * 4, [], 0, [], []), eff)
+    for r in rings:
+        out = with_defense(out, data.ring_defense.get(r, {}))
+    return out
+
+
+def _threat_sums(data: Data, corpus: list[Build]) -> dict:
+    """threat_sums over threat_opponents. threat_opponents costs about half a minute, so the sums
+    are kept in THREAT_CACHE under threat_key and in memory for the run."""
     if id(corpus) not in _threat_cache:
         key, sums = threat_key(data, corpus), None
         try:
@@ -753,7 +802,7 @@ def threat_mix(data: Data, corpus: list[Build]) -> dict:
                 THREAT_CACHE.write_text(json.dumps({"key": key, "sums": sums}))
             except OSError:
                 pass
-        _threat_cache[id(corpus)] = threat_weights(sums, SPELL_HIT_SHARE)
+        _threat_cache[id(corpus)] = sums
     return _threat_cache[id(corpus)]
 
 
@@ -4232,6 +4281,33 @@ def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str,
 #: (docs/DS2-DPS-MECHANICS.md, "Two-handing").
 GRIP_TRIES = {"two": (True,), "one": (False,)}
 
+#: How optimize_build spends the points left after the floors, the requirements and the spells
+#: (--spend). "curves" (the default): each stat by its own curve over that curve's early rate --
+#: the objective for STR/DEX/INT/FTH, max HP for VIG, max stamina for END, max load for VIT,
+#: agility for ADP/ATT -- so a point of HP and a point of damage are never weighed in one unit
+#: (p5z4.12). "ehp": every stat by what it adds to objective x max HP / mean hit taken
+#: (ehp_value), relative to that product, the unit er-mods-rs' er-weapon-build.py joint_pick
+#: chooses its Vigor, Endurance and armour by: a fight goes to whoever needs fewer hits, my hits to
+#: kill scale with 1 / my damage and theirs with my HP / their mean hit on me, so one per cent of
+#: damage is worth one per cent of effective HP and no weight is set by hand. Stamina, load and
+#: agility have no term in it: END, VIT, ADP and ATT rise past their floors only for the HP
+#: (additionalHp) and, through INT/FTH, defense they give, as er-mods-rs holds Endurance to a
+#: floor. The class and the rings (choose_rings) are compared by the same product. Set by main;
+#: under_spend sets it for the EHP_* fixtures. The Rust port takes it per question
+#: (backend::Limits::spend).
+SPEND = {"mode": "curves"}
+
+
+def ehp_value(data: Data, corpus: list[Build], value: float, st: dict, rings=()) -> float:
+    """SPEND "ehp"'s product for objective `value` at levelled stats `st` wearing `rings`:
+    value x max HP / mean hit taken (hit_points, hit_taken), both at the stats the rings give, the
+    hit against own_defense -- the defense before any armour, since generate_armor chooses the
+    armour after the stats. `value` is floored at 1e-9 so a weapon with none of the objective
+    (bleed on a weapon that builds none) still spends on HP."""
+    eff = gear_stats(data, st, rings) if rings else st
+    return (max(value, 1e-9) * hit_points(data, eff)
+            / hit_taken(threat_hit(data, corpus), own_defense(data, eff, rings)))
+
 
 def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
                    grip: str = "two", flex_weight: float | None = None, spells=(),
@@ -4275,8 +4351,10 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
                                     classes, need_floors, req, rs, defender)
     if rings is not None:
         return run(list(rings)), floors
+    score = ((lambda b: ehp_value(data, corpus, b[0], b[3], b[4])) if SPEND["mode"] == "ehp"
+             else (lambda b: b[0]))
     return choose_rings(data, classes, need_floors, req, spells, run,
-                        offense_rings(data, weapon, inf, objective)), floors
+                        offense_rings(data, weapon, inf, objective), score), floors
 
 
 #: A ring worn in place of stat points must free at least this many to take a ring slot: one slot
@@ -4406,17 +4484,19 @@ def next_ring(data: Data, classes: list[str], floors: dict, req: dict, spells, w
     return pick and pick[1]
 
 
-def choose_rings(data: Data, classes: list[str], floors: dict, req: dict, spells, run, offense=()):
+def choose_rings(data: Data, classes: list[str], floors: dict, req: dict, spells, run, offense=(),
+                 score=lambda b: b[0]):
     """optimize_build's rings, one next_ring at a time, each set run with the slots it leaves
     holding the first of `offense` (offense_rings). While no build fits, the ring is worn and the
-    next tried; once one fits, it is worn only when `run` (optimize_build at those rings) scores the
-    objective higher -- so a stand-in that takes an offensive ring's slot is kept only when what its
-    freed points buy beats what that ring adds. Returns `run`'s best with the rings worn, or None."""
+    next tried; once one fits, it is worn only when `run` (optimize_build at those rings) scores
+    higher by `score` (the objective; ehp_value under SPEND "ehp") -- so a stand-in that
+    takes an offensive ring's slot is kept only when what its freed points buy beats what that ring
+    adds. Returns `run`'s best with the rings worn, or None."""
     fill = lambda rs: rs + list(offense[:4 - len(rs)])
     worn, best = [], run(fill([]))
     while (r := next_ring(data, classes, floors, req, spells, worn)) is not None:
         got = run(fill(worn + [r]))
-        if best is not None and (got is None or got[0] <= best[0]):
+        if best is not None and (got is None or score(got) <= score(best)):
             break
         worn.append(r)
         best = got
@@ -4482,9 +4562,19 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             curves["endurance"] = lambda s_: data.stamina_max[min(E(s_)["endurance"], len(data.stamina_max) - 1)]
         curves["vitality"] = lambda s_: data.equip_load[min(E(s_)["vitality"], len(data.equip_load) - 1)] or 0
         curves["attunement"] = agl  # a third of ADP's agility per point; slots only matter with spells
+        ehp = SPEND["mode"] == "ehp"
+        if ehp:
+            # SPEND "ehp": one curve for every stat, objective x max HP / mean hit taken, and a
+            # step's gain is taken relative to the product where it is taken (`rel` below), so one
+            # per cent more damage and one per cent more effective HP weigh the same.
+            hit = obj
+            obj = lambda s_: ehp_value(data, corpus, hit(s_), s_, rings)
+            curves = {s: obj for s in STATS}
+        # The early rates of the ehp curve are relative as well: over the product at the start.
+        at = obj(st) if ehp else 1.0
         peak = {}
         for s, f in curves.items():
-            peak[s] = max((f({**st, s: 25}) - f({**st, s: 5})) / 20, 1e-9)
+            peak[s] = max((f({**st, s: 25}) - f({**st, s: 5})) / 20 / at, 1e-9)
         # The stats that feed the objective (STR/DEX/INT/FTH, and ADP when the objective is poison)
         # share one unit, the steepest of their early rates: a point of damage is a point of damage
         # whichever stat buys it. Each over its own rate inflated a stat with almost no scaling to
@@ -4498,7 +4588,7 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
         if dark:
             both = lambda s_, n: {**s_, "intelligence": s_["intelligence"] + n, "faith": s_["faith"] + n}
             shared = max(shared, (obj({**st, "intelligence": 25, "faith": 25})
-                                  - obj({**st, "intelligence": 5, "faith": 5})) / 40)
+                                  - obj({**st, "intelligence": 5, "faith": 5})) / 40 / at)
         for s, f in curves.items():
             if f is obj:
                 peak[s] = shared
@@ -4508,19 +4598,21 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             pick, best_w = None, 0.0
             for s, f in curves.items():
                 cur = f(st)
+                rel = cur if ehp else 1.0
                 # Only a requirement stat changes what the build wields; the term is left off
                 # the rest rather than added as a zero, so a weight of 0 is the old optimizer.
                 fcur = flex(st) if flex and s in REQ_STATS else None
                 for n in range(1, min(free, 99 - st[s], 8) + 1):  # look past table plateaus
-                    w = (f({**st, s: st[s] + n}) - cur) / n / peak[s]
+                    w = (f({**st, s: st[s] + n}) - cur) / n / peak[s] / rel
                     if fcur is not None:
                         w += flex_weight * (flex({**st, s: st[s] + n}) - fcur) / n
                     if w > best_w + 1e-12:
                         pick, best_w = (s, n), w
             if dark:
                 cur = obj(st)
+                rel = cur if ehp else 1.0
                 for n in range(1, min(free // 2, 99 - max(st["intelligence"], st["faith"]), 8) + 1):
-                    w = (obj(both(st, n)) - cur) / (2 * n) / shared
+                    w = (obj(both(st, n)) - cur) / (2 * n) / shared / rel
                     if flex:
                         w += flex_weight * (flex(both(st, n)) - flex(st)) / (2 * n)
                     if w > best_w + 1e-12:
@@ -4534,8 +4626,9 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             st[pick[0]] += pick[1]
             free -= pick[1]
         val = objective_value(data, weapon, inf, E(st), objective, dfn, rings)
-        if best is None or val > best[0]:
-            best = (val, cls, two, st, list(rings))
+        score = ehp_value(data, corpus, val, st, rings) if ehp else val
+        if best is None or score > best_score:
+            best, best_score = (val, cls, two, st, list(rings)), score
     return best
 
 
@@ -5710,6 +5803,9 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             its physicalDEFBonus, alter its
 #                                                             stat changes
 #   H physical magic fire lightning dark                      the corpus threat mix (threat_mix)
+#   HT at0(5) per(5)                                          threat_hit: the corpus's mean hit on
+#                                                             no defense and what one point of
+#                                                             defense takes off it, in DMG order
 #   K n top1 top2                                             calibrate_infusions
 #   M ring count                                              a ring worn by >= COMMON_RING of builds
 #   Z key name slots category require                         a spell: its attunement slot cost,
@@ -5792,7 +5888,7 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 20"
+BACKEND_FORMAT = "ds2-build-recommender-data 21"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -6058,6 +6154,8 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                                     for s in STATUS_PROC)]))
     mix = threat_mix(data, corpus)
     out.append("\t".join(["H", *(_num(float(mix[k])) for k in DMG)]))
+    at0, per = threat_hit(data, corpus)
+    out.append("\t".join(["HT", *(_num(float(at0[k])) for k in DMG), *(_num(float(per[k])) for k in DMG)]))
     for key, (weight, add, mul) in sorted(ring_effects(data).items()):
         out.append("\t".join(["E", key, _num(weight), _num(float(mul)), *(_num(add.get(s, 0)) for s in STATS)]))
     for key, e in ring_gear(data).items():
@@ -6308,6 +6406,14 @@ EXPECT_BEST_WEAPONS = [
 #: One per group: the script's held_tier picks among tied tiers in set order.
 HELD = ["Chloranthy_Ring_2", "Ring_of_Blades_2", "Royal_Soldiers_Ring_2", "Third_Dragon_Ring", "Flynns_Ring",
         "Southern_Ritual_Band_2", "Life_Ring_3", "Ring_of_Steel_Protection_2", "Stone_Ring"]
+EXPECT_EHP_BUILDS = [  # EXPECT_BUILDS cases: --optimize and --generate with --spend ehp
+    ("Demons_Great_Hammer", "Raw", 100, "damage"),
+    ("Moonlight_Greatsword", "No_Infusion", 33, "damage"),
+    ("Uchigatana", "Lightning", 150, "damage"),
+    ("Uchigatana", "Bleed", 150, "bleed"),
+    ("Black_Dragon_Greataxe", "Lightning", 100, "ar"),
+    ("Sanctum_Crossbow", "Dark", 150, "damage"),  # INT and FTH rise together on the product too
+]
 EXPECT_HELD_BUILDS = [  # held ring keys, then an EXPECT_BUILDS case: --optimize and --generate
     (HELD, ("Demons_Great_Hammer", "Raw", 100, "damage")),
     (HELD, ("Uchigatana", "Bleed", 150, "bleed")),
@@ -6324,6 +6430,16 @@ def under_held(held, fn):
         return fn()
     finally:
         HELD_RINGS = saved
+
+
+def under_spend(mode: str, fn):
+    """`fn()` with SPEND set to `mode`, restored after."""
+    saved = dict(SPEND)
+    SPEND.update(mode=mode)
+    try:
+        return fn()
+    finally:
+        SPEND.update(saved)
 
 
 def under_defender(mode: str, buff: str, fn):
@@ -6422,6 +6538,11 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append("// The rings a build may wear (HELD_RINGS, ring keys), then an OPTIMIZE and a GENERATE case.")
     out.append(f"pub const HELD_OPTIMIZE: DefenderOptimizeCases = {_rs(h_opt)};\n")
     out.append(f"pub const HELD_GENERATE: DefenderGenerateCases = {_rs(h_gen)};\n")
+    x_opt, x_gen = under_spend("ehp", lambda: expect_builds(
+        data, corpus, threat_mix(data, corpus), EXPECT_EHP_BUILDS, [], "two"))
+    out.append("// OPTIMIZE and GENERATE cases with the free points spent by SPEND \"ehp\".")
+    out.append(f"pub const EHP_OPTIMIZE: OptimizeCases = {_rs(x_opt)};\n")
+    out.append(f"pub const EHP_GENERATE: GenerateCases = {_rs(x_gen)};\n")
 
     mix = threat_mix(data, corpus)
     adaptive = lambda buff, fn: under_defender("adaptive", buff, fn)
@@ -7121,6 +7242,17 @@ def selftest() -> int:
         ("margin over a zero runner-up is none", infusion_margin([300.0, 0.0]), None),
         ("stats parse into STATS order", list(parse_stats("STR=40,VGR=20,ADP=15").values()),
          [20, 0, 0, 0, 40, 0, 15, 0, 0]),
+        # threat_sums' undefended hit: an R1 of 120 physical and 100 fire at damageScale 1 is
+        # 120 x 10 / 12 = 100 physical and 100 x 0.9 = 90 fire on no defense
+        ("undefended hit, melee", threat_sums([({"physical": 120.0, "fire": 100.0}, [], 1.0)])["at0"]["melee"],
+         {"physical": 100.0, "magic": 0.0, "fire": 90.0, "lightning": 0.0, "dark": 0.0}),
+        # hit_taken: 100 - 120 x (1/12) physical, 90 - 100 x 0.1 fire
+        ("hit taken at a defense", round(hit_taken(
+            ({"physical": 100.0, "magic": 0.0, "fire": 90.0, "lightning": 0.0, "dark": 0.0},
+             {"physical": 1 / 12, "magic": 0.0, "fire": 0.1, "lightning": 0.0, "dark": 0.0}),
+            {"physical": 120.0, "magic": 0.0, "fire": 100.0, "lightning": 0.0, "dark": 0.0}), 9), 170.0),
+        ("hit taken never reaches 0", hit_taken(({k: 1.0 for k in DMG}, {k: 1.0 for k in DMG}),
+                                                {k: 99.0 for k in DMG}), 1e-9),
         # Agape's place goes to the next ring worn, skipping one already worn in another upgrade
         ("agape replaced in place", suggest_rings(RINGS, Counter({"Third_Dragon_Ring": 9, "Agape_Ring": 8,
                                                                   "Ring_of_Blades": 7, "Flynns_Ring": 6,
@@ -7325,6 +7457,10 @@ def main() -> int:
                          "'item' a consumable anyone can use (the Burrs, Dark Troches), 'any' spells as well "
                          "(Flash Sweat, Iron Flesh, the Magic Barriers, Sacred Oath) whatever the defender's "
                          "stats. Needs the adaptive defender")
+    ap.add_argument("--spend", choices=["curves", "ehp"], default="curves",
+                    help="with --optimize/--generate/--best-weapons: how the free points are spent (SPEND). "
+                         "curves (default): each stat by its own curve; ehp: every stat by what it adds "
+                         "to objective x max HP / the corpus's mean hit taken, er-mods-rs' damage x EHP")
     ap.add_argument("--flex-weight", type=float, default=None, metavar="W",
                     help=f"with --optimize/--generate: the soft flexibility term per weapon unlocked per point "
                          f"(default {FLEX_WEIGHT}; 0 is the optimizer without it)")
@@ -7387,6 +7523,8 @@ def main() -> int:
     # --export-backend's bracket defense and calibration are the static defender's (the Rust port
     # works the adaptive answer out per question), and so are its fixtures but the ADAPTIVE_* ones
     DEFENDER.update(mode="static" if a.static_defender or a.export_backend else "adaptive", buff=a.defender_buff)
+    # --export-backend's fixtures are "curves" but the EHP_* ones (under_spend)
+    SPEND.update(mode="curves" if a.export_backend else a.spend)
 
     a.tables.mkdir(parents=True, exist_ok=True)
     sp_json, mm_json = dump_site_tables(a.tables)
@@ -7560,6 +7698,11 @@ def main() -> int:
               f" {'two-handed' if two else 'one-handed'}\n  "
               + " ".join(f"{s[:3].upper()} {stats[s]}" for s in STATS)
               + "\n  floors (bracket medians): " + " ".join(f"{s[:3].upper()} {v}" for s, v in floors.items()))
+        eff = gear_stats(data, stats, worn) if worn else stats
+        hp, taken = hit_points(data, eff), hit_taken(threat_hit(data, corpus), own_defense(data, eff, worn))
+        print(f"  survival (spend {SPEND['mode']}): HP {hp}, the corpus's mean hit before armour {taken:.0f}, "
+              f"{hp / taken:.2f} hits; {a.objective} x HP / hit "
+              f"{ehp_value(data, corpus, val, stats, worn):.0f}")
         for t in ring_trades(data, corpus, weapon, a.sl, a.grip, spells, cls, not a.no_floors, worn):
             print(f"  ring: {trade_line(t)}")
         for r in worn:

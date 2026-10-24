@@ -108,6 +108,30 @@ impl Objective {
     }
 }
 
+/// How Optimize for weapon, Generate Build and Best weapons spend the points left after the
+/// floors, the requirements and the spells: the script's `--spend` (its `SPEND`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Spend {
+    /// Each stat by its own curve over that curve's early rate: the objective for STR/DEX/INT/FTH,
+    /// max HP for VIG, max stamina for END, max load for VIT, agility for ADP/ATT.
+    #[default]
+    Curves,
+    /// Every stat by what it adds to objective x max HP / the corpus's mean hit taken, relative to
+    /// that product -- er-mods-rs' damage x effective HP: one per cent of damage is worth one per
+    /// cent of effective HP. Stamina, load and agility have no term in it.
+    Ehp,
+}
+
+impl Spend {
+    /// The option's caption.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Spend::Curves => "Per-stat curves",
+            Spend::Ehp => "Damage x EHP",
+        }
+    }
+}
+
 /// The armour slots a [`Defender::Armor`] fills, in its order.
 pub const ARMOR_SLOTS: [&str; 4] = ["Head", "Chest", "Hands", "Legs"];
 
@@ -357,6 +381,8 @@ pub struct PanelState {
     /// medians of real builds, not a game rule. Off by default; a refusal's "ignore typical-build
     /// minimums" fix turns it on.
     pub ignore_floors: bool,
+    /// How Optimize for weapon, Generate Build and Best weapons spend the free points.
+    pub spend: Spend,
 }
 
 impl Default for PanelState {
@@ -379,6 +405,7 @@ impl Default for PanelState {
             status: StatusFilter::default(),
             spells: Vec::new(),
             ignore_floors: false,
+            spend: Spend::Curves,
         }
     }
 }

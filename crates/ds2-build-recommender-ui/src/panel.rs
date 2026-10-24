@@ -17,7 +17,7 @@ use ds2_build_recommender_core::flex::{
     FLYNN_NOTE, Flexibility, flex_line, flex_load, flex_load_line, flex_rank, flex_wields,
 };
 use ds2_build_recommender_core::model::{
-    ARMOR_SLOTS, Defender, Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS,
+    ARMOR_SLOTS, Defender, Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS, Spend,
 };
 use ds2_build_recommender_core::paperdoll::{self, Held, Paperdoll, Piece, Slot};
 
@@ -217,6 +217,9 @@ enum Action {
     ToggleAllowNaked,
     /// Optimize for weapon and Generate Build: whether the soul level's floors are dropped.
     ToggleIgnoreFloors,
+    /// Optimize for weapon, Generate Build and Best weapons: spend the free points by damage x
+    /// EHP, or by each stat's own curve.
+    ToggleSpend,
     /// Make one of the refusal's checked fixes, by index into [`Panel::fixes`], and ask again.
     Fix(usize),
     /// Generate Build: add or take out one spell, by index into the backend's spell table.
@@ -566,6 +569,7 @@ impl Panel {
             Control::Generate => "generate build".to_owned(),
             Control::AllowNaked => format!("allow-no-armor={}", state.allow_naked),
             Control::IgnoreFloors => format!("ignore-floors={}", state.ignore_floors),
+            Control::Spend => format!("spend={:?}", state.spend),
             Control::Fix(index) => format!(
                 "fix {index}: {}",
                 self.fixes
@@ -625,6 +629,7 @@ impl Panel {
             Control::Generate => Some(Action::Generate),
             Control::AllowNaked => Some(Action::ToggleAllowNaked),
             Control::IgnoreFloors => Some(Action::ToggleIgnoreFloors),
+            Control::Spend => Some(Action::ToggleSpend),
             Control::Fix(index) => (index < self.fixes.len()).then_some(Action::Fix(index)),
             Control::Spells => Some(Action::OpenList(List::Spell)),
             Control::ShowToggle => Some(Action::Show(if self.shown == Shown::Build {
@@ -1231,6 +1236,14 @@ impl Panel {
                     "{LOG_PREFIX} ignore floors -> {}",
                     self.state.ignore_floors
                 ));
+                self.changed();
+            }
+            Action::ToggleSpend => {
+                self.state.spend = match self.state.spend {
+                    Spend::Curves => Spend::Ehp,
+                    Spend::Ehp => Spend::Curves,
+                };
+                log_line(format_args!("{LOG_PREFIX} spend -> {:?}", self.state.spend));
                 self.changed();
             }
             Action::Fix(index) => self.fix(index),
@@ -2368,6 +2381,12 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
             false,
             Some(Action::ToggleIgnoreFloors),
             Control::IgnoreFloors,
+        ),
+        (
+            checked(Spend::Ehp.label(), panel.state.spend == Spend::Ehp),
+            false,
+            Some(Action::ToggleSpend),
+            Control::Spend,
         ),
     ];
     if panel.generated.is_some() {

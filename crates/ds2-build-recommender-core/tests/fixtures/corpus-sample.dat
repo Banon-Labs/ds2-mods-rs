@@ -1,4 +1,4 @@
-ds2-build-recommender-data 20
+ds2-build-recommender-data 21
 # 5461 builds; written by scripts/ds2-builds-recommend.py --export-backend
 C	warrior	Warrior	12	7	6	6	5	15	11	5	5	5
 C	knight	Knight	13	12	6	7	4	11	8	9	3	6
@@ -11623,6 +11623,7 @@ P	legs	Wanderer_Boots	Wanderer Boots	2.1	69	23	30	33	24	-	70	67	71	0.18	0	0	0	0	
 P	legs	White_Priest_Skirt	White Priest Skirt	2.4	80	48	48	63	53	-	79	84	79	0.18	0	0	0	0	0	0	0	0	0	0.0	3.3	3.1
 P	legs	Xanthous_Waistcloth	Xanthous Waistcloth	4	80	61	16	38	47	-	80	92	69	0.18	0	0	0	0	0	0	0	0	0	0.0	3.6	3.2
 H	0.21305860544796093	0.1679781985721207	0.18816654884786613	0.20405858703296964	0.22673806009908254
+HT	197.63658859874735	47.77559596230557	53.51747481395635	58.03741610278358	64.48780877906584	0.06733017827246877	0.0530839955136733	0.0594638609043955	0.06448601789198194	0.07165312086562835
 E	Dexterity_Ring	1.5	1.0	0	0	0	0	0	5	0	0	0
 E	First_Dragon_Ring	0.5	1.05	0	0	0	0	0	0	0	0	0
 E	Ring_of_Knowledge	0.5	1.0	0	0	0	0	0	0	0	5	0

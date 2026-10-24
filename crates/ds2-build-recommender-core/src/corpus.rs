@@ -38,7 +38,7 @@ use crate::backend::{
 };
 use crate::flex::{FLEX_K, Flexibility};
 use crate::model::{
-    BestWeaponsOpts, Defender, Grip, Objective, Reply, SL_MAX, STAT_COUNT, STAT_LABELS,
+    BestWeaponsOpts, Defender, Grip, Objective, Reply, SL_MAX, STAT_COUNT, STAT_LABELS, Spend,
     StatusFilter, WeaponsForOpts,
 };
 use crate::weapons;
@@ -57,7 +57,7 @@ mod trade;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 20";
+pub const FORMAT: &str = "ds2-build-recommender-data 21";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -756,6 +756,9 @@ pub struct CorpusBackend {
     /// The share of damage the corpus's weapons deal per type, physical, magic, fire, lightning,
     /// dark: what `best_armor` weights each defense by.
     threat_mix: [f64; 5],
+    /// The script's `threat_hit`: the corpus's mean hit on one build by type, physical to dark,
+    /// against no defense, then what one point of that type's defense takes off it.
+    threat_hit: [[f64; 5]; 2],
     calibration: Option<Calibration>,
     /// Rings at least a tenth of all builds wear, most worn first, as indices into `rings`.
     common: Vec<usize>,
@@ -1218,6 +1221,11 @@ impl CorpusBackend {
             }
             "H" => {
                 for value in &mut self.threat_mix {
+                    *value = float(fields.next(), line)?;
+                }
+            }
+            "HT" => {
+                for value in self.threat_hit.iter_mut().flatten() {
                     *value = float(fields.next(), line)?;
                 }
             }
@@ -2173,6 +2181,40 @@ impl CorpusBackend {
                 .sum::<f64>()
     }
 
+    /// The script's `own_defense`: the defense of effective stats `eff` wearing the `Naked` piece
+    /// in every slot -- the physical defense a bare body's stats give and the elemental bases --
+    /// plus the worn `rings`' defense.
+    fn own_defense(&self, eff: &Stats, rings: &[usize]) -> Defense {
+        let naked: Vec<&Wearable> = self
+            .wearable
+            .iter()
+            .filter_map(|slot| slot.iter().find(|piece| piece.key == "Naked"))
+            .collect();
+        self.with_ring_defense(self.armor_defense(eff, &naked), rings)
+    }
+
+    /// The script's `hit_taken`: the mean hit the corpus lands on `defense`, summed over physical
+    /// to dark in the linear range, never below `1e-9`.
+    fn hit_taken(&self, defense: &Defense) -> f64 {
+        let [at0, per] = &self.threat_hit;
+        py_max(
+            py_sum((0..5).map(|kind| at0[kind] - per[kind] * defense[kind])),
+            1e-9,
+        )
+    }
+
+    /// The script's `ehp_value`: objective `value` x max HP / [`Self::hit_taken`] at levelled
+    /// stats `st` wearing `rings`, both read at the stats the rings give, the hit against
+    /// [`Self::own_defense`]; `value` floored at `1e-9`.
+    fn ehp_value(&self, value: f64, st: &Stats, rings: &[usize]) -> f64 {
+        let eff = if rings.is_empty() {
+            *st
+        } else {
+            self.gear_stats(st, rings)
+        };
+        py_max(value, 1e-9) * self.hit_points(&eff) / self.hit_taken(&self.own_defense(&eff, rings))
+    }
+
     /// The script's `sub_rings`: per ring upgrade group, the ring gear ring with the highest item id
     /// (the last in file order), when none of its factors is below 1, never a no-use ring.
     fn sub_rings(&self) -> Vec<usize> {
@@ -2560,6 +2602,7 @@ impl CorpusBackend {
         only_class: Option<&str>,
         floors: bool,
         reply: Reply,
+        spend: Spend,
     ) -> Option<Refusal> {
         let run = |sl: u16, spells: &[usize], class: Option<&str>, floors: bool| {
             self.optimize_build(
@@ -2574,6 +2617,7 @@ impl CorpusBackend {
                 // Who the objective is scored against never decides whether a build exists; the
                 // script asks for the average defender, answering as its DEFENDER says.
                 Against::average(reply),
+                spend,
             )
         };
         if run(sl, spells, only_class, floors).is_some() {
@@ -2903,6 +2947,7 @@ impl CorpusBackend {
         only_class: Option<&str>,
         floors: bool,
         defender: Against,
+        spend: Spend,
     ) -> Option<Best> {
         let classes = self.class_indices(only_class);
         let floor = self.lift_floors(self.bracket(sl), weapon, floors, spells);
@@ -2910,11 +2955,18 @@ impl CorpusBackend {
         let run = |rings: &[usize]| {
             self.optimize_with(
                 weapon, infusion, sl, objective, grip, spells, &classes, &floor, &require, rings,
-                defender,
+                defender, spend,
             )
         };
+        // The script's `score`: the rings are kept by the same product the points were spent on.
+        let score = |best: &Best| -> f64 {
+            match spend {
+                Spend::Curves => best.0,
+                Spend::Ehp => self.ehp_value(best.0, &best.3, &best.4),
+            }
+        };
         let offense = self.offense_rings(weapon, infusion, objective);
-        self.choose_rings(&classes, &floor, &require, spells, &run, &offense)
+        self.choose_rings(&classes, &floor, &require, spells, &run, &offense, &score)
     }
 
     /// The classes `only_class` allows, as indices, in file order.
@@ -3022,8 +3074,10 @@ impl CorpusBackend {
 
     /// The script's `choose_rings`: one `next_ring` at a time, each set run with the slots it
     /// leaves holding the first of `offense`; worn while no build fits, and once one does, only
-    /// when `run` scores the objective higher with it -- so a stand-in that takes an offensive
-    /// ring's slot has to beat that ring.
+    /// when `run`'s build scores higher by `score` with it -- so a stand-in that takes an
+    /// offensive ring's slot has to beat that ring.
+    // DEBT: ds2-mods-rs-59p7 -- the score made this eight arguments; bundle the per-build options.
+    #[allow(clippy::too_many_arguments)]
     fn choose_rings(
         &self,
         classes: &[usize],
@@ -3032,6 +3086,7 @@ impl CorpusBackend {
         spells: &[usize],
         run: &dyn Fn(&[usize]) -> Option<Best>,
         offense: &[usize],
+        score: &dyn Fn(&Best) -> f64,
     ) -> Option<Best> {
         let fill = |rings: &[usize]| -> Vec<usize> {
             let mut out = rings.to_vec();
@@ -3044,8 +3099,8 @@ impl CorpusBackend {
             let mut with = worn.clone();
             with.push(ring);
             let got = run(&fill(&with));
-            if let Some((top, ..)) = best
-                && got.as_ref().is_none_or(|(value, ..)| *value <= top)
+            if let Some(top) = best.as_ref().map(score)
+                && got.as_ref().is_none_or(|got| score(got) <= top)
             {
                 break;
             }
@@ -3099,6 +3154,7 @@ impl CorpusBackend {
         require: &[(usize, i32)],
         rings: &[usize],
         defender: Against,
+        spend: Spend,
     ) -> Option<Best> {
         // What the worn rings give: every curve reads it, the flexibility term the levelled stats.
         let worn = |st: &Stats| -> Stats {
@@ -3115,7 +3171,12 @@ impl CorpusBackend {
             HitPoints,
             Stamina,
             Load,
+            /// [`Spend::Ehp`]'s one curve for every stat: objective x max HP / mean hit taken.
+            Ehp,
         }
+        let ehp = spend == Spend::Ehp;
+        // The curve the stats that feed the objective share a unit on.
+        let main = if ehp { Curve::Ehp } else { Curve::Objective };
         let defending = self.defending(sl, defender);
         let adaptability = if objective == Objective::Poison {
             Curve::Objective
@@ -3138,12 +3199,21 @@ impl CorpusBackend {
         }
         curves.push((VIT, Curve::Load));
         curves.push((ATT, Curve::Agility));
-        let value = |curve: Curve, st: &Stats| -> f64 {
-            let st = worn(st);
+        if ehp {
+            // The script's SPEND "ehp": one curve for every stat, in STATS order.
+            curves = (0..STAT_COUNT).map(|stat| (stat, Curve::Ehp)).collect();
+        }
+        let value = |curve: Curve, levelled: &Stats| -> f64 {
+            let st = worn(levelled);
             match curve {
                 Curve::Objective => {
                     self.objective_value(weapon, infusion, &st, objective, &defending, rings)
                 }
+                Curve::Ehp => self.ehp_value(
+                    self.objective_value(weapon, infusion, &st, objective, &defending, rings),
+                    levelled,
+                    rings,
+                ),
                 Curve::Agility => f64::from(agility(st[ADP], st[ATT])),
                 Curve::HitPoints => self.hit_points(&st),
                 Curve::Stamina => self.tables.stamina_max.at(st[END]),
@@ -3157,6 +3227,7 @@ impl CorpusBackend {
         };
         let sl = i32::try_from(sl).unwrap_or(i32::MAX - 53);
         let mut best: Option<Best> = None;
+        let mut best_score: Option<f64> = None;
         for &class_index in classes {
             let class = &self.classes[class_index];
             // The script's GRIP_TRIES: one grip, never a fallback to the other.
@@ -3167,14 +3238,17 @@ impl CorpusBackend {
                 if free < 0 {
                     continue;
                 }
-                // Each stat weighted by its own curve's early rate, from 5 to 25.
+                // Each stat weighted by its own curve's early rate, from 5 to 25; the ehp curve's
+                // over the product at the start, as its steps are taken relative to it.
+                let at = if ehp { value(main, &st) } else { 1.0 };
                 let mut peak: Vec<f64> = curves
                     .iter()
                     .map(|&(stat, curve)| {
                         py_max(
                             (value(curve, &with(&st, stat, 25))
                                 - value(curve, &with(&st, stat, 5)))
-                                / 20.0,
+                                / 20.0
+                                / at,
                             1e-9,
                         )
                     })
@@ -3184,7 +3258,7 @@ impl CorpusBackend {
                 let mut shared = curves
                     .iter()
                     .zip(peak.iter().copied())
-                    .filter(|&(&(_, curve), _)| curve == Curve::Objective)
+                    .filter(|&(&(_, curve), _)| curve == main)
                     .fold(f64::NEG_INFINITY, |most, (_, rate)| py_max(most, rate));
                 // Dark reads min(INT, FTH), so a point of INT alone or FTH alone buys no dark and a
                 // one-stat step never finds it. With a dark attack the two also move together, a
@@ -3192,17 +3266,17 @@ impl CorpusBackend {
                 let dark =
                     self.attack_rating(weapon.infusion(infusion), &worn(&st), rings)[4].is_some();
                 if dark {
-                    let early = (value(Curve::Objective, &both_at(&st, 25))
-                        - value(Curve::Objective, &both_at(&st, 5)))
-                        / 40.0;
+                    let early = (value(main, &both_at(&st, 25)) - value(main, &both_at(&st, 5)))
+                        / 40.0
+                        / at;
                     shared = py_max(shared, early);
                 }
-                for (at, &(_, curve)) in curves.iter().enumerate() {
-                    if curve == Curve::Objective {
-                        peak[at] = shared;
+                for (index, &(_, curve)) in curves.iter().enumerate() {
+                    if curve == main {
+                        peak[index] = shared;
                     }
                 }
-                if adaptability == Curve::Agility {
+                if !ehp && adaptability == Curve::Agility {
                     // ATT is the last curve and ADP the fifth, in the script's order.
                     let last = peak.len() - 1;
                     peak[last] = peak[4];
@@ -3210,15 +3284,18 @@ impl CorpusBackend {
                 while free > 0 {
                     let mut pick: Option<(usize, i32)> = None;
                     let mut best_w = 0.0;
-                    for (at, &(stat, curve)) in curves.iter().enumerate() {
+                    for (index, &(stat, curve)) in curves.iter().enumerate() {
                         let current = value(curve, &st);
+                        // The ehp curve's gain is relative to the product where it is taken.
+                        let rel = if ehp { current } else { 1.0 };
                         // Only a requirement stat changes what the build wields; the term is left
                         // off the rest rather than added as a zero, as the script leaves it.
                         let flex_now = (FLEX_WEIGHT != 0.0 && REQ_STATS.contains(&stat))
                             .then(|| self.flex_score(&st));
                         for n in 1..=free.min(99 - st[stat]).min(8) {
                             let next = with(&st, stat, st[stat] + n);
-                            let mut w = (value(curve, &next) - current) / f64::from(n) / peak[at];
+                            let mut w =
+                                (value(curve, &next) - current) / f64::from(n) / peak[index] / rel;
                             if let Some(now) = flex_now {
                                 w += FLEX_WEIGHT * f64::from(self.flex_score(&next) - now)
                                     / f64::from(n);
@@ -3230,12 +3307,13 @@ impl CorpusBackend {
                         }
                     }
                     if dark {
-                        let current = value(Curve::Objective, &st);
+                        let current = value(main, &st);
+                        let rel = if ehp { current } else { 1.0 };
                         let flex_now = (FLEX_WEIGHT != 0.0).then(|| self.flex_score(&st));
                         for n in 1..=(free / 2).min(99 - st[INT].max(st[FTH])).min(8) {
                             let next = both_up(&st, n);
                             let cost = f64::from(2 * n);
-                            let mut w = (value(Curve::Objective, &next) - current) / cost / shared;
+                            let mut w = (value(main, &next) - current) / cost / shared / rel;
                             if let Some(now) = flex_now {
                                 w += FLEX_WEIGHT * f64::from(self.flex_score(&next) - now) / cost;
                             }
@@ -3274,8 +3352,15 @@ impl CorpusBackend {
                     &defending,
                     rings,
                 );
-                if best.as_ref().is_none_or(|(top, ..)| val > *top) {
+                // The classes are compared by what the points were spent on.
+                let score = if ehp {
+                    self.ehp_value(val, &st, rings)
+                } else {
+                    val
+                };
+                if best_score.is_none_or(|top| score > top) {
                     best = Some((val, class_index, two, st, rings.to_vec()));
+                    best_score = Some(score);
                 }
             }
         }
@@ -4034,6 +4119,7 @@ impl RecommenderBackend for CorpusBackend {
                 worn: self.worn(limits.defender)?,
                 reply: limits.reply,
             },
+            limits.spend,
         )?;
         Some(OptimizedBuild {
             class: self.classes[class].name.clone(),
@@ -4069,6 +4155,7 @@ impl RecommenderBackend for CorpusBackend {
             limits.class,
             limits.floors,
             limits.reply,
+            limits.spend,
         )
     }
 
@@ -4224,6 +4311,7 @@ impl RecommenderBackend for CorpusBackend {
                 worn,
                 reply: limits.reply,
             },
+            spend: limits.spend,
             window: window_seconds(opts.window_s),
             rank: opts.rank,
         };
@@ -4275,6 +4363,7 @@ impl RecommenderBackend for CorpusBackend {
             limits.class,
             limits.floors,
             defender,
+            limits.spend,
         )?;
         // The weapons, the catalysts and the slots are read at what the worn rings give.
         let eff = self.gear_stats(&stats, &worn);
