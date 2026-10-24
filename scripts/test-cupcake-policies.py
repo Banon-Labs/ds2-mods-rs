@@ -23,11 +23,13 @@ reads, so a case that models "on main" does not depend on which branch the check
 from __future__ import annotations
 
 import atexit
+import fcntl
 import json
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -1113,6 +1115,101 @@ def run_signal_contract_checks() -> None:
             )
 
 
+# Bigger than any pipe the kernel will hand out (fs.pipe-max-size defaults to 1 MiB), so a signal
+# that does not read its stdin cannot hide behind a roomy pipe buffer.
+SIGNAL_STDIN_PAD_BYTES = 2 * 1024 * 1024
+# The capacity the kernel falls back to once the user is over fs.pipe-user-pages-soft, rounded
+# down to one page. Measured on the dev machine on 2026-10-19: every new pipe was 8192 bytes.
+SIGNAL_STDOUT_PIPE_BYTES = 4096
+F_SETPIPE_SZ = 1031
+
+
+def _rulebook_signal_commands() -> dict[str, str]:
+    import yaml  # PyYAML; imported here so the rest of the suite does not depend on it
+
+    rulebook = yaml.safe_load((REPO_ROOT / ".cupcake" / "rulebook.yml").read_text(encoding="utf-8"))
+    signals = (rulebook or {}).get("signals") or {}
+    return {name: spec["command"] for name, spec in signals.items() if spec and "command" in spec}
+
+
+def _assert_drains_stdin(argv: list[str], label: str) -> None:
+    """Feed `argv` an event larger than any pipe while NOT reading its stdout, as cupcake does.
+
+    cupcake 0.5.x writes the whole event to a signal's stdin before it reads the signal's stdout.
+    A signal that never reads stdin and prints more than one pipe-buffer of output therefore
+    deadlocks: cupcake blocks writing stdin, the signal blocks writing stdout. Nothing times it out,
+    so the whole PreToolUse hook hangs until Claude Code gives up on it and runs the tool call
+    anyway -- every guard fails OPEN for that call.
+
+    Measured 2026-10-19: a `python3 - <<'EOF' ... p.write_text(s) ... EOF` edit of four Rust files
+    (an 11 KB event) was ALLOWED by bash_no_python_file_write, while a shorter command of the same
+    shape was denied. The policy was right; the engine never reached it. repo_paths.sh printed one
+    line per git worktree (156 of them, 10.8 KB) without reading stdin, and the user's pipes had
+    shrunk to 8 KB because fs.pipe-user-pages-soft was exceeded. Both sides over 8 KB, deadlock.
+    """
+    event = json.loads(_signal_event())
+    event["padding"] = "x" * SIGNAL_STDIN_PAD_BYTES
+    data = json.dumps(event).encode("utf-8")
+    proc = subprocess.Popen(
+        argv,
+        cwd=REPO_ROOT,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    assert proc.stdin is not None and proc.stdout is not None
+    try:
+        fcntl.fcntl(proc.stdout.fileno(), F_SETPIPE_SZ, SIGNAL_STDOUT_PIPE_BYTES)
+    except OSError:
+        pass  # not Linux, or the size is refused; the 2 MiB stdin still catches a non-reader
+    outcome: dict[str, BaseException | None] = {}
+
+    def feed() -> None:
+        try:
+            proc.stdin.write(data)
+            proc.stdin.close()
+            outcome["error"] = None
+        except BrokenPipeError as exc:
+            outcome["error"] = exc
+
+    writer = threading.Thread(target=feed, daemon=True)
+    writer.start()
+    writer.join(SIGNAL_TIMEOUT_SECONDS)
+    if writer.is_alive():
+        proc.kill()
+        proc.wait()
+        raise AssertionError(
+            f"signal {label} did not read its stdin within {SIGNAL_TIMEOUT_SECONDS}s while its "
+            "stdout was left unread. That is the cupcake deadlock: the engine writes the event "
+            "before reading output, so a signal that prints more than a pipe buffer without "
+            "draining stdin hangs the hook and every guard fails open. Read stdin first "
+            "(`event=\"$(cat)\"`, or `cat >/dev/null` when the event is not needed)."
+        )
+    proc.stdout.read()
+    proc.wait(timeout=SIGNAL_TIMEOUT_SECONDS)
+    if outcome.get("error") is not None:
+        raise AssertionError(
+            f"signal {label} exited without reading its stdin (broken pipe). Today that only "
+            "costs a write error, but the same signal printing one pipe buffer more deadlocks the "
+            "hook. Read stdin first (`event=\"$(cat)\"`, or `cat >/dev/null`)."
+        )
+
+
+def run_signal_stdin_drain_checks() -> None:
+    """Every signal -- discovered script or rulebook command -- must drain its stdin."""
+    jobs: list[tuple[list[str], str]] = [
+        (["bash", str(script)], str(script.relative_to(REPO_ROOT)))
+        for script in sorted((REPO_ROOT / ".cupcake" / "signals").glob("*.sh"))
+    ]
+    jobs += [
+        (["sh", "-c", command], f"rulebook.yml:{name}")
+        for name, command in sorted(_rulebook_signal_commands().items())
+    ]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for future in as_completed([pool.submit(_assert_drains_stdin, *job) for job in jobs]):
+            future.result()
+
+
 def run_rego_suites() -> None:
     """`opa test` over the WHOLE .cupcake tree, not a hand-listed set of suites.
 
@@ -1140,6 +1237,7 @@ def run_rego_suites() -> None:
 def main() -> int:
     run_rego_suites()
     run_signal_contract_checks()
+    run_signal_stdin_drain_checks()
 
     cases_to_run = cases()
     frida_evidence_log("proven")  # written once, before the workers race to it

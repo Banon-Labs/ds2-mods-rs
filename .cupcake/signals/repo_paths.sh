@@ -49,6 +49,16 @@
 # subshell and a `printf`.
 set -uo pipefail
 
+# Drain stdin before printing anything (2026-10-19). cupcake writes the whole event to a signal's
+# stdin before it reads the signal's stdout. This signal used to ignore stdin, and its worktree
+# lines below grew to 10.8 KB (156 worktrees); once the user's pipes had shrunk to 8 KB
+# (fs.pipe-user-pages-soft exceeded), any event over 8 KB deadlocked the hook -- cupcake blocked
+# writing stdin, this script blocked writing stdout -- and Claude Code ran the tool call when the
+# hook gave up. A `python3 - <<'EOF' ... p.write_text(s) ... EOF` edit of four Rust files went
+# through that way while bash_no_python_file_write would have denied it. Enforced for every signal
+# by run_signal_stdin_drain_checks in scripts/test-cupcake-policies.py.
+cat >/dev/null
+
 # The overrides exist for the policy regression tests and for another machine's layout, mirroring
 # CUPCAKE_CURRENT_BRANCH_OVERRIDE in .cupcake/rulebook.yml.
 repo_root="${CUPCAKE_REPO_ROOT_OVERRIDE:-}"

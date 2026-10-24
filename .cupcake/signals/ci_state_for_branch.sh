@@ -28,6 +28,11 @@
 # few seconds, and it fails open on every error path. It does not push, edit, merge or comment.
 set -uo pipefail
 
+# Drain the event cupcake writes to stdin before printing anything: the engine reads output only
+# after the whole event is written, so a signal that skips this can deadlock the hook (see
+# repo_paths.sh, 2026-10-19). Enforced by run_signal_stdin_drain_checks.
+cat >/dev/null
+
 command -v gh >/dev/null 2>&1 || exit 0
 command -v git >/dev/null 2>&1 || exit 0
 
