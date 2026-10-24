@@ -293,6 +293,9 @@ pub struct FamilyRate {
     pub f_punish: f64,
     /// The share of ten seconds of these attacks the build's stamina keeps paying for.
     pub f_stamina: f64,
+    /// The share of the bracket's defenders rolling it on reaction that the opener still hits --
+    /// before the roll, or after its i-frames (the frame catch); `None` where nobody rolls.
+    pub caught: Option<f64>,
 }
 
 /// The stamina side of a row's R1 chain (a launcher's: one shot), in menu points: the script's

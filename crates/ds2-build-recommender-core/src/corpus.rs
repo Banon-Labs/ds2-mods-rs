@@ -57,7 +57,7 @@ mod trade;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 21";
+pub const FORMAT: &str = "ds2-build-recommender-data 22";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -184,6 +184,16 @@ fn ring_tier(name: &str) -> u32 {
 }
 
 /// The index of `sl`'s bracket.
+/// The script's `agility_index`: the stats builder's agility row, trunc((3 x ADP + ATT) / 4),
+/// row 1 outside 1-99, at effective stats `eff`.
+fn agility_index(eff: &Stats) -> usize {
+    let idx = (3 * eff[ADP] + eff[ATT]).div_euclid(4);
+    usize::try_from(idx)
+        .ok()
+        .filter(|i| (1..=99).contains(i))
+        .unwrap_or(1)
+}
+
 fn sl_bracket(sl: u32) -> usize {
     SL_BRACKET_TOPS
         .iter()
@@ -449,6 +459,20 @@ impl Weapon {
 
 /// physical, magic, fire, lightning, dark, slash, strike, thrust.
 type Defense = [f64; 8];
+
+/// One SL bracket's opponents: the script's `_threat_sums` at the bracket.
+#[derive(Clone, Debug, Default)]
+struct Threat {
+    /// The script's `threat_mix` at the bracket: what `best_armor` weights each defense by.
+    mix: [f64; 5],
+    /// The script's `threat_hit` "melee" and "spell": the mean hit by type, physical to dark,
+    /// against no defense, then what one point of that type's defense takes off it.
+    melee: [[f64; 5]; 2],
+    spell: [[f64; 5]; 2],
+    /// The script's `roll_evade` by agility row, row 0 unused; empty when the regulation was not
+    /// read, and then nobody rolls.
+    evade: Vec<f64>,
+}
 
 /// Who a hit lands on: the script's `defender_defense` answer. `base` is the defense as a plain
 /// dict reads it -- what every score without an attack in hand sees -- and [`Self::respond`] is
@@ -754,11 +778,10 @@ pub struct CorpusBackend {
     /// from.
     wearable: [Vec<Wearable>; 4],
     /// The share of damage the corpus's weapons deal per type, physical, magic, fire, lightning,
-    /// dark: what `best_armor` weights each defense by.
+    /// dark, over every opponent: what [`Self::armor_for`] weights each defense by.
     threat_mix: [f64; 5],
-    /// The script's `threat_hit`: the corpus's mean hit on one build by type, physical to dark,
-    /// against no defense, then what one point of that type's defense takes off it.
-    threat_hit: [[f64; 5]; 2],
+    /// Per SL bracket, the opponents an invader there meets (`HB` and `RE` records).
+    threats: Vec<Threat>,
     calibration: Option<Calibration>,
     /// Rings at least a tenth of all builds wear, most worn first, as indices into `rings`.
     common: Vec<usize>,
@@ -1015,7 +1038,9 @@ impl CorpusBackend {
             "PO" => self.parse_poise(line, &mut fields)?,
             "FS" | "XT" => self.parse_trade(tag, line, &mut fields)?,
             "SP" => self.parse_proc(line, &mut fields)?,
-            "MV" | "SH" | "MW" | "SR" | "MB" => self.parse_moveset(tag, line, &mut fields)?,
+            "MV" | "MC" | "SH" | "MW" | "SR" | "MB" => {
+                self.parse_moveset(tag, line, &mut fields)?
+            }
             "RM" => {
                 let grip = match next("grip")? {
                     "1" => 0,
@@ -1224,9 +1249,28 @@ impl CorpusBackend {
                     *value = float(fields.next(), line)?;
                 }
             }
-            "HT" => {
-                for value in self.threat_hit.iter_mut().flatten() {
-                    *value = float(fields.next(), line)?;
+            "HB" | "RE" => {
+                let at = fields
+                    .next()
+                    .and_then(|at| at.parse::<usize>().ok())
+                    .ok_or_else(|| bad(line, "bracket"))?;
+                if self.threats.len() <= at {
+                    self.threats.resize(at + 1, Threat::default());
+                }
+                let threat = &mut self.threats[at];
+                if tag == "HB" {
+                    for value in threat
+                        .mix
+                        .iter_mut()
+                        .chain(threat.melee.iter_mut().flatten())
+                        .chain(threat.spell.iter_mut().flatten())
+                    {
+                        *value = float(fields.next(), line)?;
+                    }
+                } else {
+                    threat.evade = std::iter::once(Ok(0.0))
+                        .chain((1..100).map(|_| float(fields.next(), line)))
+                        .collect::<Result<_, _>>()?;
                 }
             }
             "E" => {
@@ -2193,26 +2237,49 @@ impl CorpusBackend {
         self.with_ring_defense(self.armor_defense(eff, &naked), rings)
     }
 
-    /// The script's `hit_taken`: the mean hit the corpus lands on `defense`, summed over physical
-    /// to dark in the linear range, never below `1e-9`.
-    fn hit_taken(&self, defense: &Defense) -> f64 {
-        let [at0, per] = &self.threat_hit;
+    /// The script's `hit_taken`: the mean `hit` lands on `defense`, summed over physical to dark
+    /// in the linear range, never below `1e-9`.
+    fn hit_taken(hit: &[[f64; 5]; 2], defense: &Defense) -> f64 {
+        let [at0, per] = hit;
         py_max(
             py_sum((0..5).map(|kind| at0[kind] - per[kind] * defense[kind])),
             1e-9,
         )
     }
 
-    /// The script's `ehp_value`: objective `value` x max HP / [`Self::hit_taken`] at levelled
-    /// stats `st` wearing `rings`, both read at the stats the rings give, the hit against
-    /// [`Self::own_defense`]; `value` floored at `1e-9`.
-    fn ehp_value(&self, value: f64, st: &Stats, rings: &[usize]) -> f64 {
+    /// The script's `hit_taken_at`: the mean hit one opponent of `sl`'s bracket lands on a build
+    /// at effective stats `eff` with `defense` -- its swings less the share the build's roll
+    /// avoids at its agility row (`roll_evade`), plus its casts.
+    fn hit_taken_at(&self, sl: u32, eff: &Stats, defense: &Defense) -> f64 {
+        let empty = Threat::default();
+        let threat = self.threats.get(sl_bracket(sl)).unwrap_or(&empty);
+        let evade = threat.evade.get(agility_index(eff)).copied().unwrap_or(0.0);
+        py_max(
+            Self::hit_taken(&threat.melee, defense) * (1.0 - evade)
+                + Self::hit_taken(&threat.spell, defense),
+            1e-9,
+        )
+    }
+
+    /// The threat mix `best_armor` weights each defense by for an invader at `sl`: its
+    /// bracket's (the script's `threat_mix(data, corpus, sl)`).
+    fn bracket_mix(&self, sl: u32) -> [f64; 5] {
+        self.threats
+            .get(sl_bracket(sl))
+            .map_or(self.threat_mix, |threat| threat.mix)
+    }
+
+    /// The script's `ehp_value`: objective `value` x max HP / [`Self::hit_taken_at`] at levelled
+    /// stats `st` wearing `rings` for an invader at `sl`, both read at the stats the rings give,
+    /// the hit against [`Self::own_defense`]; `value` floored at `1e-9`.
+    fn ehp_value(&self, value: f64, st: &Stats, rings: &[usize], sl: u32) -> f64 {
         let eff = if rings.is_empty() {
             *st
         } else {
             self.gear_stats(st, rings)
         };
-        py_max(value, 1e-9) * self.hit_points(&eff) / self.hit_taken(&self.own_defense(&eff, rings))
+        py_max(value, 1e-9) * self.hit_points(&eff)
+            / self.hit_taken_at(sl, &eff, &self.own_defense(&eff, rings))
     }
 
     /// The script's `sub_rings`: per ring upgrade group, the ring gear ring with the highest item id
@@ -2962,7 +3029,7 @@ impl CorpusBackend {
         let score = |best: &Best| -> f64 {
             match spend {
                 Spend::Curves => best.0,
-                Spend::Ehp => self.ehp_value(best.0, &best.3, &best.4),
+                Spend::Ehp => self.ehp_value(best.0, &best.3, &best.4, sl),
             }
         };
         let offense = self.offense_rings(weapon, infusion, objective);
@@ -3213,6 +3280,7 @@ impl CorpusBackend {
                     self.objective_value(weapon, infusion, &st, objective, &defending, rings),
                     levelled,
                     rings,
+                    sl,
                 ),
                 Curve::Agility => f64::from(agility(st[ADP], st[ATT])),
                 Curve::HitPoints => self.hit_points(&st),
@@ -3225,7 +3293,7 @@ impl CorpusBackend {
             next[stat] = to;
             next
         };
-        let sl = i32::try_from(sl).unwrap_or(i32::MAX - 53);
+        let level = i32::try_from(sl).unwrap_or(i32::MAX - 53);
         let mut best: Option<Best> = None;
         let mut best_score: Option<f64> = None;
         for &class_index in classes {
@@ -3234,7 +3302,7 @@ impl CorpusBackend {
             {
                 let two = grip.two_handed();
                 let mut st = self.ring_lift(&class.base, floor, require, spells, rings)?;
-                let mut free = sl + 53 - st.iter().sum::<i32>();
+                let mut free = level + 53 - st.iter().sum::<i32>();
                 if free < 0 {
                     continue;
                 }
@@ -3354,7 +3422,7 @@ impl CorpusBackend {
                 );
                 // The classes are compared by what the points were spent on.
                 let score = if ehp {
-                    self.ehp_value(val, &st, rings)
+                    self.ehp_value(val, &st, rings, sl)
                 } else {
                     val
                 };
@@ -3419,7 +3487,8 @@ impl CorpusBackend {
         let stats = to_stats(stats);
         let weapon = self.weapon_by_key(weapon)?;
         let scarcity = scarcity.unwrap_or_else(|| self.load_scarcity(&stats));
-        let (_, _, set) = self.best_armor(&stats, &[weapon.weight], &[], scarcity);
+        let (_, _, set) =
+            self.best_armor(&stats, &[weapon.weight], &[], scarcity, &self.threat_mix);
         set.map(|set| set.map(|piece| piece.key.clone()))
     }
 
@@ -3756,6 +3825,7 @@ impl CorpusBackend {
         held: &[f64],
         rings: &[usize],
         scarcity: f64,
+        mix: &[f64; 5],
     ) -> (f64, f64, Option<[&Wearable; 4]>) {
         // The rings count: their load factor and VIT bonus in the cap, their stat bonuses toward
         // the armour's requirements.
@@ -3772,7 +3842,7 @@ impl CorpusBackend {
             piece
                 .defense
                 .iter()
-                .zip(self.threat_mix)
+                .zip(*mix)
                 .fold(0.0, |total, (defense, share)| total + share * defense)
         };
         // Per slot, only the pieces that beat every lighter one.
@@ -3945,7 +4015,8 @@ impl CorpusBackend {
             held.push(heaviest(first, rest));
         }
         let scarcity = self.load_scarcity(stats);
-        let (cap, carried, set) = self.best_armor(stats, &held, rings, scarcity);
+        let mix = self.bracket_mix(sl);
+        let (cap, carried, set) = self.best_armor(stats, &held, rings, scarcity, &mix);
         let percent = EQUIP_CAP * 100.0;
         let Some(set) = set else {
             let what = if catalysts.is_empty() {
@@ -3968,6 +4039,7 @@ impl CorpusBackend {
             held: &held,
             rings,
             scarcity,
+            mix,
         };
         let traded = self.trade_armor(set, &wearer, sl, granted);
         let set = traded.pieces;

@@ -10,8 +10,11 @@
 //!
 //! ```text
 //! rate = (damage + status - self) / (entry + commit)
-//!        x f_reach^e x f_stagger^e x f_trade^e x f_punish^e x f_stamina^e
+//!        x f_reach^e x f_stagger^e x meet x f_stamina^e
+//! meet = (1 - REACT_SHARE) x f_trade^e x f_punish^e + REACT_SHARE x caught
 //! ```
+//!
+//! `caught` is the `MC` record's: the share of the bracket's reacting rolls the opener still hits.
 //!
 //! times its family's weight; a family takes its best engagement, and the weapon's rate is
 //! sum(s^2) / sum(s) over its families' positive rates.
@@ -58,6 +61,9 @@ const REACH_CLAMP: (f64, f64) = (0.6, 1.5);
 const STAGGER_BONUS: f64 = 0.5;
 const TRADE_BONUS: f64 = 0.25;
 const MOVESET_PUNISH: f64 = 0.25;
+/// The share of openers thrown at a defender who waits and rolls on reaction: the script's
+/// `REACT_SHARE` (er-mods-rs's, INFERRED).
+const REACT_SHARE: f64 = 0.5;
 
 /// One attack of a weapon's moveset in one grip.
 #[derive(Clone, Debug)]
@@ -75,6 +81,9 @@ pub(super) struct Move {
     hits: Vec<(u32, Hit)>,
     /// Its earliest live hit as the trade model reads it: the script's `strike_of`.
     strike: Option<Strike>,
+    /// Per SL bracket, the share of the bracket's reacting rolls its live hits catch: the
+    /// script's `rolls_caught` (`MC`); `None` where nobody rolls.
+    caught: Vec<Option<f64>>,
 }
 
 /// The script's `moveset_exponents`: factor exponents, then family weights in [`FAMILIES`] order.
@@ -213,7 +222,27 @@ impl CorpusBackend {
                         stamina,
                         hits,
                         strike,
+                        caught: Vec::new(),
                     });
+            }
+            "MC" => {
+                let caught = fields
+                    .map(|field| opt(Some(field), line))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let weapon = self
+                    .weapons
+                    .last_mut()
+                    .ok_or_else(|| bad(line, "a roll catch before any weapon"))?;
+                // It follows its MV record, and every 1H record comes before the 2H ones.
+                let [one, two] = &mut weapon.moves;
+                let attack = if two.last().is_some_and(|m| m.caught.is_empty()) {
+                    two.last_mut()
+                } else {
+                    one.last_mut().filter(|m| m.caught.is_empty())
+                };
+                attack
+                    .ok_or_else(|| bad(line, "a roll catch with no attack before it"))?
+                    .caught = caught;
             }
             "SH" => {
                 self.weapons
@@ -374,11 +403,17 @@ impl CorpusBackend {
                     );
                 }
                 let net = dmg + procs - own;
+                // A committed defender meets the contest; a reacting one rolls and is caught at
+                // `caught`. The two split the defenders rather than multiply.
+                let contest = f_trade.powf(w.trade) * f_punish.powf(w.punish);
+                let caught = atts[0].caught.get(sl_bracket(sl)).copied().flatten();
+                let meet = caught.map_or(contest, |caught| {
+                    (1.0 - REACT_SHARE) * contest + REACT_SHARE * caught
+                });
                 let rate = w.families[fam] * net / commit
                     * (f_reach.powf(w.reach)
                         * f_stagger.powf(w.stagger)
-                        * f_trade.powf(w.trade)
-                        * f_punish.powf(w.punish)
+                        * meet
                         * f_stamina.powf(w.stamina));
                 // The script compares the rate against the best's rounded one.
                 if best.as_ref().is_none_or(|best| rate > best.rate) {
@@ -399,6 +434,7 @@ impl CorpusBackend {
                         f_trade: py_round(f_trade, 3),
                         f_punish: py_round(f_punish, 3),
                         f_stamina: py_round(f_stamina, 3),
+                        caught: caught.map(|caught| py_round(caught, 3)),
                     });
                 }
             }

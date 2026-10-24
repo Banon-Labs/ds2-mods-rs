@@ -41,6 +41,7 @@ import json
 import math
 import os
 import re
+import statistics
 import subprocess
 import sys
 import time
@@ -200,7 +201,11 @@ class Data:
         # ChrParam row 100 staminaRecoveryValue / STAMINA_UNIT: menu stamina regained per second
         # (that the value is per second is INFERRED, ds2-stamina-regen-chrparam); None unread.
         self.stamina_regen = None
-        self.throwables, self.heals, self.item_buffs = {}, {}, {}  # regulation_consumables
+        # PhysicalStatsPerLevelStatValuesParam.rollingInvincibleTimeRate / 100 by agility index,
+        # rows 0-99 (row 0 unread): the share of the roll's 110300 window that is invincible
+        # (roll_shape); empty when the regulation is not read, and then nobody rolls.
+        self.roll_rate = []
+        self.throwables,self.heals, self.item_buffs = {}, {}, {}  # regulation_consumables
         # weapon class (Dagger, Greatsword, ...): MugenMonkey only, joined by normalized name
         mm_w = {}
         for k, v in mm["darkSouls2WeaponDetails"].items():
@@ -598,10 +603,10 @@ def buff_attack(data: Data, buff: dict, weapon: str, stats: dict) -> float:
     return (base + coef * element_bonus(data, buff["type"], stats) + buff["flat"]) * buff["scale"] / 100
 
 
-def threat_opponents(data: Data, corpus: list[Build]) -> list[tuple[dict, list[dict]]]:
+def threat_opponents(data: Data, corpus: list[Build]) -> list[tuple[dict, list[dict], float, int]]:
     """Every unique build on both mirrors that can hit (a usable melee weapon, or an attack spell
     it can cast with a catalyst it carries and can wield), as (melee attack rating by type, spell
-    hits it can cast). Unique: one of each (tokens, stats), as load_corpus dedupes. Unlike the
+    hits it can cast, its melee weapon's damageScale, its soul level). Unique: one of each (tokens, stats), as load_corpus dedupes. Unlike the
     recommender's corpus, an incomplete armour set or an empty ring slot does not drop a build:
     what it wears does not change what it hits with.
 
@@ -678,11 +683,11 @@ def threat_opponents(data: Data, corpus: list[Build]) -> list[tuple[dict, list[d
             k, v = max(buffs, key=lambda t: t[1])
             melee[k] = melee.get(k, 0.0) + v
         if melee or spells:
-            out.append((melee, spells, data.damage_scale.get(main, 1.0)))
+            out.append((melee, spells, data.damage_scale.get(main, 1.0), soul_level(data, b)))
     return out
 
 
-def threat_sums(opponents: list[tuple[dict, list[dict], float]]) -> dict:
+def threat_sums(opponents: list[tuple[dict, list[dict], float, int]]) -> dict:
     """What one point of each defense takes off one hit, summed over `opponents` in four groups:
     "melee" (builds that only swing), "spell" (only cast), and "both_melee" / "both_spell" (the
     swing and the cast of builds that do both). EXE (docs/DS2-DPS-MECHANICS.md "Damage per hit
@@ -701,7 +706,7 @@ def threat_sums(opponents: list[tuple[dict, list[dict], float]]) -> dict:
     groups = ("melee", "spell", "both_melee", "both_spell")
     sums = {g: {k: 0.0 for k in DMG} for g in groups}
     at0 = {g: {k: 0.0 for k in DMG} for g in groups}
-    for melee, spells, scale in opponents:
+    for melee, spells, scale, *_ in opponents:
         if melee:
             key = "both_melee" if spells else "melee"
             g, z = sums[key], at0[key]
@@ -750,21 +755,28 @@ def threat_key(data: Data, corpus: list[Build]) -> str:
     return h.hexdigest()
 
 
-def threat_mix(data: Data, corpus: list[Build]) -> dict:
+def threat_mix(data: Data, corpus: list[Build], sl: int | None = None) -> dict:
     """Per-type weight of one point of armour defense, for best_armor: threat_weights at
-    SPELL_HIT_SHARE."""
-    return threat_weights(_threat_sums(data, corpus), SPELL_HIT_SHARE)
+    SPELL_HIT_SHARE, over `sl`'s bracket's opponents (_threat_sums), the whole corpus without."""
+    return threat_weights(_threat_sums(data, corpus, sl), SPELL_HIT_SHARE)
 
 
-def threat_hit(data: Data, corpus: list[Build]) -> tuple[dict, dict]:
-    """The corpus's mean hit on one build by type, as (its damage against no defense, what one
-    point of that type's defense takes off it): threat_sums' "at0" and per-point sums, builds that
-    both swing and cast landing SPELL_HIT_SHARE of their hits as spells, over the opponent count.
-    hit_taken reads it at a defense."""
-    sums = _threat_sums(data, corpus)
+#: Which of an opponent's hits threat_hit counts: its swings, its casts, or both.
+THREAT_PARTS = {"all": (1.0, 1.0), "melee": (1.0, 0.0), "spell": (0.0, 1.0)}
+
+
+def threat_hit(data: Data, corpus: list[Build], sl: int | None = None, part: str = "all") -> tuple[dict, dict]:
+    """The mean hit one opponent of `sl`'s bracket (_threat_sums; the whole corpus when `sl` is
+    None) lands on one build by type, as (its damage against no defense, what one point of that
+    type's defense takes off it): threat_sums' "at0" and per-point sums, builds that both swing
+    and cast landing SPELL_HIT_SHARE of their hits as spells, over the opponent count. `part`
+    (THREAT_PARTS) keeps the swings or the casts alone; the two add up to "all". hit_taken reads it
+    at a defense."""
+    sums = _threat_sums(data, corpus, sl)
     n = max(sums["count"], 1)
-    mix = lambda by: {k: (by["melee"][k] + by["spell"][k] + (1 - SPELL_HIT_SHARE) * by["both_melee"][k]
-                          + SPELL_HIT_SHARE * by["both_spell"][k]) / n for k in DMG}
+    m, c = THREAT_PARTS[part]
+    mix = lambda by: {k: (m * (by["melee"][k] + (1 - SPELL_HIT_SHARE) * by["both_melee"][k])
+                          + c * (by["spell"][k] + SPELL_HIT_SHARE * by["both_spell"][k])) / n for k in DMG}
     return mix(sums["at0"]), mix(sums)
 
 
@@ -786,9 +798,17 @@ def own_defense(data: Data, eff: dict, rings=()) -> dict:
     return out
 
 
-def _threat_sums(data: Data, corpus: list[Build]) -> dict:
-    """threat_sums over threat_opponents. threat_opponents costs about half a minute, so the sums
-    are kept in THREAT_CACHE under threat_key and in memory for the run."""
+#: The fewest opponents a bracket's threat is averaged over; a thinner bracket takes the nearest one
+#: that has this many, as bracket_builds does.
+THREAT_MIN = 20
+
+
+def _threat_sums(data: Data, corpus: list[Build], sl: int | None = None) -> dict:
+    """threat_sums over the threat_opponents an invader at soul level `sl` meets: the ones in its
+    SL bracket (SL_BRACKETS, Seamless's invasion brackets), or the nearest bracket with THREAT_MIN
+    of them; every opponent when `sl` is None. threat_opponents costs about half a minute, so the
+    sums, whole and per bracket, are kept in THREAT_CACHE under threat_key and in memory for the
+    run."""
     if id(corpus) not in _threat_cache:
         key, sums = threat_key(data, corpus), None
         try:
@@ -797,13 +817,23 @@ def _threat_sums(data: Data, corpus: list[Build]) -> dict:
         except (OSError, ValueError, KeyError):
             pass
         if sums is None:
-            sums = threat_sums(threat_opponents(data, corpus))
+            opp = threat_opponents(data, corpus)
+            sums = {"all": threat_sums(opp),
+                    "by": {str(i): threat_sums([o for o in opp if sl_bracket(o[3]) == i])
+                           for i in range(len(SL_BRACKETS))}}
             try:
                 THREAT_CACHE.write_text(json.dumps({"key": key, "sums": sums}))
             except OSError:
                 pass
         _threat_cache[id(corpus)] = sums
-    return _threat_cache[id(corpus)]
+    got = _threat_cache[id(corpus)]
+    if sl is None:
+        return got["all"]
+    i = sl_bracket(sl)
+    for j in sorted(range(len(SL_BRACKETS)), key=lambda j: (abs(j - i), j)):
+        if got["by"][str(j)]["count"] >= THREAT_MIN:
+            return got["by"][str(j)]
+    return got["all"]
 
 
 def max_load(data: Data, eff: dict, rings=()) -> float:
@@ -1211,6 +1241,7 @@ def apply_regulation(data: Data) -> str:
     data.sp["physicalDEFBonus"] = new
     data.hp_max = [0] + [rows[str(v)]["hpMax"] for v in range(1, top + 1)]
     data.additional_hp = [0] + [rows[str(v)]["additionalHp"] for v in range(1, top + 1)]
+    data.roll_rate = [0.0] + [rows[str(v)]["rollingInvincibleTimeRate"] / 100 for v in range(1, top + 1)]
     chr_row = next(iter(d["ChrParam"].values()), None)
     data.stamina_regen = chr_row["staminaRecoveryValue"] / STAMINA_UNIT if chr_row else None
     # First, so every join below finds the weapons it renames.
@@ -2942,6 +2973,164 @@ def shot_metrics(data: Data, weapon: str, shot: float, st: dict, rings=()) -> di
 RANKS = {"window": None, "per-stamina": "damage_per_stamina", "bar": "bar_damage", "moveset": "moveset"}
 
 
+# --- The roll: neither side stands still (er-mods-rs er-mechanics-ashes.py, ashes-of-war.md 16a) --
+#
+# Every opener meets, at REACT_SHARE of engagements, a player who waits, sees it start and rolls;
+# the rest meet one who commits, the case the trade and punish factors score. The roll escapes when
+# no live hit touches him outside his invincibility while he is still in the attack's path; a hit
+# still live when the i-frames end catches him (the frame catch), and so does one that comes before
+# he can press. Time only: DS2's hitbox geometry and the roll's root motion were not read, so a
+# roller is in the path until the 110300 window ends and out of it after (INFERRED).
+
+#: The roll clip whose i-frames are scored. c000100_pl.tae has four roll pairs
+#: (docs/DS2-BUILD-MECHANICS.md "Roll i-frames"); which one the Morpheme network's SM_Dodge plays
+#: at which load was not traced. 120020 is taken: full i-frames (110100) to 0.133 s, then 110300
+#: 0.100-0.567 s at the agility rate (INFERRED choice).
+ROLL_ANIM = 120020
+TAE_IFRAME_FULL, TAE_IFRAME_AGILITY = 110100, 110300
+#: Reaction, network and timing constants: er-mods-rs's (er-mechanics-ashes.py, all INFERRED there:
+#: human visual reaction lognormal at median 0.25 s, log sd 0.2; 0.05 s each way between the
+#: machines, paid twice; a scheduled press's timing error sd 0.05 s; half the openers meet a
+#: reacting defender).
+REACTION_MEDIAN_S, REACTION_LOG_SD = 0.25, 0.2
+NETWORK_ONE_WAY_S = 0.05
+DODGE_TIMING_SD_S = 0.05
+REACT_SHARE = 0.5
+REACTION_POINTS, TIMING_POINTS = 9, 7
+#: Roll presses are tried every 60 Hz update.
+DODGE_STEP_S = 1 / 60
+_ND = statistics.NormalDist()
+_roll_cache: dict = {}
+
+
+def agility_index(eff: dict) -> int:
+    """The stats builder's agility row: trunc((3 x ADP + ATT) / 4), row 1 outside 1-99
+    (docs/DS2-BUILD-MECHANICS.md section 3), at effective stats `eff`."""
+    idx = (3 * eff["adaptability"] + eff["attunement"]) // 4
+    return idx if 1 <= idx <= 99 else 1
+
+
+def roll_rate(data: Data, eff: dict) -> float | None:
+    """The roll's invincible share of its 110300 window at effective stats `eff`; None when the
+    regulation was not read."""
+    return data.roll_rate[agility_index(eff)] if data.roll_rate else None
+
+
+def roll_shape(rate: float) -> tuple[list[tuple[float, float]], float] | None:
+    """(invincible spans, path end) of ROLL_ANIM in seconds from its first frame, at agility
+    `rate`: the 110100 spans whole and the 110300 window's first `rate` of it, clipped to start at
+    0, and the 110300 window's end, after which the roller is out of the attack's path. None
+    without the TAE."""
+    agl = tae_windows(ROLL_ANIM, TAE_IFRAME_AGILITY)
+    if not agl:
+        return None
+    spans = [(max(0.0, s / 30), e / 30) for s, e in tae_windows(ROLL_ANIM, TAE_IFRAME_FULL) if e > 0]
+    s, e = agl[0][0] / 30, agl[0][1] / 30
+    spans.append((max(0.0, s), max(0.0, s) + rate * (e - max(0.0, s))))
+    return sorted(spans), e
+
+
+def reaction_delays() -> list[tuple[float, float]]:
+    """[(seconds from the attack's start to the earliest roll that counts on the attacker's
+    machine, weight)]: REACTION_POINTS quantiles of the reaction plus two network legs."""
+    out = []
+    for k in range(REACTION_POINTS):
+        z = _ND.inv_cdf((k + 0.5) / REACTION_POINTS)
+        out.append((REACTION_MEDIAN_S * math.exp(REACTION_LOG_SD * z) + 2 * NETWORK_ONE_WAY_S,
+                    1.0 / REACTION_POINTS))
+    return out
+
+
+def _runs(ok: list[bool]) -> list[tuple[int, int]]:
+    out, start = [], None
+    for i, v in enumerate(ok):
+        if v and start is None:
+            start = i
+        elif not v and start is not None:
+            out.append((start, i - 1))
+            start = None
+    if start is not None:
+        out.append((start, len(ok) - 1))
+    return out
+
+
+def dodge_presses(ok: list[bool], step: float = DODGE_STEP_S) -> list[tuple[float, float]]:
+    """[(roll start, seconds from the attack's start; weight)]: er-mods-rs's dodge_presses in
+    seconds. `ok[i]` says whether a roll started at i x `step` escapes. He cannot press before his
+    reaction delay (reaction_delays); among the escaping runs still open then he takes the one he
+    is likeliest to hit and aims at its middle, with a normal timing error (DODGE_TIMING_SD_S); a
+    press that would come before he can react comes at the reaction. With no run left he rolls at
+    the reaction anyway, too late. So an early roll loses to a long or late live window and a late
+    one to a fast startup."""
+    sd = DODGE_TIMING_SD_S
+    runs = [(a * step, b * step) for a, b in _runs(ok)]
+    errors = [sd * _ND.inv_cdf((k + 0.5) / TIMING_POINTS) for k in range(TIMING_POINTS)]
+    out = []
+    for t, w in reaction_delays():
+        best = None
+        for lo, hi in runs:
+            if hi < t:
+                continue
+            lo2 = max(lo, t)
+            half = (hi - lo2) / 2
+            p = _ND.cdf(half / sd) - (_ND.cdf(-half / sd) if lo2 > t else 0.0)
+            if best is None or p > best[0] + 1e-9:
+                best = (p, lo2 + half)
+        if best is None:
+            out.append((t, w))
+            continue
+        out += [(max(t, best[1] + e), w / TIMING_POINTS) for e in errors]
+    return out
+
+
+def roll_escapes(hits: list[tuple[float, float]], press: float, shape: tuple[list, float]) -> bool:
+    """Whether a roll pressed `press` seconds after the attack starts escapes its live `hits`
+    ((start, end) seconds). A hit is checked at every 60 Hz tick it is live: one before the press,
+    or after it while he is still in the path (`shape`'s path end) and outside every invincible
+    span, catches him."""
+    spans, path = shape
+    for a, b in hits:
+        n = max(0, int(round((b - a) / DODGE_STEP_S)))
+        for k in range(n + 1):
+            t = a + k * DODGE_STEP_S
+            if t < press:
+                return False
+            r = t - press
+            if r < path and not any(s <= r < e for s, e in spans):
+                return False
+    return True
+
+
+def roll_caught(hits: list[tuple[float, float]], rate: float) -> float:
+    """The share of reacting rolls at agility `rate` that `hits` catch (dodge_presses, roll_escapes);
+    1 without the roll's TAE or with no hits. Cached by (hits, rate)."""
+    key = (tuple(hits), rate)
+    if key in _roll_cache:
+        return _roll_cache[key]
+    shape = roll_shape(rate)
+    if shape is None or not hits:
+        return _roll_cache.setdefault(key, 1.0)
+    last = max(b for _, b in hits)
+    ok = [roll_escapes(hits, i * DODGE_STEP_S, shape) for i in range(int(last / DODGE_STEP_S) + 2)]
+    caught = sum(w for p, w in dodge_presses(ok) if not roll_escapes(hits, p, shape))
+    return _roll_cache.setdefault(key, caught)
+
+
+def rolls_caught(hits: list[tuple[float, float]], rates: dict) -> float | None:
+    """roll_caught averaged over `rates` ({agility rate: weight}, the rollers); None when nobody
+    rolls (no rates)."""
+    tot = sum(rates.values())
+    if not tot:
+        return None
+    return sum(w * roll_caught(hits, r) for r, w in sorted(rates.items())) / tot
+
+
+def attack_live_seconds(a: dict, table: dict | None) -> list[tuple[float, float]]:
+    """An attack's live hit windows as (start, end) seconds from its input (attack_seconds)."""
+    return [(round(attack_seconds(a, h["start"], table), 4), round(attack_seconds(a, h["end"], table), 4))
+            for h in live_hits(a)]
+
+
 # --- The moveset: every attack a weapon has, not the R1 alone (er-mods-rs er-builds-pvp.py) ------
 
 #: Engagements per family: an opener, or an opener and its chained follow-up. The attacks.json slot
@@ -3038,15 +3227,23 @@ def moveset_bracket(data: Data, corpus: list[Build], sl: int, attacks: dict) -> 
     `data`: `reach` the median R1 reach of the builds' melee weapons in their grips (r1_reach),
     `poises` every build's poise (armor_poise at its stats), `recovery` every build's R1 recovery
     -- seconds from its last live hitbox to the end of its animation (anim_length), the opening a
-    punish must fit in -- and `counters` trade_counters'."""
+    punish must fit in -- `counters` trade_counters', `rolls` {roll_rate: builds} at each build's
+    effective stats with its rings (who rolls our openers), and `r1_hits` every build's R1 live
+    windows in seconds (attack_live_seconds: what our roll meets, roll_evade)."""
     table = speed_windows()
     key = (id(corpus), sl_bracket(sl), table is not None)
     cache = data.__dict__.setdefault("_moveset_bracket", {})
     if key in cache:
         return cache[key]
-    reach, poises, recovery = [], [], []
+    reach, poises, recovery, rolls, r1_hits = [], [], [], Counter(), []
     for b in bracket_builds(data, corpus, sl):
         poises.append(armor_poise(data, b.armor, b.rings, b.stats))
+        try:
+            rate = roll_rate(data, gear_stats(data, effective(data, b), [r for r in b.rings if r in data.rings]))
+        except KeyError:
+            rate = None
+        if rate is not None:
+            rolls[rate] += 1
         pick = _melee_pick(data, b)
         if not pick:
             continue
@@ -3057,12 +3254,15 @@ def moveset_bracket(data: Data, corpus: list[Build], sl: int, attacks: dict) -> 
             reach.append(r)
         a = r1_attack(attacks, names, two) or r1_attack(attacks, names, False)
         hs = live_hits(a) if a else []
+        if hs:
+            r1_hits.append(attack_live_seconds(a, table))
         end = anim_length(a["anim"]) if hs else None
         if end is not None:
             last = max(h["end"] for h in hs)
             recovery.append(max(0.0, attack_seconds(a, end * 30, table) - attack_seconds(a, last, table)))
     out = {"reach": float(np.median(reach)) if reach else None, "poises": poises, "recovery": sorted(recovery),
-           "counters": trade_counters(data, corpus, sl, attacks)}
+           "counters": trade_counters(data, corpus, sl, attacks), "rolls": dict(sorted(rolls.items())),
+           "r1_hits": r1_hits}
     cache[key] = out
     return out
 
@@ -3076,7 +3276,8 @@ def moveset_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str,
     Per engagement (MOVE_FAMILIES: an opener, or an opener and its chained follow-up):
 
         rate = (damage + status - self) / (entry + commit)
-               x f_reach^e x f_stagger^e x f_trade^e x f_punish^e x f_stamina^e
+               x f_reach^e x f_stagger^e x meet x f_stamina^e
+        meet = (1 - REACT_SHARE) x f_trade^e x f_punish^e + REACT_SHARE x caught
 
     each exponent e moveset_exponents' (fitted to adoption, MOVESET_WEIGHTS; 1 without the file),
     and the rate times its family's weight there. `raw` in a family's row is the rate before the
@@ -3097,6 +3298,10 @@ def moveset_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str,
       bracket counter's R1 pressed at the same instant, my poise the bracket's mean.
     * f_punish = 1 + MOVESET_PUNISH x (2 x cover - 1), cover the share of the bracket's R1
       recoveries the opener's startup fits inside -- er-mods-rs class-roles' punish coverage.
+    * caught: the share of the bracket's builds, each rolling on reaction at its own agility, that
+      the opener's live windows still hit -- before the roll is pressed, or still live when its
+      i-frames end (the frame catch): rolls_caught. Without the roll table `meet` is the contest
+      alone.
     * f_stamina = min(1, n x commit / W), n = (bar + regen x W) / (cost + regen x commit) attacks
       W = MOVESET_STAMINA_WINDOW seconds pays for, regen paused while attacking (bar_attacks).
 
@@ -3167,13 +3372,19 @@ def moveset_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str,
                 f_stamina = min(1.0, (bar + regen * W) / (cost + regen * commit) * commit / W)
             ex = moveset_exponents()
             net = dmg + st_hp - own
+            # A committed defender meets the contest (trade, punish); a reacting one rolls and is
+            # caught at `caught` (rolls_caught). The two split the defenders rather than multiply,
+            # so a fast startup is not rewarded twice (er-mods-rs slot_score).
+            contest = f_trade ** ex["f_trade"] * f_punish ** ex["f_punish"]
+            caught = rolls_caught(attack_live_seconds(atts[0], table), br["rolls"])
+            meet = contest if caught is None else (1 - REACT_SHARE) * contest + REACT_SHARE * caught
             rate = ex[fam] * net / commit * (f_reach ** ex["f_reach"] * f_stagger ** ex["f_stagger"]
-                                             * f_trade ** ex["f_trade"] * f_punish ** ex["f_punish"]
-                                             * f_stamina ** ex["f_stamina"])
+                                             * meet * f_stamina ** ex["f_stamina"])
             row = {"engagement": "+".join(eng), "rate": round(rate, 2), "raw": round(net / commit, 3),
                    "damage": round(dmg, 1),
                    "status": round(st_hp, 1), "self": round(own, 1), "startup_s": round(startup, 3), "commit_s": round(commit, 3),
                    "stamina": None if cost is None else round(cost, 1), "reach_m": reach,
+                   "caught": None if caught is None else round(caught, 3),
                    "f_reach": round(f_reach, 3), "f_stagger": round(f_stagger, 3), "f_trade": round(f_trade, 3),
                    "f_punish": round(f_punish, 3), "f_stamina": round(f_stamina, 3)}
             if best is None or rate > best["rate"]:
@@ -4324,15 +4535,44 @@ GRIP_TRIES = {"two": (True,), "one": (False,)}
 SPEND = {"mode": "curves"}
 
 
-def ehp_value(data: Data, corpus: list[Build], value: float, st: dict, rings=()) -> float:
-    """SPEND "ehp"'s product for objective `value` at levelled stats `st` wearing `rings`:
-    value x max HP / mean hit taken (hit_points, hit_taken), both at the stats the rings give, the
+def roll_evade(data: Data, corpus: list[Build], sl: int, rate: float | None) -> float:
+    """The share of `sl`'s bracket's swings a build rolling at agility `rate` avoids: REACT_SHARE
+    of them meet it waiting and rolling on reaction (the other half it is committed), and of those
+    it escapes every bracket build's R1 that does not catch it (roll_caught over moveset_bracket's
+    `r1_hits`, each build once). 0 when it cannot roll (`rate` None) or the bracket has no R1."""
+    if rate is None:
+        return 0.0
+    cache = data.__dict__.setdefault("_roll_evade", {})
+    key = (id(corpus), sl_bracket(sl), rate)
+    if key not in cache:
+        attacks = data.__dict__.get("_attacks")
+        if attacks is None:
+            attacks = data.__dict__.setdefault("_attacks", load_attacks(data))
+        hits = moveset_bracket(data, corpus, sl, attacks)["r1_hits"]
+        cache[key] = REACT_SHARE * (1 - sum(roll_caught(h, rate) for h in hits) / len(hits)) if hits else 0.0
+    return cache[key]
+
+
+def hit_taken_at(data: Data, corpus: list[Build], sl: int, eff: dict, dfn: dict) -> float:
+    """The mean hit one opponent of `sl`'s bracket lands on a build at effective stats `eff` with
+    defense `dfn`: its swings (threat_hit "melee") less the share the build's roll avoids
+    (roll_evade at its agility), plus its casts ("spell"), which nobody is scored rolling."""
+    melee = hit_taken(threat_hit(data, corpus, sl, "melee"), dfn)
+    spell = hit_taken(threat_hit(data, corpus, sl, "spell"), dfn)
+    return max(melee * (1 - roll_evade(data, corpus, sl, roll_rate(data, eff))) + spell, 1e-9)
+
+
+def ehp_value(data: Data, corpus: list[Build], value: float, st: dict, rings=(), *, sl: int) -> float:
+    """SPEND "ehp"'s product for objective `value` at levelled stats `st` wearing `rings`, for an
+    invader at soul level `sl`: value x max HP / mean hit taken (hit_points, hit_taken_at: the
+    bracket's opponents, less what the build's roll avoids), both at the stats the rings give, the
     hit against own_defense -- the defense before any armour, since generate_armor chooses the
-    armour after the stats. `value` is floored at 1e-9 so a weapon with none of the objective
-    (bleed on a weapon that builds none) still spends on HP."""
+    armour after the stats. So agility buys effective HP through the roll's i-frames. `value` is
+    floored at 1e-9 so a weapon with none of the objective (bleed on a weapon that builds none)
+    still spends on HP."""
     eff = gear_stats(data, st, rings) if rings else st
     return (max(value, 1e-9) * hit_points(data, eff)
-            / hit_taken(threat_hit(data, corpus), own_defense(data, eff, rings)))
+            / hit_taken_at(data, corpus, sl, eff, own_defense(data, eff, rings)))
 
 
 def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
@@ -4377,7 +4617,7 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
                                     classes, need_floors, req, rs, defender)
     if rings is not None:
         return run(list(rings)), floors
-    score = ((lambda b: ehp_value(data, corpus, b[0], b[3], b[4])) if SPEND["mode"] == "ehp"
+    score = ((lambda b: ehp_value(data, corpus, b[0], b[3], b[4], sl=sl)) if SPEND["mode"] == "ehp"
              else (lambda b: b[0]))
     return choose_rings(data, classes, need_floors, req, spells, run,
                         offense_rings(data, weapon, inf, objective), score), floors
@@ -4594,7 +4834,7 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             # step's gain is taken relative to the product where it is taken (`rel` below), so one
             # per cent more damage and one per cent more effective HP weigh the same.
             hit = obj
-            obj = lambda s_: ehp_value(data, corpus, hit(s_), s_, rings)
+            obj = lambda s_: ehp_value(data, corpus, hit(s_), s_, rings, sl=sl)
             curves = {s: obj for s in STATS}
         # The early rates of the ehp curve are relative as well: over the product at the start.
         at = obj(st) if ehp else 1.0
@@ -4652,7 +4892,7 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             st[pick[0]] += pick[1]
             free -= pick[1]
         val = objective_value(data, weapon, inf, E(st), objective, dfn, rings)
-        score = ehp_value(data, corpus, val, st, rings) if ehp else val
+        score = ehp_value(data, corpus, val, st, rings, sl=sl) if ehp else val
         if best is None or score > best_score:
             best, best_score = (val, cls, two, st, list(rings)), score
     return best
@@ -5346,7 +5586,7 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
     if catalysts:
         held.append((max(catalysts, key=weight), "No_Infusion"))
     wearer = Build("", stats, ["Naked"] * 4, held, int(two), rings, [])
-    mix, scarcity = threat_mix(data, corpus), load_scarcity(data, stats)
+    mix, scarcity = threat_mix(data, corpus, sl), load_scarcity(data, stats)
     full = FULL_ARMOR
     cap, carried, sets = best_armor(data, wearer, dict(stats), mix, top=1, scarcity=scarcity, full=full)
     if not sets and full:  # no set with a piece in every slot fits: let one go bare (the note says so)
@@ -5566,7 +5806,7 @@ def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, 
                              for v, n in ((thrown_value(data, t, dfn)[0], n) for n, t in data.throwables.items()
                                           if any(w in n for w in words) and held_item(n)) if v > 0), reverse=True)
               for group, words in THROWN_GROUPS.items()}
-    mix = threat_mix(data, corpus)
+    mix = threat_mix(data, corpus, sl)
     guards = sorted(((v, n, " ".join(f"{k} +{x}" for k, x in b["add"].items()) + f" for {b['seconds']:g} s")
                      for v, n, b in ((sum(mix.get(k, 0) * x for k, x in b["add"].items()), n, b)
                                      for n, b in data.defense_buffs.items() if b["source"] == "item" and held_item(n))
@@ -5878,9 +6118,6 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             its physicalDEFBonus, alter its
 #                                                             stat changes
 #   H physical magic fire lightning dark                      the corpus threat mix (threat_mix)
-#   HT at0(5) per(5)                                          threat_hit: the corpus's mean hit on
-#                                                             no defense and what one point of
-#                                                             defense takes off it, in DMG order
 #   K n top1 top2                                             calibrate_infusions
 #   M ring count                                              a ring worn by >= COMMON_RING of builds
 #   Z key name slots category require                         a spell: its attunement slot cost,
@@ -5960,10 +6197,19 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             R1 reach ("-" none), mean poise, every
 #                                                             build's poise and the sorted R1
 #                                                             recoveries, comma-separated ("-" none)
+#   MC caught(9)                                              the last MV's rolls_caught at each
+#                                                             SL bracket ("-" when nobody there
+#                                                             rolls)
+#   HB bracket mix(5) melee(10) spell(10)                     one SL bracket's opponents
+#                                                             (_threat_sums): threat_mix, then
+#                                                             threat_hit "melee" and "spell", each
+#                                                             at0(5) per(5), in DMG order
+#   RE bracket evade(99)                                      roll_evade at the bracket for agility
+#                                                             rows 1-99 (none unread)
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 21"
+BACKEND_FORMAT = "ds2-build-recommender-data 22"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -6063,9 +6309,10 @@ def _poise_records(data: Data, attacks: dict, key: str, name: str) -> list[str]:
     return out
 
 
-def _moveset_records(data: Data, attacks: dict, key: str, name: str, timing) -> list[str]:
+def _moveset_records(data: Data, attacks: dict, key: str, name: str, timing, bracket_rolls: list) -> list[str]:
     """export_backend's MV records for one weapon: per grip, every MOVE_FAMILIES attack with a live
-    hit, as moveset_metrics reads it before any build (move_attack, no 1H fallback)."""
+    hit, as moveset_metrics reads it before any build (move_attack, no 1H fallback), each followed
+    by its MC record: rolls_caught against each SL bracket's `bracket_rolls`."""
     out = []
     names = [name, key.replace("_", " ")]
     slots = list(dict.fromkeys(s for engs in MOVE_FAMILIES.values() for eng in engs for s in eng))
@@ -6083,12 +6330,15 @@ def _moveset_records(data: Data, attacks: dict, key: str, name: str, timing) -> 
             out.append("\t".join(["MV", "2" if two else "1", sfx, _num(float(startup)), _num(float(commit)),
                                   _opt(attack_reach(data, key, a)), _opt(move_stamina(data, key, two, sfx)), hits,
                                   *(_strike_fields(strike) if strike else ["-"])]))
+            live = attack_live_seconds(a, timing)
+            out.append("\t".join(["MC", *(_opt(rolls_caught(live, r)) for r in bracket_rolls)]))
     return out
 
 
 def export_backend(data: Data, corpus: list[Build]) -> str:
-    attacks = load_attacks(data)
-    rates = json.loads(HYPERARMOR.read_text()) if HYPERARMOR.exists() else {}
+    attacks = data.__dict__.setdefault("_attacks", load_attacks(data))
+    bracket_rolls = [moveset_bracket(data, corpus, lo, attacks)["rolls"] for lo, _ in SL_BRACKETS]
+    rates =json.loads(HYPERARMOR.read_text()) if HYPERARMOR.exists() else {}
     crit = {norm(k): v for k, v in json.loads(CRIT.read_text()).items()} if CRIT.exists() else {}
     r1 = stamina_r1(data)
     cut = high_stamina_cut(r1)
@@ -6169,7 +6419,7 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                 hit = first_strike(data, attacks, key, two, timing)
                 if hit:
                     out.append("\t".join(["FS", "2" if two else "1", *_strike_fields(hit)]))
-            out.extend(_moveset_records(data, attacks, key, w["name"], timing))
+            out.extend(_moveset_records(data, attacks, key, w["name"], timing, bracket_rolls))
         if data.self_hit.get(key):
             out.append("\t".join(["SH", _num(data.self_hit[key])]))
         r = data.ranged.get(key)
@@ -6200,7 +6450,14 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
         out.append("\t".join(["MB", str(i), _opt(mb["reach"]), _num(float(np.mean(mb["poises"] or [0.0]))),
                               ",".join(_num(float(p)) for p in mb["poises"]) or "-",
                               ",".join(_num(float(r)) for r in mb["recovery"]) or "-"]))
-    ring_ix = {k: i for i, k in enumerate(data.rings)}
+        mix = threat_mix(data, corpus, lo)
+        parts = [threat_hit(data, corpus, lo, p) for p in ("melee", "spell")]
+        out.append("\t".join(["HB", str(i), *(_num(float(mix[k])) for k in DMG),
+                              *(_num(float(by[k])) for part in parts for by in part for k in DMG)]))
+        if data.roll_rate:
+            out.append("\t".join(["RE", str(i), *(_num(float(roll_evade(data, corpus, lo, data.roll_rate[idx])))
+                                                  for idx in range(1, 100))]))
+    ring_ix ={k: i for i, k in enumerate(data.rings)}
     for key, r in data.rings.items():
         out.append("\t".join(["R", key, r.get("name", key), _num(r.get("weight", 0)), r.get("group", key),
                               _num(ring_poise(data).get(key, 0))]))
@@ -6229,8 +6486,6 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                                     for s in STATUS_PROC)]))
     mix = threat_mix(data, corpus)
     out.append("\t".join(["H", *(_num(float(mix[k])) for k in DMG)]))
-    at0, per = threat_hit(data, corpus)
-    out.append("\t".join(["HT", *(_num(float(at0[k])) for k in DMG), *(_num(float(per[k])) for k in DMG)]))
     for key, (weight, add, mul) in sorted(ring_effects(data).items()):
         out.append("\t".join(["E", key, _num(weight), _num(float(mul)), *(_num(add.get(s, 0)) for s in STATS)]))
     for key, e in ring_gear(data).items():
@@ -6599,7 +6854,7 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
                f"{_rs([(d, for_case(case, d)) for d, case in EXPECT_DEFENDER_WEAPONS_FOR])};\n")
     d_opt, d_gen = [], []
     for d, case in EXPECT_DEFENDER_BUILDS:
-        opt_d, gen_d = expect_builds(data, corpus, threat_mix(data, corpus), [case], [], "two", defender=d)
+        opt_d, gen_d = expect_builds(data, corpus, [case], [], "two", defender=d)
         d_opt.append((d, opt_d[0]))
         d_gen.append((d, gen_d[0]))
     out.append("// A defender's armour keys, then an OPTIMIZE and a GENERATE case scored against it.")
@@ -6607,19 +6862,17 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append(f"pub const DEFENDER_GENERATE: DefenderGenerateCases = {_rs(d_gen)};\n")
     h_opt, h_gen = [], []
     for held, case in EXPECT_HELD_BUILDS:
-        o, g = under_held(held, lambda: expect_builds(data, corpus, threat_mix(data, corpus), [case], [], "two"))
+        o, g = under_held(held, lambda: expect_builds(data, corpus, [case], [], "two"))
         h_opt.append((held, o[0]))
         h_gen.append((held, g[0]))
     out.append("// The rings a build may wear (HELD_RINGS, ring keys), then an OPTIMIZE and a GENERATE case.")
     out.append(f"pub const HELD_OPTIMIZE: DefenderOptimizeCases = {_rs(h_opt)};\n")
     out.append(f"pub const HELD_GENERATE: DefenderGenerateCases = {_rs(h_gen)};\n")
-    x_opt, x_gen = under_spend("ehp", lambda: expect_builds(
-        data, corpus, threat_mix(data, corpus), EXPECT_EHP_BUILDS, [], "two"))
+    x_opt, x_gen = under_spend("ehp", lambda: expect_builds(data, corpus, EXPECT_EHP_BUILDS, [], "two"))
     out.append("// OPTIMIZE and GENERATE cases with the free points spent by SPEND \"ehp\".")
     out.append(f"pub const EHP_OPTIMIZE: OptimizeCases = {_rs(x_opt)};\n")
     out.append(f"pub const EHP_GENERATE: GenerateCases = {_rs(x_gen)};\n")
 
-    mix = threat_mix(data, corpus)
     adaptive = lambda buff, fn: under_defender("adaptive", buff, fn)
     out.append("// The rings the adaptive defender may swap in (counter_rings), by name.")
     out.append(f"pub const COUNTER_RINGS: &[&str] = "
@@ -6630,15 +6883,15 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
                f"{_rs([(b, d or [], adaptive(b, lambda: for_case(case, d))) for b, d, case in EXPECT_ADAPTIVE_WEAPONS_FOR])};\n")
     a_opt, a_gen = [], []
     for b, d, case in EXPECT_ADAPTIVE_BUILDS:
-        o, g = adaptive(b, lambda: expect_builds(data, corpus, mix, [case], [], "two", defender=d))
+        o, g = adaptive(b, lambda: expect_builds(data, corpus, [case], [], "two", defender=d))
         a_opt.append((b, d or [], o[0]))
         a_gen.append((b, d or [], g[0]))
     out.append("// The same, then an OPTIMIZE and a GENERATE case.")
     out.append(f"pub const ADAPTIVE_OPTIMIZE: AdaptiveOptimizeCases = {_rs(a_opt)};\n")
     out.append(f"pub const ADAPTIVE_GENERATE: AdaptiveGenerateCases = {_rs(a_gen)};\n")
     flexes: list = []  # the generated builds, as flexibility() questions: filled by expect_builds
-    opt, gen = expect_builds(data, corpus, mix, EXPECT_BUILDS, EXPECT_NAKED, "two", flexes)
-    opt_one, gen_one = expect_builds(data, corpus, mix, EXPECT_ONE_HANDED, [], "one", flexes)
+    opt, gen = expect_builds(data, corpus, EXPECT_BUILDS, EXPECT_NAKED, "two", flexes)
+    opt_one, gen_one = expect_builds(data, corpus, EXPECT_ONE_HANDED, [], "one", flexes)
     out.append("// weapon, infusion, sl, objective -> class, two-handed, stats, value.")
     out.append(f"pub const OPTIMIZE: OptimizeCases = {_rs(opt)};\n")
     out.append("// weapon, infusion, sl, objective, allow naked -> class, two-handed, stats, 1H rows, 2H-only")
@@ -6650,7 +6903,7 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append(f"pub const GENERATE_ONE_HANDED: GenerateCases = {_rs(gen_one)};\n")
     gen_class = []
     for cls, weapon, inf, sl, objective in EXPECT_AS_CLASS:
-        _, got = expect_builds(data, corpus, mix, [(weapon, inf, sl, objective)], [], "two", only_class=cls)
+        _, got = expect_builds(data, corpus, [(weapon, inf, sl, objective)], [], "two", only_class=cls)
         gen_class.append((cls, got[0]))
     out.append("// class key, then a GENERATE case asked of that starting class alone (--class).")
     out.append(f"pub const GENERATE_AS_CLASS: ClassGenerateCases = {_rs(gen_class)};\n")
@@ -6697,7 +6950,7 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     return backend_expectations_rest(data, corpus, out, mins, flexes)
 
 
-def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases: list, grip: str,
+def expect_builds(data: Data, corpus: list[Build], cases: list, naked_cases: list, grip: str,
                   flexes: list | None = None, only_class: str | None = None, defender=None):
     """The script's --optimize and --generate answers for `cases` (plus `naked_cases` generated with
     --allow-naked) at `grip`, and for `only_class` alone when given, against `defender`
@@ -6731,7 +6984,7 @@ def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases
             worn = [data.sp_key[norm(r)] for r in suggested]
             wearer = Build("", g["stats"], ["Naked"] * 4, [(weapon, inf)], 0, worn, [])
             scarce = load_scarcity(data, g["stats"])
-            top = lambda eff: (best_armor(data, wearer, eff, mix, top=1, scarcity=scarce)[2] or [None])[0]
+            top = lambda eff: (best_armor(data, wearer, eff, threat_mix(data, corpus, sl), top=1, scarcity=scarce)[2] or [None])[0]
             chosen = top(dict(g["stats"]))
             binds = (chosen != top({**{s: 99 for s in STATS}, "vitality": g["stats"]["vitality"]}),
                      chosen != top({**g["stats"], "vitality": 99}))
@@ -6825,7 +7078,8 @@ def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], m
     out.append("// window); damage with status; stamina (per attack, per window, damage per stamina, max")
     out.append("// stamina, attacks, damage and seconds of a full bar); under --rank moveset the moveset rate and per")
     out.append("// family its best engagement: rate, raw rate, damage, status, self-damage, startup, commit,")
-    out.append("// stamina, reach, and the reach, stagger, trade, punish and stamina factors.")
+    out.append("// stamina, reach, and the reach, stagger, trade, punish and stamina factors and the share of")
+    out.append("// reacting rolls the opener catches.")
     out.append(f"pub const BEST_WEAPONS: BestWeaponsCases = {_rs(expect_best_weapons(data, corpus))};")
     return "\n".join(out) + "\n"
 
@@ -6865,7 +7119,7 @@ def expect_best_weapons(data: Data, corpus: list[Build]) -> list:
                     (fam, f["engagement"], float(f["rate"]), float(f["raw"]), float(f["damage"]), float(f["status"]),
                      float(f["self"]), float(f["startup_s"]), float(f["commit_s"]), opt(f["stamina"]), opt(f["reach_m"]),
                      (float(f["f_reach"]), float(f["f_stagger"]), float(f["f_trade"]), float(f["f_punish"]),
-                      float(f["f_stamina"])))
+                      float(f["f_stamina"]), opt(f["caught"])))
                     for fam, f in m["families"].items()]))
             rows.append((float(score), key, float(val), data.classes[c]["name"], two, [int(st[s]) for s in STATS],
                          [data.rings[x]["name"] for x in worn], label,
@@ -7286,6 +7540,11 @@ def defense_selftest_cases() -> list:
     ]
 
 
+def _selftest_roll(rate: float) -> tuple[list, float]:
+    """roll_shape's answer for ROLL_ANIM's TAE windows as read 2026-09-30, without the TAE."""
+    return sorted([(0.0, 4 / 30), (0.1, 0.1 + rate * (17 / 30 - 0.1))]), 17 / 30
+
+
 def selftest() -> int:
     """Offline checks of the hits-per-attack model (no site tables, no corpus)."""
     A = SELFTEST_ATTACKS
@@ -7326,6 +7585,21 @@ def selftest() -> int:
             ({"physical": 100.0, "magic": 0.0, "fire": 90.0, "lightning": 0.0, "dark": 0.0},
              {"physical": 1 / 12, "magic": 0.0, "fire": 0.1, "lightning": 0.0, "dark": 0.0}),
             {"physical": 120.0, "magic": 0.0, "fire": 100.0, "lightning": 0.0, "dark": 0.0}), 9), 170.0),
+        # roll_escapes, on ROLL_ANIM's shape (full i-frames to 4/30 s, 110300 from 0.1 s to 17/30
+        # s) at agility rate 0.662 (row 20) and 1.0 (row 99): a hit inside the i-frames misses; one
+        # still live after them is the frame catch; at rate 1.0 the i-frames last the whole path;
+        # a hit that comes before the press lands
+        ("roll inside the i-frames", roll_escapes([(0.3, 0.4)], 0.25, _selftest_roll(0.662)), True),
+        ("roll frame-caught", roll_escapes([(0.5, 0.9)], 0.25, _selftest_roll(0.662)), False),
+        ("roll at rate 1 outlasts it", roll_escapes([(0.5, 0.75)], 0.25, _selftest_roll(1.0)), True),
+        ("hit before the press", roll_escapes([(0.1, 0.15)], 0.2, _selftest_roll(1.0)), False),
+        ("out of the path after it", roll_escapes([(0.9, 1.0)], 0.25, _selftest_roll(0.25)), True),
+        # dodge_presses with every start escaping: the press weights sum to 1
+        ("press weights sum to 1", round(sum(w for _, w in dodge_presses([True] * 120)), 9), 1.0),
+        # with no escaping start he rolls at his reaction: REACTION_POINTS presses
+        ("no run: rolls at the reaction", len(dodge_presses([False] * 120)), REACTION_POINTS),
+        ("agility row", agility_index({"adaptability": 20, "attunement": 20}), 20),
+        ("agility row 0 reads row 1", agility_index({"adaptability": 0, "attunement": 3}), 1),
         ("hit taken never reaches 0", hit_taken(({k: 1.0 for k in DMG}, {k: 1.0 for k in DMG}),
                                                 {k: 99.0 for k in DMG}), 1e-9),
         # Agape's place goes to the next ring worn, skipping one already worn in another upgrade
@@ -7774,10 +8048,12 @@ def main() -> int:
               + " ".join(f"{s[:3].upper()} {stats[s]}" for s in STATS)
               + "\n  floors (bracket medians): " + " ".join(f"{s[:3].upper()} {v}" for s, v in floors.items()))
         eff = gear_stats(data, stats, worn) if worn else stats
-        hp, taken = hit_points(data, eff), hit_taken(threat_hit(data, corpus), own_defense(data, eff, worn))
-        print(f"  survival (spend {SPEND['mode']}): HP {hp}, the corpus's mean hit before armour {taken:.0f}, "
+        hp, taken = hit_points(data, eff), hit_taken_at(data, corpus, a.sl, eff, own_defense(data, eff, worn))
+        evade = roll_evade(data, corpus, a.sl, roll_rate(data, eff))
+        print(f"  survival (spend {SPEND['mode']}): HP {hp}, the bracket's mean hit before armour {taken:.0f} "
+              f"(its swings x {1 - evade:.2f}: the roll at agility row {agility_index(eff)}), "
               f"{hp / taken:.2f} hits; {a.objective} x HP / hit "
-              f"{ehp_value(data, corpus, val, stats, worn):.0f}")
+              f"{ehp_value(data, corpus, val, stats, worn, sl=a.sl):.0f}")
         for t in ring_trades(data, corpus, weapon, a.sl, a.grip, spells, cls, not a.no_floors, worn):
             print(f"  ring: {trade_line(t)}")
         for r in worn:

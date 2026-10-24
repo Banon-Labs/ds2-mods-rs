@@ -259,7 +259,7 @@ type BestRow = (
 );
 /// Under `--rank moveset`: the rate, then per family its best engagement -- family, engagement,
 /// rate, raw rate, damage, status, self-damage, startup, commit, stamina, reach, and the reach,
-/// stagger, trade, punish and stamina factors.
+/// stagger, trade, punish and stamina factors and the share of reacting rolls the opener catches.
 type MovesetMetrics = Option<(f64, &'static [FamilyRow])>;
 type FamilyRow = (
     &'static str,
@@ -273,7 +273,7 @@ type FamilyRow = (
     f64,
     Option<f64>,
     Option<f64>,
-    (f64, f64, f64, f64, f64),
+    (f64, f64, f64, f64, f64, Option<f64>),
 );
 /// infusion code, sl, objective, grip, weapon class, window, rank, with status, defender keys,
 /// who answers (`static` or a buff setting), rows.
@@ -1816,7 +1816,14 @@ fn best_weapons_is_the_scripts() {
                             f.commit_s,
                             f.stamina,
                             f.reach_m,
-                            (f.f_reach, f.f_stagger, f.f_trade, f.f_punish, f.f_stamina),
+                            (
+                                f.f_reach,
+                                f.f_stagger,
+                                f.f_trade,
+                                f.f_punish,
+                                f.f_stamina,
+                                f.caught,
+                            ),
                         )
                     })
                     .collect();
