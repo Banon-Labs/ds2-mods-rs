@@ -598,6 +598,15 @@ ENGINE_SHIPPED_PRESETS: dict[str, str] = {
 }
 #: Where the engine writes its log. A fresh one after a launch is the proof it loaded.
 LIGHTING_ENGINE_LOG = "DS2LE.log"
+#: The engine's own settings file, which its F1 menu writes, and the values every launch puts back.
+#: `gi_hwrt_bvh_async_build=1` builds the ray-tracing BVHs on the async compute queue. On the RX 6900
+#: XT under RADV + vkd3d-proton that hung the GPU on 2026-10-23 22:07:48: a page fault on
+#: `comp_1.1.1` from the game's `vkd3d_queue` thread half a second after the engine released its
+#: BLAS suballocator blocks (DS2LE.log), then compute and gfx ring timeouts, a wedged device, and a
+#: main thread waiting forever on a fence inside d3d11.dll. Built on the graphics queue, a build
+#: finishes in order with the frames that use it.
+LIGHTING_ENGINE_SETTINGS = "ds2le_user_settings.ini"
+LIGHTING_ENGINE_FORCED: dict[str, str] = {"gi_hwrt_bvh_async_build": "0"}
 #: Names a parked engine `dxgi.dll` goes by. `--no-path-tracing` renames it to the first; the
 #: second is the name another agent's selector used on 2026-09-26. Wine loads `dxgi.dll` out of the
 #: game directory by name, so a rename is the whole switch, and the next launch with path tracing
@@ -2462,6 +2471,31 @@ def pack_unpack_command(
     return argv + [f"{source}*" for source, _ in folders]
 
 
+def force_lighting_engine_settings(game_dir: Path, write: bool = True) -> list[str]:
+    """Put each `LIGHTING_ENGINE_FORCED` key in the engine's settings file back to its value.
+
+    Only a line already holding the key is rewritten; every other line, and a key the file does not
+    have, is left as it is, because the engine writes its defaults the first time it runs.
+    """
+    path = game_dir / LIGHTING_ENGINE_SETTINGS
+    if not path.is_file():
+        return []
+    # Bytes, not `read_text`, which would turn the engine's CRLF line ends into LF.
+    lines = path.read_bytes().decode("utf-8", "surrogateescape").splitlines(keepends=True)
+    actions = []
+    for index, line in enumerate(lines):
+        body = line.rstrip("\r\n")
+        key, sep, value = body.partition("=")
+        want = LIGHTING_ENGINE_FORCED.get(key.strip())
+        if sep and want is not None and value.strip() != want:
+            lines[index] = f"{key}={want}{line[len(body):]}"
+            actions.append(f"{'set' if write else 'would set'} {key.strip()}={want} "
+                           f"(was {value.strip()}) in {LIGHTING_ENGINE_SETTINGS}")
+    if write and actions:
+        path.write_bytes("".join(lines).encode("utf-8", "surrogateescape"))
+    return actions
+
+
 def ensure_lighting_engine_installed(
     game_dir: Path,
     engine_archive: Path = LIGHTING_ENGINE_ARCHIVE,
@@ -3519,6 +3553,8 @@ def launch(
                 print(f"[lighting-engine] REFUSING TO LAUNCH: {problem}")
             return EXIT_ERROR
         print(f"[lighting-engine] {LIGHTING_ENGINE_ARCHIVE.name} + {SECOND_SIN_ARCHIVE.name} pinned")
+        for action in force_lighting_engine_settings(GAME_DIR, write=True):
+            print(f"[lighting-engine] {action}")
         for archive, _, _ in TEXTURE_PACKS:
             print(f"[lighting-engine] texture pack {archive.name} pinned")
     else:
@@ -5227,6 +5263,21 @@ def selftest() -> int:
     finally:
         LIGHTING_ENGINE_PINS, SECOND_SIN_PINS = real_engine_pins, real_presets_pins
         TEXTURE_PACKS, ENGINE_SHIPPED_PRESETS = real_packs, real_shipped
+    with tempfile.TemporaryDirectory() as tmp:
+        game = Path(tmp)
+        check(force_lighting_engine_settings(game) == [], "no engine settings file is no action")
+        ini = game / LIGHTING_ENGINE_SETTINGS
+        ini.write_bytes(b"[UserSettings]\r\ngi_hwrt_bvh_async_build=1\r\ngi_hwrt_num_paths=1\r\n")
+        dry = force_lighting_engine_settings(game, write=False)
+        check(len(dry) == 1 and b"async_build=1" in ini.read_bytes(),
+              f"a dry run reports the async BVH build and leaves the file: {dry}")
+        actions = force_lighting_engine_settings(game)
+        check(
+            ini.read_bytes()
+            == b"[UserSettings]\r\ngi_hwrt_bvh_async_build=0\r\ngi_hwrt_num_paths=1\r\n",
+            f"the async BVH build goes off and every other byte stays: {actions}",
+        )
+        check(force_lighting_engine_settings(game) == [], "a file already forced is no action")
     check(
         pack_unpack_command(Path("i.zip"), Path("/g"), (("DS3 Icons 2.0/", "tex_override/"),))
         == ["bsdtar", "-x", "-C", "/g", "-f", "i.zip",
