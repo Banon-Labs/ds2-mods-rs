@@ -34,7 +34,10 @@ def read_live(endpoint: str) -> dict | None:
     session = dev.attach(pid)
     lines: list[str] = []
     script = session.create_script(AGENT.read_text())
-    script.on("message", lambda m, _d: lines.append(m.get("payload", "") if m["type"] == "log" else str(m)))
+    # console.log reaches the log handler, never the "message" signal (whose default log handler
+    # printed the agent's lines to stdout while `lines` stayed empty and every run exited 2).
+    script.set_log_handler(lambda _level, text: lines.append(text))
+    script.on("message", lambda m, _d: lines.append(str(m)))
     script.load()
     deadline = time.time() + 5
     while time.time() < deadline and not any("done" in ln for ln in lines):
