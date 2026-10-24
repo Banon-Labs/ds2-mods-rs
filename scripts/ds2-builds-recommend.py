@@ -3520,13 +3520,37 @@ def infusion_margin(values: list[float]) -> float | None:
 
 
 def best_infusion(data: Data, weapon: str, stats: dict, sl: int, corpus: list[Build], raw_ar: bool = False,
-                  window: float = 0.0, objective: str = "damage", defender=None):
+                  window: float = 0.0, objective: str = "damage", defender=None, with_status: bool = False):
     """Every infusion `weapon` takes, best first, by weapons_for's own score at these stats and SL
     (the rows it ranks, uncut). Empty when the stats cannot wield it even two-handed, or for
     bleed/poison when no infusion deals it or the weapon has no attack timing. Full upgrade only:
-    attack_rating reads the planner's max-level rows, so the upgrade level is not modelled."""
-    return weapons_for(data, stats, sl, corpus, raw_ar=raw_ar, window=window, objective=objective, weapon=weapon,
-                       defender=defender)
+    attack_rating reads the planner's max-level rows, so the upgrade level is not modelled.
+
+    `with_status` (objective "damage" with `window`, melee only) adds to each row's score the
+    poison and bleed proc damage per window its R1 hits deal (row_status, as best_weapon_row's
+    damage_with_status) and re-ranks: without it a Bleed infusion is scored on its lower attack
+    alone. The label carries the build-up per hit, the hits to proc and the first window's procs."""
+    rows, dfn, n = weapons_for(data, stats, sl, corpus, raw_ar=raw_ar, window=window, objective=objective,
+                               weapon=weapon, defender=defender)
+    if not (with_status and window and objective == "damage") or weapon in data.ranged:
+        return rows, dfn, n
+    attacks = load_attacks(data)
+    names = [data.weapons[weapon]["name"], weapon.replace("_", " ")]
+    out = []
+    for dmg, name, inf, ar, label in rows:
+        # the R1 chain's hits for build-up, a same-window hitbox pair once (as best_weapon_row)
+        hits = next((h for h in (sum(1 for t, *_ in chain_timeline(attacks, nm, label.startswith("2H"), "Normal",
+                                                                    max(3.0, window), distinct=True) if t <= window)
+                                 for nm in names) if h), 0)
+        m = row_status(data, corpus, sl, defender, weapon, inf, stats, hits, window)
+        note = "".join(f" {s} {per:.0f}/hit {m['hits_to_proc'][s]} to proc"
+                       for s, per in m["status_buildup_per_hit"].items())
+        if note:
+            note += (f" +{m['status_damage_per_window']:.1f}/window"
+                     f" (first window +{m['status_damage_first_window']:.0f})")
+        out.append((dmg + m["status_damage_per_window"], name, inf, ar, label + note))
+    out.sort(key=lambda r: -r[0])
+    return out, dfn, n
 
 
 def infusion_gaps(data: Data, stats: dict, sl: int, corpus: list[Build], raw_ar: bool = False,
@@ -6653,7 +6677,8 @@ def main() -> int:
     ap.add_argument("--with-status", action="store_true",
                     help="with --best-weapons and --objective damage: rank by metrics.damage_with_status, the "
                          "window's damage plus the poison and bleed its hits deal through their procs; the "
-                         "score column stays the damage alone")
+                         "score column stays the damage alone. With --best-infusion, --objective damage and "
+                         "--window: add that proc damage per window to each infusion's score and re-rank")
     ap.add_argument("--rank", choices=list(RANKS), default="window",
                     help="with --best-weapons and --objective damage: window (default) ranks by the R1 hits "
                          "landed in --window; per-stamina by those hits' damage per stamina point their attacks "
@@ -6978,8 +7003,10 @@ def main() -> int:
             weapon = data.sp_key.get(norm(a.best_infusion))
             if weapon not in data.weapons:
                 ap.error(f"unknown weapon {a.best_infusion!r}")
+            if a.with_status and not (a.window and a.objective == "damage"):
+                ap.error("--with-status with --best-infusion needs --objective damage and --window")
             rows, _, _ = best_infusion(data, weapon, stats, sl, corpus, raw_ar=a.raw_ar, window=a.window,
-                                       objective=a.objective, defender=defender)
+                                       objective=a.objective, defender=defender, with_status=a.with_status)
             if not rows:
                 print(f"{data.weapons[weapon]['name']}: nothing to rank (these stats cannot wield it, or no "
                       f"infusion deals {a.objective})")
