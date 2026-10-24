@@ -454,10 +454,10 @@ def main() -> int:
     names = dump.Names(None, extract=True)
     costs = soul_costs()
 
-    reports = []
+    # Every copy before any write: a build may land in the base slot itself.
     for b in builds:
         copy_slot(save, a.base_slot, b["slot"])
-        reports.append(write_slot(save, b, costs, names))
+    reports = [write_slot(save, b, costs, names) for b in builds]
 
     steam_id = a.steam_id
     if a.steam_id_from:
