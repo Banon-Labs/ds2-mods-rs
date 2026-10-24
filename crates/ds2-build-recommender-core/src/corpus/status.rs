@@ -29,7 +29,7 @@ pub(super) struct Proc {
 /// The script's `status_metrics` for one status: (hits to proc for the median defender, the proc
 /// damage per window of a chain repeated without pause, the proc damage those hits deal a
 /// defender whose gauge starts empty), averaged over the defenders who resist `cuts` of it.
-fn status_metrics(
+pub(super) fn status_metrics(
     proc: Option<Proc>,
     per_hit: f64,
     cuts: &[f64],
@@ -124,7 +124,7 @@ impl CorpusBackend {
 
     /// The script's `defender_status_cuts`: the share of status `at` every defender resists, the
     /// bracket's builds or the chosen set; `[0]` when there is none.
-    fn defender_cuts(&self, sl: u32, worn: Worn, at: usize) -> Vec<f64> {
+    pub(super) fn defender_cuts(&self, sl: u32, worn: Worn, at: usize) -> Vec<f64> {
         let cuts: Vec<f64> = match worn {
             Some(pieces) => vec![self.chosen_cut(sl, pieces, at)],
             None => self
@@ -134,6 +134,25 @@ impl CorpusBackend {
                 .collect(),
         };
         if cuts.is_empty() { vec![0.0] } else { cuts }
+    }
+
+    /// The script's `objective_value` for status `at`: the weapon's build-up per hit at stats
+    /// `eff`, before resistance and with no rings.
+    pub(super) fn buildup(
+        &self,
+        weapon: &Weapon,
+        infusion: Infusion,
+        eff: &Stats,
+        at: usize,
+    ) -> f64 {
+        weapon.infusion(infusion).map_or(0.0, |row| {
+            let (atk, scale, second) = if at == 0 {
+                (ATK_POISON, SCALE_POISON, eff[ADP])
+            } else {
+                (ATK_BLEED, SCALE_BLEED, eff[FTH])
+            };
+            row.atk[atk] + row.scale[scale] * self.tables.aux.at(3 * eff[DEX] + second)
+        })
     }
 
     /// The script's `row_status`: per status the weapon builds up at stats `eff`, its build-up
@@ -157,14 +176,7 @@ impl CorpusBackend {
             ..StatusMetrics::default()
         };
         for at in 0..STATUSES.len() {
-            let per = weapon.infusion(infusion).map_or(0.0, |row| {
-                let (atk, scale, second) = if at == 0 {
-                    (ATK_POISON, SCALE_POISON, eff[ADP])
-                } else {
-                    (ATK_BLEED, SCALE_BLEED, eff[FTH])
-                };
-                row.atk[atk] + row.scale[scale] * self.tables.aux.at(3 * eff[DEX] + second)
-            });
+            let per = self.buildup(weapon, infusion, eff, at);
             if per <= 0.0 {
                 continue;
             }

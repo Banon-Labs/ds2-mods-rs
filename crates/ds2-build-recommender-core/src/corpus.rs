@@ -21,7 +21,8 @@
 //!   (`adaptive`) unless a static one is asked for. Best weapons (`best`) ranks every weapon an
 //!   infusion goes on at its own optimized build, each row with the R1 chain's reach, timing and
 //!   sustained damage (`chain`), hyperarmor and poise (`poise`), poison and bleed procs
-//!   (`status`) and stamina (`stamina`).
+//!   (`status`) and stamina (`stamina`), and can rank by the whole moveset's rate (`moveset`).
+//!   [`CorpusBackend::hold_rings`] keeps every ring choice to the rings a bag holds.
 //!
 //! The corpus is carried as what nearest-build search reads and nothing else: each build's SL
 //! bracket, its nine stat brackets, its rings and its weapons with their infusions.
@@ -45,6 +46,7 @@ use crate::weapons;
 mod adaptive;
 mod best;
 mod chain;
+mod moveset;
 mod poise;
 mod ranged;
 mod stamina;
@@ -55,7 +57,7 @@ mod trade;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 19";
+pub const FORMAT: &str = "ds2-build-recommender-data 20";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -117,6 +119,10 @@ const EMPTY: [&str; 7] = [
 /// A weapon's other infusions stay in the ranking while within this share of its best.
 const WITHIN: f64 = 0.10;
 
+/// A ring worn by at least this share of every corpus build is listed as common: the script's
+/// `COMMON_RING`.
+const COMMON_RING: f64 = 0.10;
+
 /// How many rows Weapons for Stats lists.
 const WEAPONS_FOR_TOP: usize = 25;
 
@@ -148,9 +154,9 @@ const LOAD_PRICE: f64 = 0.6;
 /// `REQ_STATS`.
 const REQ_STATS: [usize; 4] = [STR, DEX, INT, FTH];
 
-/// The rings `builds` wear, a build counted once per ring, most worn first and ties first seen
-/// first: the script's `Counter(...).most_common()`.
-fn ring_counts<'a>(builds: impl IntoIterator<Item = &'a CorpusBuild>) -> Vec<(usize, u32)> {
+/// The rings `builds` wear, a build counted once per ring, first seen first: the script's
+/// `Counter(...)` in its insertion order, before `most_common`.
+fn ring_seen<'a>(builds: impl IntoIterator<Item = &'a CorpusBuild>) -> Vec<(usize, u32)> {
     let mut worn: Vec<(usize, u32)> = Vec::new();
     for build in builds {
         for (at, &ring) in build.rings.iter().enumerate() {
@@ -163,8 +169,18 @@ fn ring_counts<'a>(builds: impl IntoIterator<Item = &'a CorpusBuild>) -> Vec<(us
             }
         }
     }
-    worn.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
     worn
+}
+
+/// The upgrade tier a ring's name ends in: `Chloranthy Ring + 2` is 2, no `+ n` is 0. The
+/// script's `ring_tier`.
+fn ring_tier(name: &str) -> u32 {
+    let digits = name.len() - name.trim_end_matches(|c: char| c.is_ascii_digit()).len();
+    let (head, tier) = name.split_at(name.len() - digits);
+    if digits == 0 || !head.trim_end().ends_with('+') {
+        return 0;
+    }
+    tier.parse().unwrap_or(0)
 }
 
 /// The index of `sl`'s bracket.
@@ -387,6 +403,11 @@ struct Weapon {
     stamina: Option<stamina::Cost>,
     /// Per grip, its R1's first strike as the trade model reads it: the script's `first_strike`.
     strike: [Option<trade::Strike>; 2],
+    /// Per grip, every attack of its moveset with a live hit: what the script's `moveset_metrics`
+    /// reads that no build changes.
+    moves: [Vec<moveset::Move>; 2],
+    /// HP each landed hit costs its wielder: the script's `data.self_hit`, `0` for most weapons.
+    self_hit: f64,
 }
 
 /// One attack chain as the bleed/poison ranking counts it.
@@ -756,6 +777,16 @@ pub struct CorpusBackend {
     procs: [Option<status::Proc>; 2],
     /// Each ring's poise, beside `rings`: the script's `ring_poise`.
     ring_poise: Vec<f64>,
+    /// The moveset rate's fitted exponents and family weights: the script's `moveset_exponents`.
+    moveset_weights: moveset::Weights,
+    /// Menu stamina regained a second: the script's `data.stamina_regen`; `None` unread.
+    stamina_regen: Option<f64>,
+    /// Per SL bracket, what a moveset's attacks are weighed against: the script's
+    /// `moveset_bracket`.
+    move_brackets: Vec<moveset::MoveBracket>,
+    /// The rings a build may wear, as indices into `rings`: the script's `HELD_RINGS`. `None`
+    /// allows every ring.
+    held: Option<Vec<usize>>,
 }
 
 /// Why a data file could not be read.
@@ -972,6 +1003,8 @@ impl CorpusBackend {
                     poise: Default::default(),
                     stamina: None,
                     strike: Default::default(),
+                    moves: Default::default(),
+                    self_hit: 0.0,
                 });
             }
             "SC" => self.parse_stamina(line, &mut fields)?,
@@ -979,6 +1012,7 @@ impl CorpusBackend {
             "PO" => self.parse_poise(line, &mut fields)?,
             "FS" | "XT" => self.parse_trade(tag, line, &mut fields)?,
             "SP" => self.parse_proc(line, &mut fields)?,
+            "MV" | "SH" | "MW" | "SR" | "MB" => self.parse_moveset(tag, line, &mut fields)?,
             "RM" => {
                 let grip = match next("grip")? {
                     "1" => 0,
@@ -1596,7 +1630,7 @@ impl CorpusBackend {
         }
         let mut by_group: Vec<(&str, usize)> = Vec::new();
         for &(ring, _) in &self.ring_attack {
-            if self.no_use.contains(&ring) {
+            if self.no_use.contains(&ring) || self.held_tier(ring) != Some(ring) {
                 continue;
             }
             let group = self.ring_groups[ring].as_str();
@@ -2145,6 +2179,7 @@ impl CorpusBackend {
         let mut by_group: Vec<(&str, usize)> = Vec::new();
         for gear in &self.gear {
             if self.no_use.contains(&gear.ring)
+                || self.held_tier(gear.ring) != Some(gear.ring)
                 || py_min(py_min(gear.hp, gear.load), gear.stamina) < 1.0
             {
                 continue;
@@ -2156,6 +2191,84 @@ impl CorpusBackend {
             }
         }
         by_group.into_iter().map(|(_, ring)| ring).collect()
+    }
+
+    /// Hold a build to the rings `keys` names (ring keys), as the script's `HELD_RINGS` does: a
+    /// ring outside them is swapped for the strongest held ring of its upgrade group, or dropped
+    /// when the group has none. `None` allows every ring again.
+    ///
+    /// # Errors
+    ///
+    /// A key the file has no ring for; nothing is changed then.
+    pub fn hold_rings(&mut self, keys: Option<&[&str]>) -> Result<(), String> {
+        self.held = match keys {
+            None => None,
+            Some(keys) => Some(
+                keys.iter()
+                    .map(|&key| {
+                        self.rings
+                            .iter()
+                            .position(|(k, _, _)| k == key)
+                            .ok_or_else(|| format!("no ring {key}"))
+                    })
+                    .collect::<Result<_, _>>()?,
+            ),
+        };
+        Ok(())
+    }
+
+    /// The script's `held_tier`: `ring` as a build can wear it -- itself when held, else the
+    /// highest-tier held ring of its upgrade group (the first held of a tie), else `None`.
+    fn held_tier(&self, ring: usize) -> Option<usize> {
+        let Some(held) = &self.held else {
+            return Some(ring);
+        };
+        if held.contains(&ring) {
+            return Some(ring);
+        }
+        let group = &self.ring_groups[ring];
+        let mut best: Option<usize> = None;
+        for &k in held.iter().filter(|&&k| self.ring_groups[k] == *group) {
+            if best.is_none_or(|b| ring_tier(&self.rings[k].1) > ring_tier(&self.rings[b].1)) {
+                best = Some(k);
+            }
+        }
+        best
+    }
+
+    /// The rings `builds` wear as [`ring_seen`] counts them, each counted as its
+    /// [`Self::held_tier`] and unheld groups dropped: the script's `held_counts` then
+    /// `most_common`.
+    fn worn_counts<'a>(
+        &self,
+        builds: impl IntoIterator<Item = &'a CorpusBuild>,
+    ) -> Vec<(usize, u32)> {
+        let mut out: Vec<(usize, u32)> = Vec::new();
+        for (ring, n) in ring_seen(builds) {
+            let Some(ring) = self.held_tier(ring) else {
+                continue;
+            };
+            match out.iter_mut().find(|(seen, _)| *seen == ring) {
+                Some((_, count)) => *count += n,
+                None => out.push((ring, n)),
+            }
+        }
+        out.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
+        out
+    }
+
+    /// Rings at least a tenth of all builds wear, most worn first: the file's own list, or with
+    /// rings held, the corpus's counted as [`Self::worn_counts`] counts them.
+    fn common_rings(&self) -> Vec<usize> {
+        if self.held.is_none() {
+            return self.common.clone();
+        }
+        let floor = COMMON_RING * trade::count(self.corpus.len());
+        self.worn_counts(&self.corpus)
+            .into_iter()
+            .filter(|&(_, n)| f64::from(n) >= floor)
+            .map(|(ring, _)| ring)
+            .collect()
     }
 
     /// The script's `ring_effect_text`: what `ring` does, "attunement slots +3", "STR +5", ...
@@ -3132,10 +3245,13 @@ impl CorpusBackend {
                             }
                         }
                     }
-                    // Every curve is flat: the points go to vigor.
+                    // Every curve is flat: the points go to vigor, then any stat below 99 (at
+                    // SL 838 every stat ends at 99, so the last points land wherever there is
+                    // room).
                     let pick = pick.or_else(|| {
                         [VIG, VIT, END, ATT]
                             .into_iter()
+                            .chain(0..STAT_COUNT)
                             .find(|&stat| st[stat] < 99)
                             .map(|stat| (stat, 1))
                     });
@@ -3671,7 +3787,8 @@ impl CorpusBackend {
             .map(|&ring| group(ring))
             .collect();
         taken.extend(&held);
-        let every: Vec<(usize, u32)> = ring_counts(&self.corpus)
+        let every: Vec<(usize, u32)> = self
+            .worn_counts(&self.corpus)
             .into_iter()
             .filter(|&(ring, _)| !held.contains(&group(ring)))
             .collect();
@@ -4234,7 +4351,7 @@ impl RecommenderBackend for CorpusBackend {
 
         let mut suggested = worn.clone();
         suggested.extend(self.suggest_rings(
-            &ring_counts(self.nearest(&stats, u32::from(sl), GENERATE_K)),
+            &self.worn_counts(self.nearest(&stats, u32::from(sl), GENERATE_K)),
             &worn,
         ));
         let levelled = stats.map(|value| u16::try_from(value).unwrap_or(0));
@@ -4271,7 +4388,7 @@ impl RecommenderBackend for CorpusBackend {
             weapons_2h_only,
             suggested_rings: suggested.iter().map(name).collect(),
             common_rings: self
-                .common
+                .common_rings()
                 .iter()
                 .filter(|ring| !suggested.contains(ring) && !self.no_use.contains(ring))
                 .map(name)
@@ -4383,6 +4500,16 @@ mod tests {
         assert_eq!(stat_bracket(11), 1);
         assert_eq!(stat_bracket(99), 9);
         assert_eq!(stat_bracket(120), 9);
+    }
+
+    /// The script's `ring_tier`: the `+ n` a name ends in, spaces or not, else 0.
+    #[test]
+    fn a_ring_tier_is_the_scripts() {
+        assert_eq!(ring_tier("Chloranthy Ring + 2"), 2);
+        assert_eq!(ring_tier("Chloranthy Ring+2"), 2);
+        assert_eq!(ring_tier("Life Ring + 3"), 3);
+        assert_eq!(ring_tier("Third Dragon Ring"), 0);
+        assert_eq!(ring_tier("Ring 2"), 0, "a number without a plus is no tier");
     }
 
     #[test]

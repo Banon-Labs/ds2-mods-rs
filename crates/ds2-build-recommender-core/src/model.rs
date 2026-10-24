@@ -272,6 +272,9 @@ pub enum Rank {
     PerStamina,
     /// The damage of the R1 chain a full bar of the build's own max stamina pays for.
     Bar,
+    /// The whole moveset's `PvP` rate: R1/R2 chains, roll/run/backstep/jump attacks, reach,
+    /// stagger, trades, punish coverage and stamina.
+    Moveset,
 }
 
 /// Options for Best weapons, the script's `--best-weapons`: every weapon an infusion goes on, each

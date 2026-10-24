@@ -57,7 +57,10 @@ pub(super) struct Counter {
 }
 
 /// A strike's fields from a record: t pd ab mv type lower flat(5) scale rate armor.
-fn strike<'a>(fields: &mut impl Iterator<Item = &'a str>, line: usize) -> Result<Strike, String> {
+pub(super) fn strike<'a>(
+    fields: &mut impl Iterator<Item = &'a str>,
+    line: usize,
+) -> Result<Strike, String> {
     let at = float(fields.next(), line)?;
     let pd = float(fields.next(), line)?;
     let armor_break = int(fields.next(), line)?;
@@ -142,6 +145,27 @@ fn trade(mine: &Strike, theirs: &Strike, my_poise: f64, their_poise: f64) -> (bo
     (true, lands)
 }
 
+impl Strike {
+    /// Whether the hit staggers a defender with `poise` who is not in hyperarmor: armorBreak 1 or
+    /// 2, or poise damage at least the poise -- the script's `moveset_metrics` stagger share.
+    pub(super) fn staggers(&self, poise: f64) -> bool {
+        self.armor_break >= 1 || self.pd >= poise
+    }
+
+    /// The script's `moveset_metrics` trade count: against each of `counters` pressing R1 at the
+    /// same instant, (trades this strike wins, trades it loses), with `my_poise` against each
+    /// counter's own.
+    pub(super) fn trades(&self, counters: &[&Counter], my_poise: f64) -> (i32, i32) {
+        let (mut won, mut lost) = (0, 0);
+        for c in counters {
+            let (mine, theirs) = trade(self, &c.strike, my_poise, c.poise);
+            won += i32::from(mine && !theirs);
+            lost += i32::from(theirs && !mine);
+        }
+        (won, lost)
+    }
+}
+
 /// The script's `exchange_pairs` table: every (my weapon, counter) trade reduced to what the
 /// armour changes.
 pub(super) struct Exchange<'a> {
@@ -208,7 +232,7 @@ fn bisect_left(keys: &[f64], x: f64) -> usize {
 }
 
 /// A count as a double; the counts here are far below 2^32.
-fn count(n: usize) -> f64 {
+pub(super) fn count(n: usize) -> f64 {
     f64::from(u32::try_from(n).unwrap_or(u32::MAX))
 }
 

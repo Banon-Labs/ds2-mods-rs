@@ -5750,10 +5750,25 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #     the game play speed, poise damage, armorBreak, motion value, type (p s k t), damageLower, flat
 #     attack in DMG order, damageScale, uninterruptibleRate, hyperarmor windows s:e,.. ("-" none)
 #   and, trailing: R the ring's poise (ring_poise); T statPoise, data.stat_poise by min(END, ADP)
+#   MV grip slot startup commit reach stamina hits strike     one attack of the last W's moveset
+#                                                             (moveset_metrics): slot a MOVE_FAMILIES
+#                                                             suffix; attack_commit's seconds;
+#                                                             attack_reach ("-" none); move_stamina
+#                                                             ("-" none); hits n:mv:type:lower:flat
+#                                                             (live_hits distinct, flat "-" none);
+#                                                             strike_of's fields, or one "-"
+#   SH hp                                                     data.self_hit of the last W
+#   MW f_reach f_stagger f_trade f_punish f_stamina r1 r2      moveset_exponents
+#     move jump
+#   SR regen                                                  data.stamina_regen, menu points a second
+#   MB bracket reach poise poises recovery                    moveset_bracket at the bracket: median
+#                                                             R1 reach ("-" none), mean poise, every
+#                                                             build's poise and the sorted R1
+#                                                             recoveries, comma-separated ("-" none)
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 19"
+BACKEND_FORMAT = "ds2-build-recommender-data 20"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -5853,6 +5868,29 @@ def _poise_records(data: Data, attacks: dict, key: str, name: str) -> list[str]:
     return out
 
 
+def _moveset_records(data: Data, attacks: dict, key: str, name: str, timing) -> list[str]:
+    """export_backend's MV records for one weapon: per grip, every MOVE_FAMILIES attack with a live
+    hit, as moveset_metrics reads it before any build (move_attack, no 1H fallback)."""
+    out = []
+    names = [name, key.replace("_", " ")]
+    slots = list(dict.fromkeys(s for engs in MOVE_FAMILIES.values() for eng in engs for s in eng))
+    for two in (False, True):
+        for sfx in slots:
+            a = move_attack(attacks, names, two, sfx)
+            if not a or not live_hits(a):
+                continue
+            startup, commit = attack_commit(a, timing)
+            hits = " ".join(
+                ":".join([_num(max(1, h.get("n") or 1)), _num(h["rate"]), HIT_CODE.get(h.get("type") or "physical", "p"),
+                          _num(h.get("lower", 0)), ",".join(map(_num, h["flat"])) if h.get("flat") else "-"])
+                for h in live_hits(a, distinct=True))
+            strike = strike_of(data, key, a, timing)
+            out.append("\t".join(["MV", "2" if two else "1", sfx, _num(float(startup)), _num(float(commit)),
+                                  _opt(attack_reach(data, key, a)), _opt(move_stamina(data, key, two, sfx)), hits,
+                                  *(_strike_fields(strike) if strike else ["-"])]))
+    return out
+
+
 def export_backend(data: Data, corpus: list[Build]) -> str:
     attacks = load_attacks(data)
     rates = json.loads(HYPERARMOR.read_text()) if HYPERARMOR.exists() else {}
@@ -5876,6 +5914,11 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
         out.append("\t".join(["T", "additionalHp", *(_num(v) for v in data.additional_hp)]))
     for e, col in data.cast_bonus.items():
         out.append("\t".join(["T", "cast" + e.capitalize(), *(_num(v) for v in col)]))
+    ex = moveset_exponents()
+    out.append("\t".join(["MW", *(_num(ex[n]) for n in ["f_reach", "f_stagger", "f_trade", "f_punish", "f_stamina",
+                                                         *MOVE_FAMILIES])]))
+    if data.stamina_regen is not None:
+        out.append("\t".join(["SR", _num(float(data.stamina_regen))]))
     # status_cut's stat columns, and what a proc does (row_status)
     for s, (_, col, _, _) in STATUS_PROC.items():
         if data.status_resist.get(s):
@@ -5931,6 +5974,9 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                 hit = first_strike(data, attacks, key, two, timing)
                 if hit:
                     out.append("\t".join(["FS", "2" if two else "1", *_strike_fields(hit)]))
+            out.extend(_moveset_records(data, attacks, key, w["name"], timing))
+        if data.self_hit.get(key):
+            out.append("\t".join(["SH", _num(data.self_hit[key])]))
         r = data.ranged.get(key)
         if r:
             out.append("\t".join(["RG", _num(r["ammo"]), r["kind"], _num(float(r["hand"])),
@@ -5955,6 +6001,10 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
         out.append("\t".join(["B", str(i), *(_num(f.get(s, 0)) for s in FLOOR_STATS + ["endurance"]),
                               *(_num(float(dfn[k])) for k in DMG + PHYS_TYPES), *(_num(st[s]) for s in STATS),
                               _num(float(bracket_poise(data, corpus, lo, attacks)["poise"]))]))
+        mb = moveset_bracket(data, corpus, lo, attacks)
+        out.append("\t".join(["MB", str(i), _opt(mb["reach"]), _num(float(np.mean(mb["poises"] or [0.0]))),
+                              ",".join(_num(float(p)) for p in mb["poises"]) or "-",
+                              ",".join(_num(float(r)) for r in mb["recovery"]) or "-"]))
     ring_ix = {k: i for i, k in enumerate(data.rings)}
     for key, r in data.rings.items():
         out.append("\t".join(["R", key, r.get("name", key), _num(r.get("weight", 0)), r.get("group", key),
@@ -6222,7 +6272,34 @@ EXPECT_BEST_WEAPONS = [
     ("Poison", 80, "damage", "two", "Claw", 1.5, "window", True, None, "static"),
     ("Fire", 100, "ar", "two", "Curved Greatsword", 1.5, "window", False, None, "static"),
     ("No_Infusion", 100, "damage", "two", "Bow", 0.0, "window", False, None, "item"),
+    # the whole moveset: the Chaos Blade's 50 HP a landed hit charges its wielder; a chosen defender
+    # one-handed, whose resistance the procs read
+    ("No_Infusion", 150, "damage", "two", "Katana", 1.5, "moveset", False, None, "static"),
+    ("Bleed", 100, "damage", "one", "Twinblade", 2.0, "moveset", False, HAVEL, "static"),
 ]
+
+
+#: HELD_RINGS as a mule's bag holds them: one ring of each group, mostly the top tier, so a corpus
+#: build's Chloranthy Ring counts as the held Chloranthy Ring + 2 and an unheld group drops out.
+#: One per group: the script's held_tier picks among tied tiers in set order.
+HELD = ["Chloranthy_Ring_2", "Ring_of_Blades_2", "Royal_Soldiers_Ring_2", "Third_Dragon_Ring", "Flynns_Ring",
+        "Southern_Ritual_Band_2", "Life_Ring_3", "Ring_of_Steel_Protection_2", "Stone_Ring"]
+EXPECT_HELD_BUILDS = [  # held ring keys, then an EXPECT_BUILDS case: --optimize and --generate
+    (HELD, ("Demons_Great_Hammer", "Raw", 100, "damage")),
+    (HELD, ("Uchigatana", "Bleed", 150, "bleed")),
+    (HELD, ("Moonlight_Greatsword", "No_Infusion", 90, "damage")),
+]
+
+
+def under_held(held, fn):
+    """`fn()` with HELD_RINGS set to `held`, restored after."""
+    global HELD_RINGS
+    saved = HELD_RINGS
+    HELD_RINGS = set(held)
+    try:
+        return fn()
+    finally:
+        HELD_RINGS = saved
 
 
 def under_defender(mode: str, buff: str, fn):
@@ -6313,6 +6390,14 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append("// A defender's armour keys, then an OPTIMIZE and a GENERATE case scored against it.")
     out.append(f"pub const DEFENDER_OPTIMIZE: DefenderOptimizeCases = {_rs(d_opt)};\n")
     out.append(f"pub const DEFENDER_GENERATE: DefenderGenerateCases = {_rs(d_gen)};\n")
+    h_opt, h_gen = [], []
+    for held, case in EXPECT_HELD_BUILDS:
+        o, g = under_held(held, lambda: expect_builds(data, corpus, threat_mix(data, corpus), [case], [], "two"))
+        h_opt.append((held, o[0]))
+        h_gen.append((held, g[0]))
+    out.append("// The rings a build may wear (HELD_RINGS, ring keys), then an OPTIMIZE and a GENERATE case.")
+    out.append(f"pub const HELD_OPTIMIZE: DefenderOptimizeCases = {_rs(h_opt)};\n")
+    out.append(f"pub const HELD_GENERATE: DefenderGenerateCases = {_rs(h_gen)};\n")
 
     mix = threat_mix(data, corpus)
     adaptive = lambda buff, fn: under_defender("adaptive", buff, fn)
@@ -6518,7 +6603,9 @@ def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], m
     out.append("// of counter-hits it holds, poise damage, armorBreak, hits to stagger, defender poise); status")
     out.append("// (hits, per status its build-up per hit and hits to proc, damage per window, in the first")
     out.append("// window); damage with status; stamina (per attack, per window, damage per stamina, max")
-    out.append("// stamina, attacks, damage and seconds of a full bar).")
+    out.append("// stamina, attacks, damage and seconds of a full bar); under --rank moveset the moveset rate and per")
+    out.append("// family its best engagement: rate, raw rate, damage, status, self-damage, startup, commit,")
+    out.append("// stamina, reach, and the reach, stagger, trade, punish and stamina factors.")
     out.append(f"pub const BEST_WEAPONS: BestWeaponsCases = {_rs(expect_best_weapons(data, corpus))};")
     return "\n".join(out) + "\n"
 
@@ -6552,6 +6639,14 @@ def expect_best_weapons(data: Data, corpus: list[Build]) -> list:
                 stamina = _Some(([float(x) for x in m["stamina_per_attack"]], float(m["stamina_per_window"]),
                                  float(m["damage_per_stamina"]), opt(m.get("max_stamina")), opt_int(m.get("bar_attacks")),
                                  opt(m.get("bar_damage")), opt(m.get("bar_seconds"))))
+            moveset = None
+            if "moveset" in m:
+                moveset = _Some((float(m["moveset"]), [
+                    (fam, f["engagement"], float(f["rate"]), float(f["raw"]), float(f["damage"]), float(f["status"]),
+                     float(f["self"]), float(f["startup_s"]), float(f["commit_s"]), opt(f["stamina"]), opt(f["reach_m"]),
+                     (float(f["f_reach"]), float(f["f_stagger"]), float(f["f_trade"]), float(f["f_punish"]),
+                      float(f["f_stamina"])))
+                    for fam, f in m["families"].items()]))
             rows.append((float(score), key, float(val), data.classes[c]["name"], two, [int(st[s]) for s in STATS],
                          [data.rings[x]["name"] for x in worn], label,
                          _Some((ammo["ammo"] or "", ammo["shot"])) if ammo else None,
@@ -6560,7 +6655,7 @@ def expect_best_weapons(data: Data, corpus: list[Build]) -> list:
                          (opt(m.get("hyperarmor")), opt(m.get("hyperarmor_rate")), opt(m.get("hyperarmor_holds")),
                           opt(m.get("poise_damage_per_hit")), opt_int(m.get("armor_break")),
                           opt_int(m.get("hits_to_stagger")), float(m.get("defender_poise", 0.0))),
-                         status, opt(m.get("damage_with_status")), stamina))
+                         status, opt(m.get("damage_with_status")), stamina, moveset))
         out.append((INFUSION_CODE[inf], sl, objective, grip, cls, float(window), rank, with_status, defender or [],
                     buff, rows))
     return out

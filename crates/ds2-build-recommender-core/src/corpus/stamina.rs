@@ -81,7 +81,7 @@ impl CorpusBackend {
 
     /// The script's `max_stamina`: menu max stamina of levelled stats `stats` wearing `rings`,
     /// `None` without the table.
-    fn max_stamina(&self, stats: &Stats, rings: &[usize]) -> Option<f64> {
+    pub(super) fn max_stamina(&self, stats: &Stats, rings: &[usize]) -> Option<f64> {
         let table = &self.tables.stamina_max;
         if table.0.is_empty() {
             return None;
