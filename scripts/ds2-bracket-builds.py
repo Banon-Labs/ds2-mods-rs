@@ -26,8 +26,8 @@ counter ring. Files ranked by the R1 window (`--rank window`) work too. Scores
 compare across infusions, so the top row over all ten files is the level's weapon, and
 `generate_build` makes its whole build: class, stats, rings, armour under 70% load.
 
-WHAT GOES ON THE BODY: the primary in RH1, in RH2 the other weapon `generate_build` grants with
-the highest moveset rate at the build's stats (`backup_weapon`), the four rings it wears, its armour, and what the recommender's `choose_kit` carries: the
+WHAT GOES ON THE BODY: the primary in RH1 and nothing in RH2 (a second melee weapon to soft-swap
+to is not part of an optimal build), the four rings it wears, its armour, and what the recommender's `choose_kit` carries: the
 quick items in slot order (Estus Flask, a heal, a resin when the primary is buffable, the best knife
 and urn, a defensive item, then runners-up until at least half the ten slots are full), a bow,
 greatbow or crossbow in RH3 when one fits the stats and the load, and ammunition in all four arrow
@@ -115,32 +115,6 @@ def short_name(level: int, weapon: str, inf: str) -> str:
     return name[:NAME_MAX].rstrip()
 
 
-def backup_weapon(rec, data, corpus, level: int, g: dict, rings: list[str]) -> tuple[str, str, float] | None:
-    """RH2: of the weapons generate_build grants beside the primary (`granted`: its top 15
-    one-handable and top 5 two-hand-only, all usable at the build's stats), the one with the highest
-    moveset rate (moveset_metrics, the rank that picked the primary) at the build's stats and
-    `rings`, in the grip it is granted in; a launcher, the primary's weapon and a weapon with no
-    attack rows are left out. A weapon of another class (data.weapon_class) than the primary's goes
-    first: one of the same class swings much the same moveset, so swapping to it covers nothing the
-    primary leaves open. (key, infusion, rate), or None."""
-    attacks = rec.load_attacks(data)
-    dfn = rec.defender_defense(data, corpus, level)[0]
-    st = rec.gear_stats(data, g["stats"], rings)
-    primary = g["granted"][0][0]
-    cls = data.weapon_class.get(primary)
-    best = None
-    for key, inf, two in g["granted"][1:]:
-        if key == primary or key in data.ranged:
-            continue
-        m = rec.moveset_metrics(data, corpus, attacks, key, inf, two, st, rings, level, dfn)
-        if not m:
-            continue
-        rank = (cls is None or data.weapon_class.get(key) != cls, m["moveset"])
-        if best is None or rank > best[3]:
-            best = (key, inf, m["moveset"], rank)
-    return best and best[:3]
-
-
 def build_for(rec, data, corpus, level: int, slot: int, inf: str, row: dict) -> dict:
     g = rec.generate_build(data, corpus, row["key"], inf, level)
     if g is None:
@@ -148,9 +122,6 @@ def build_for(rec, data, corpus, level: int, slot: int, inf: str, row: dict) -> 
     worn = list(dict.fromkeys(g["rings"]))[:4]
     keys = [ring_key(data, n) for n in worn]
     equip = {"rh1": {"name": g["primary"][0], "infusion": g["primary"][1]}}
-    backup = backup_weapon(rec, data, corpus, level, g, keys)
-    if backup:
-        equip["rh2"] = {"name": data.weapons[backup[0]]["name"], "infusion": backup[1]}
     for slot_name, piece in zip(("head", "chest", "hands", "legs"), g["armor"]):
         if piece != "Naked":
             equip[slot_name] = {"name": piece}
