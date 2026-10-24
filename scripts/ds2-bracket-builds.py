@@ -33,6 +33,12 @@ and urn, a defensive item), a bow, greatbow or crossbow in RH3 when one fits the
 and its best ammunition in the arrow or bolt slots. The other weapons it lists are already in the
 mule's bag.
 
+RINGS THE MULE HOLDS: with `--held-from SAVE --base-slot N` every ring is one that slot's bag
+holds -- a corpus "Chloranthy Ring" comes out as the mule's "Chloranthy Ring+2", chosen before the
+armour so its weight counts against 70% (the recommender's HELD_RINGS) -- and an upgrade group the
+bag lacks is never suggested. Without them a build can name a ring `scripts/ds2-sl2-builds.py`
+cannot equip.
+
 HP is the game's MAX, because the save's HP field is the CURRENT value and the game recomputes
 the max on load (measured 2026-10-23: a save written with 800 came up 800/1064): the recommender's
 `hit_points` at the stats the rings give, times each worn ring's max-HP factor.
@@ -146,6 +152,8 @@ def main() -> int:
     ap.add_argument("--first-slot", type=int, default=1, help="the save slot the first level goes in")
     ap.add_argument("--max-hp", metavar="STATS", help="print the max HP of these stats and --rings, and stop")
     ap.add_argument("--rings", default="", help="with --max-hp: worn rings, comma-separated names")
+    ap.add_argument("--held-from", type=Path, help="give only rings the bag of --base-slot in this save holds")
+    ap.add_argument("--base-slot", type=int, help="with --held-from: the slot ds2-sl2-builds.py copies from")
     a = ap.parse_args()
     rec = _load("ds2_builds_recommend", "ds2-builds-recommend.py")
     data = load_data(rec)
@@ -158,6 +166,13 @@ def main() -> int:
         return 0
     if not (a.best_dir and a.out):
         ap.error("--best-dir and -o are required")
+    if a.held_from:
+        if a.base_slot is None:
+            ap.error("--held-from needs --base-slot")
+        writer = _load("ds2_sl2_builds", "ds2-sl2-builds.py")
+        held = writer.held_names(a.held_from, a.base_slot, writer.RING_IDS)
+        rec.HELD_RINGS = {k for k, v in data.rings.items() if norm(v["name"]) in held}
+        print(f"rings: {len(rec.HELD_RINGS)} that the bag of slot {a.base_slot} holds", file=sys.stderr)
     corpus, _ = rec.load_corpus(data)
     builds = []
     for i, level in enumerate(int(x) for x in a.levels.split(",")):

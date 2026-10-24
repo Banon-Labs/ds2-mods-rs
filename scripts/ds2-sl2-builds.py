@@ -269,6 +269,17 @@ class Bag:
 # --------------------------------------------------------------------------------------------
 
 
+def held_names(path: Path, base: int, kind: range = ANY_ITEM) -> set[str]:
+    """The names (normalized, `norm`: "Ring of Blades+2" is "ringofblades+2") of every `kind` item
+    the bag of slot `base` in the save at `path` holds: what a build written from that slot can be
+    equipped with."""
+    save = Save(read_container(path))
+    char = save.entry(char_entry(base))
+    inv = section_offsets(char)[T_BAG]
+    bag = Bag(bytes(char[inv:inv + B_RECORDS * B_RECORD]), dump.Names(None, extract=True))
+    return {n for n, ids in bag.by_name.items() if any(i in kind for i in ids)}
+
+
 def copy_slot(save: Save, base: int, slot: int) -> None:
     if slot == base:
         return

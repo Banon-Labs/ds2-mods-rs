@@ -173,6 +173,7 @@ class Data:
         self.weapon_elements = {}  # weapon key -> element -> (base, coefficient) (regulation_weapon_elements)
         self.hit_flat = {}  # PlayerDamageParam row -> DMG key -> flat attack (regulation_hit_flat)
         self.damage_scale = {}  # weapon key -> WeaponParam.damageScale where not 1.0 (regulation_damage_scale)
+        self.self_hit = {}  # weapon key -> HP each landed hit costs its wielder (regulation_self_hits)
         self.hit_shape = {}  # PlayerDamageParam row -> its hitbox shape (regulation_reach)
         self.reach_scale = {}  # weapon key -> (radius scale, length scale) where not 1.0 (regulation_reach)
         self.hit_poise = {}  # PlayerDamageParam row -> (poiseDamage, armorBreak) (regulation_poise)
@@ -1153,6 +1154,7 @@ def apply_regulation(data: Data) -> str:
             + "; " + regulation_consumables(data, emevd, members, d, names)
             + "; " + regulation_weapon_elements(data, d, names)
             + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_reach(data, d, names)
+            + "; " + regulation_self_hits(data, emevd, members, d, names)
             + "; " + regulation_poise(data, d, names) + "; " + regulation_stamina(data, d, names)
             + "; " + regulation_status(data, d, names)
             + "; " + regulation_status_procs(data, d, emevd, members, names)
@@ -1321,6 +1323,38 @@ def regulation_damage_scale(data: Data, d: dict, names: dict) -> str:
         if wp and wp["damageScale"] != 1.0:
             data.damage_scale[key] = wp["damageScale"]
     return f"damageScale off 1.0 on {len(data.damage_scale)} weapons"
+
+
+#: PlayerDamageParam.damageCategory of the rows a weapon hits its own wielder with (REGULATION: both
+#: SpEffectWeapon.emevd `100170[1]` rows numbered like a weapon have it, and no other weapon's row).
+SELF_HIT_CATEGORY = 99986040
+
+
+def regulation_self_hits(data: Data, emevd, members: dict, d: dict, names: dict) -> str:
+    """data.self_hit: weapon key -> HP each landed hit costs its wielder. REGULATION: a
+    SpEffectWeapon.emevd event `100170[1] [row]` hits once with PlayerDamageParam `row`
+    (regulation_status_procs), and the Chaos Blade's (event 1720010, row 1720000: 50) and the Lost
+    Sinner's Sword's (event 5295000, row 5295000: 30) are rows numbered as the weapon, of
+    SELF_HIT_CATEGORY, all type 5, which the defense passes through untouched (EXE,
+    regulation_status_procs). That they hit the wielder is the game's text (detailedexplanation.fmg:
+    "Effect: attacks also damage player", "Effect: attacks damage wielder"); that it is once per hit
+    LANDED is INFERRED from the Chaos Blade's "Damage to foes also damages its owner" -- what fires
+    the event was not read."""
+    dmg = d["PlayerDamageParam"]
+    rows = set()
+    for e in emevd.Emevd(Path("SpEffectWeapon.emevd"), members["SpEffectWeapon.emevd"]).events:
+        for i in e.instructions:
+            if (i.bank, i.index) == STATUS_ONCE:
+                rows.add(i.words()[0][0])
+    hp = {}
+    for row in rows:
+        r = dmg.get(str(row))
+        if r and r["damageCategory"] == SELF_HIT_CATEGORY and str(row) in d["WeaponParam"]:
+            hp[norm(names.get(str(row), ""))] = sum(r[f"damage0{n}"] for n in (1, 2, 3) if r[f"damageType0{n}"] == 5)
+    data.self_hit = {key: hp[norm(w.get("name", key))] for key, w in data.weapons.items()
+                     if hp.get(norm(w.get("name", key)))}
+    return "self-damage per hit from SpEffectWeapon.emevd: " + ", ".join(
+        f"{data.weapons[k]['name']} {v}" for k, v in data.self_hit.items())
 
 
 def regulation_reach(data: Data, d: dict, names: dict) -> str:
@@ -2970,7 +3004,7 @@ def moveset_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str,
 
     Per engagement (MOVE_FAMILIES: an opener, or an opener and its chained follow-up):
 
-        rate = (damage + status) / (entry + commit)
+        rate = (damage + status - self) / (entry + commit)
                x f_reach^e x f_stagger^e x f_trade^e x f_punish^e x f_stamina^e
 
     each exponent e moveset_exponents' (fitted to adoption, MOVESET_WEIGHTS; 1 without the file),
@@ -2982,6 +3016,8 @@ def moveset_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str,
       FOLLOW_UNSTAGGERED otherwise, averaged over the bracket's poises.
     * status: poison and bleed proc damage those hits deal over the engagement (status_metrics,
       window = its commit), against the bracket's resistances.
+    * self: what the hits landed (each x its land chance) cost the wielder, data.self_hit apiece
+      (regulation_self_hits: the Chaos Blade 50, the Lost Sinner's Sword 30).
     * entry: MOVE_ENTRY for a movement attack; commit: attack_commit summed over the engagement.
     * f_reach = clamp((opener reach / bracket median R1 reach) ^ REACH_EXP, REACH_CLAMP).
     * f_stagger = 1 + STAGGER_BONUS x the share of bracket poises the opener's first hit breaks
@@ -3025,11 +3061,12 @@ def moveset_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str,
             if opener:
                 stagger = sum(opener["ab"] >= 1 or opener["pd"] >= p for p in poises) / len(poises)
             land = [1.0] + [stagger + (1 - stagger) * FOLLOW_UNSTAGGERED] * (len(atts) - 1)
-            dmg, hits, commit, cost = 0.0, 0, MOVE_ENTRY.get(eng[0], 0.0), 0.0
+            dmg, hits, landed, commit, cost = 0.0, 0, 0.0, MOVE_ENTRY.get(eng[0], 0.0), 0.0
             for a, p, sfx in zip(atts, land, eng):
                 for h in live_hits(a, distinct=True):
                     n = max(1, h.get("n") or 1)
                     hits += n
+                    landed += p * n
                     dmg += p * n * hit_damage(ar, dfn, h["rate"], h.get("type") or "physical", h.get("lower", 0),
                                               h.get("flat") or NO_FLAT) * scale
                 commit += attack_commit(a, table)[1]
@@ -3037,6 +3074,7 @@ def moveset_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str,
                 cost = None if c is None or cost is None else cost + c
             st_hp = sum(status_metrics(data.status_procs[s], per, cuts, hits, commit)["status_damage_per_window"]
                         for s, (per, cuts) in status.items())
+            own = landed * data.self_hit.get(weapon, 0)
             reach = attack_reach(data, weapon, atts[0])
             f_reach = (min(REACH_CLAMP[1], max(REACH_CLAMP[0], (reach / br["reach"]) ** REACH_EXP))
                        if reach and br["reach"] else 1.0)
@@ -3057,12 +3095,13 @@ def moveset_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str,
                 W = MOVESET_STAMINA_WINDOW
                 f_stamina = min(1.0, (bar + regen * W) / (cost + regen * commit) * commit / W)
             ex = moveset_exponents()
-            rate = ex[fam] * (dmg + st_hp) / commit * (f_reach ** ex["f_reach"] * f_stagger ** ex["f_stagger"]
+            net = dmg + st_hp - own
+            rate = ex[fam] * net / commit * (f_reach ** ex["f_reach"] * f_stagger ** ex["f_stagger"]
                                              * f_trade ** ex["f_trade"] * f_punish ** ex["f_punish"]
                                              * f_stamina ** ex["f_stamina"])
-            row = {"engagement": "+".join(eng), "rate": round(rate, 2), "raw": round((dmg + st_hp) / commit, 3),
+            row = {"engagement": "+".join(eng), "rate": round(rate, 2), "raw": round(net / commit, 3),
                    "damage": round(dmg, 1),
-                   "status": round(st_hp, 1), "startup_s": round(startup, 3), "commit_s": round(commit, 3),
+                   "status": round(st_hp, 1), "self": round(own, 1), "startup_s": round(startup, 3), "commit_s": round(commit, 3),
                    "stamina": None if cost is None else round(cost, 1), "reach_m": reach,
                    "f_reach": round(f_reach, 3), "f_stagger": round(f_stagger, 3), "f_trade": round(f_trade, 3),
                    "f_punish": round(f_punish, 3), "f_stamina": round(f_stamina, 3)}
@@ -4238,7 +4277,7 @@ def offense_rings(data: Data, weapon: str, inf: str, objective: str) -> list[str
     row = data.weapons[weapon]["infusions"].get(inf) or {}
     by_group = {}
     for r in data.ring_attack:
-        if r not in NO_USE_RINGS:
+        if r not in NO_USE_RINGS and held_tier(data, r) == r:
             by_group[data.rings[r].get("group", r)] = r
     gain = {r: sum(ring_attack_add(data, row, [r]).values()) for r in by_group.values()}
     return sorted((r for r in by_group.values() if gain[r] > 0), key=lambda r: -gain[r])
@@ -4251,7 +4290,7 @@ def sub_rings(data: Data) -> list[str]:
     HP loss), never a NO_USE_RINGS ring; in ring_gear order (mechanics.json's, item id)."""
     by_group = {}
     for r, e in ring_gear(data).items():
-        if r in NO_USE_RINGS or min(e["hp"], e["load"], e["stamina"]) < 1.0:
+        if r in NO_USE_RINGS or held_tier(data, r) != r or min(e["hp"], e["load"], e["stamina"]) < 1.0:
             continue
         by_group[data.rings[r].get("group", r)] = r
     return list(by_group.values())
@@ -5075,6 +5114,36 @@ COMMON_RING = 0.10  # a ring worn by at least this share of every corpus build c
 #: Rings a generated build never suggests or grants, however many builds wear them. Agape Ring
 #: ("Absorbs souls.") is worn by 15.8% of the corpus to hold soul memory down, not for a fight.
 NO_USE_RINGS = ("Agape_Ring",)
+#: The ring keys a generated build may wear; None allows every ring. scripts/ds2-bracket-builds.py
+#: sets it to what the mule's bag holds (ds2-sl2-builds.held_names), whose rings are mostly the top
+#: tier: corpus builds list "Chloranthy Ring", the mule holds only "Chloranthy Ring+2".
+HELD_RINGS: set[str] | None = None
+
+
+def ring_tier(data: Data, r: str) -> int:
+    m = re.search(r"\+\s*(\d+)$", data.rings[r]["name"])
+    return int(m.group(1)) if m else 0
+
+
+def held_tier(data: Data, r: str) -> str | None:
+    """`r` as a build can wear it: `r` when HELD_RINGS allows it, else the strongest held ring of
+    its upgrade group, else None."""
+    if HELD_RINGS is None or r in HELD_RINGS:
+        return r
+    group = data.rings[r].get("group", r)
+    tiers = [k for k in HELD_RINGS if data.rings[k].get("group", k) == group]
+    return max(tiers, key=lambda k: ring_tier(data, k)) if tiers else None
+
+
+def held_counts(data: Data, c: Counter | None) -> Counter | None:
+    """`c` (ring -> builds wearing it) with each ring counted as its held_tier, unheld groups dropped."""
+    if c is None or HELD_RINGS is None:
+        return c
+    out = Counter()
+    for r, n in c.items():
+        if (h := held_tier(data, r)) is not None:
+            out[h] += n
+    return out
 
 
 def suggest_rings(data: Data, near: Counter, every: Counter | None = None, n: int = 4,
@@ -5085,6 +5154,7 @@ def suggest_rings(data: Data, near: Counter, every: Counter | None = None, n: in
     A ring in the group of one already `worn` (optimize_build's) is left out, as a no-use ring is."""
     group = lambda r: data.rings[r].get("group", r)
     held = {group(r) for r in worn}
+    near, every = held_counts(data, near), held_counts(data, every)
     near = Counter({r: c for r, c in near.items() if group(r) not in held})
     every = every and Counter({r: c for r, c in every.items() if group(r) not in held})
     top = [r for r, _ in near.most_common(n)]
@@ -5214,8 +5284,8 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
                    if r and r in data.rings)
     every = Counter(r for b in corpus for r in dict.fromkeys(b.rings) if r and r in data.rings)
     suggested = worn + suggest_rings(data, near, every, 4 - len(worn), worn)
-    common = [r for r, c in every.most_common() if c >= COMMON_RING * len(corpus) and r not in suggested
-              and r not in NO_USE_RINGS]
+    common = [r for r, c in held_counts(data, every).most_common() if c >= COMMON_RING * len(corpus)
+              and r not in suggested and r not in NO_USE_RINGS]
     by_name = {}
     for key, w in data.weapons.items():
         by_name.setdefault(w["name"], key)
