@@ -813,12 +813,34 @@ def max_load(data: Data, eff: dict, rings=()) -> float:
     return data.equip_load[min(vit, len(data.equip_load) - 1)] * ring_factor(data, rings, "load")
 
 
-def best_armor(data: Data, b: Build, eff: dict, mix: dict, top: int = 3, scarcity: float = 0.0):
+#: Whether a generated build must wear a piece in every armour slot: best_armor and
+#: armor_poise_steps leave Naked out of each slot, and generate_armor lets a slot go bare only when
+#: no set with all four fits the load. scripts/ds2-bracket-builds.py sets it (user rule 2026-10-24:
+#: every armour slot of a bracket build is filled); the default, and the Rust port's, still leaves a
+#: slot bare when no piece's defense is worth its weight.
+FULL_ARMOR = False
+#: The armour keys a generated build may wear; None allows every piece. scripts/ds2-bracket-builds.py
+#: sets it to what the mule's bag holds, as it does HELD_RINGS.
+HELD_ARMOR: set[str] | None = None
+
+
+def armor_allowed(key: str, full: bool) -> bool:
+    """Whether a set may hold armour `key`: Naked unless `full`, another piece when HELD_ARMOR
+    allows it."""
+    if key == "Naked":
+        return not full
+    return HELD_ARMOR is None or key in HELD_ARMOR
+
+
+def best_armor(data: Data, b: Build, eff: dict, mix: dict, top: int = 3, scarcity: float = 0.0,
+               full: bool | None = None):
     """The `top` armour sets `eff` can wear under EQUIP_CAP beside what `b` carries, best first by
     threat-weighted defense. `scarcity` (load_scarcity, 0..1) trades defense for weight: a set scores
     its defense less `scarcity` x LOAD_PRICE x the best set's own defense per weight x its weight, so
     a build that wields few weapons takes a lighter set of similar defense over the heaviest one.
-    The rings `b` wears count (max_load, and their stat bonuses toward the armour's requirements)."""
+    The rings `b` wears count (max_load, and their stat bonuses toward the armour's requirements).
+    `full` (default FULL_ARMOR) leaves Naked out of every slot (armor_allowed)."""
+    full = FULL_ARMOR if full is None else full
     worn = [r for r in b.rings if r in data.rings]
     cap = max_load(data, eff, worn) * EQUIP_CAP
     eff = gear_stats(data, eff, worn)
@@ -832,7 +854,7 @@ def best_armor(data: Data, b: Build, eff: dict, mix: dict, top: int = 3, scarcit
     fronts = []
     for slot in ARMOR_SLOTS:
         cands = sorted(((v.get("weight", 0), value(v), k) for k, v in data.armor[slot].items()
-                        if armor_ok(data, slot, k, eff)), key=lambda t: (t[0], -t[1]))
+                        if armor_allowed(k, full) and armor_ok(data, slot, k, eff)), key=lambda t: (t[0], -t[1]))
         front, best = [], -1
         for w, val, k in cands:  # pareto: keep only pieces that beat every lighter one
             if val > best:
@@ -3559,15 +3581,18 @@ def exchange_value(table: dict, poise: float, dfn: dict) -> tuple[float, float]:
     return (table["fixed"] + table["cum"][k] - taken) / table["pairs"], (table["first"] + k) / table["pairs"]
 
 
-def armor_poise_steps(data: Data, b: Build, eff: dict, mix: dict, scarcity: float = 0.0) -> list[tuple[float, tuple]]:
+def armor_poise_steps(data: Data, b: Build, eff: dict, mix: dict, scarcity: float = 0.0,
+                      full: bool | None = None) -> list[tuple[float, tuple]]:
     """best_armor's pick at every armour poise its budget reaches: for each distinct sum P of four
     wearable pieces' poise under the same load budget, the set best_armor's score (threat-mix
     defense less `scarcity`'s load price, the price taken from best_armor's own top set) ranks first
     among sets whose pieces' poise is at least P. As (pieces' poise, pieces), poise rising, each set
     once. Per slot only pieces no lighter-or-equal piece matches in defense and poise both count;
-    the four slots are combined keeping, per poise sum, the sets no lighter one outscores."""
+    the four slots are combined keeping, per poise sum, the sets no lighter one outscores. `full` is
+    best_armor's."""
+    full = FULL_ARMOR if full is None else full
     worn = [r for r in b.rings if r in data.rings]
-    _, _, top = best_armor(data, b, dict(eff), mix, top=1)
+    _, _, top = best_armor(data, b, dict(eff), mix, top=1, full=full)
     if not top:
         return []
     price = top[0][0] / top[0][1] if top[0][1] > 0 else 0.0
@@ -3583,7 +3608,8 @@ def armor_poise_steps(data: Data, b: Build, eff: dict, mix: dict, scarcity: floa
     states = {0.0: [(0.0, 0.0, ())]}  # pieces' poise -> [(weight, defense value, pieces)]
     for slot in ARMOR_SLOTS:
         cands = sorted(((v.get("weight", 0), value(v), v.get("poise", 0), key) for key, v in data.armor[slot].items()
-                        if armor_ok(data, slot, key, st)), key=lambda t: (t[0], -t[1], -t[2], t[3]))
+                        if armor_allowed(key, full) and armor_ok(data, slot, key, st)),
+                       key=lambda t: (t[0], -t[1], -t[2], t[3]))
         front = []
         for c in cands:
             if not any(f[1] >= c[1] and f[2] >= c[2] for f in front):
@@ -5296,7 +5322,8 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
     passing 70% -- plus, for a build that casts, the heaviest of its `catalysts` (keys), which is
     held beside the weapon. As display names head/chest/hands/legs ("Naked" for a slot left bare),
     a note when the load cap left a slot bare or left no set at all -- never a silent naked build --
-    or when poise drove the pick, and the trade numbers (below; {} without them).
+    or when poise drove the pick, and the trade numbers (below; {} without them). Under FULL_ARMOR
+    every slot holds a piece unless no set with four fits the load at all.
 
     Which set: best_armor's top set, unless a set that buys poise trades better. With `sl` and
     `granted` ((key, infusion, two-handed) of every weapon the build lists, primary first) the
@@ -5320,7 +5347,11 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
         held.append((max(catalysts, key=weight), "No_Infusion"))
     wearer = Build("", stats, ["Naked"] * 4, held, int(two), rings, [])
     mix, scarcity = threat_mix(data, corpus), load_scarcity(data, stats)
-    cap, carried, sets = best_armor(data, wearer, dict(stats), mix, top=1, scarcity=scarcity)
+    full = FULL_ARMOR
+    cap, carried, sets = best_armor(data, wearer, dict(stats), mix, top=1, scarcity=scarcity, full=full)
+    if not sets and full:  # no set with a piece in every slot fits: let one go bare (the note says so)
+        full = False
+        cap, carried, sets = best_armor(data, wearer, dict(stats), mix, top=1, scarcity=scarcity, full=full)
     if not sets:
         what = "the heaviest weapon, its catalyst and the rings" if catalysts else "the heaviest weapon and the rings"
         return [], (f"no armor fits: {what} weigh {carried:.1f}, over the {cap:.1f} a "
@@ -5330,7 +5361,7 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
     if table is not None:
         prev = armor_trade(data, table, pieces, stats, rings, two)
         best, best_pieces, cands = prev, pieces, [(list(pieces), prev)]
-        for _, ps in armor_poise_steps(data, wearer, dict(stats), mix, scarcity):
+        for _, ps in armor_poise_steps(data, wearer, dict(stats), mix, scarcity, full):
             if list(ps) == list(pieces):
                 continue
             s = armor_trade(data, table, ps, stats, rings, two)
@@ -5430,6 +5461,12 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
 
 #: Quick item slots a DS2 character has (the save's equip array 18..27, ds2-sl2-equipped.py).
 QUICK_SLOTS = 10
+#: The fewest quick slots choose_kit fills (user rule 2026-10-24: at least half): past the picks for
+#: the build it adds the next-best heal, throw, defensive item and resin in turn.
+QUICK_MIN = QUICK_SLOTS // 2
+#: Normalized names (norm) of the items, ammunition included, a kit may carry; None allows every
+#: one. scripts/ds2-bracket-builds.py sets it to what the mule's bag holds, as it does HELD_RINGS.
+HELD_ITEMS: set[str] | None = None
 #: The equip slots ammunition goes in: two arrow slots then two bolt slots (ds2_rva, slots 14..17).
 ARROW_SLOTS, BOLT_SLOTS = ("ammo1", "ammo2"), ("ammo3", "ammo4")
 #: Launchers fired two-handed (their STR requirement halves, weapon_ok); a crossbow fires from one hand.
@@ -5483,7 +5520,8 @@ def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, 
       the best throw of each THROWN_GROUPS group by thrown_value; and the defensive item
       (data.defense_buffs, source "item") whose defense is worth most under threat_mix, the corpus's
       damage-type mix. er-mods-rs's pouch keeps a pick only if it raises the kit's score; here a
-      pick with a value of 0 is left out.
+      pick with a value of 0 is left out. Short of QUICK_MIN, the runners-up of the heal, throw,
+      defensive item and resin pools fill the rest in turn. Only HELD_ITEMS.
     * launcher: the bow, greatbow or crossbow (data.ranged) with the most damage per stamina point
       (ranged_pick's shot over shot_stamina) that the build can fire at its stats
       (TWO_HANDED_LAUNCHERS) and carry -- its weight added to everything worn and held stays under
@@ -5491,7 +5529,9 @@ def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, 
       (ranged_value), and per shot a greatbow always wins. None when no launcher fits.
     * ammo: {slot: (name, why)} for the launcher's best ammunition and the best of another element
       in the launcher's slots (ARROW_SLOTS or BOLT_SLOTS), each by its own shot's damage
-      (ranged_options at the launcher's attack, ranged_value's damage arithmetic).
+      (ranged_options at the launcher's attack, ranged_value's damage arithmetic). All four slots
+      are filled: the slots the launcher does not fire from (all four with no launcher) the same
+      way from a stand-in bow or crossbow, the best the build could fire, else the nearest to it.
 
     Status resins (Rotten Pine Resin, Bleeding Serum) and status knives' build-up are not valued:
     an item's status add in gauge points was not read. Scaled throwing damage is not either
@@ -5502,39 +5542,45 @@ def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, 
     dfn, _ = defender_defense(data, corpus, sl, defender)
     ar = attack_rating(data, weapon, inf, eff, rings)
     hp = int(hit_points(data, eff) * math.prod(ring_gear(data)[r]["hp"] for r in rings if r in ring_gear(data)))
+    held_item = lambda n: HELD_ITEMS is None or norm(n) in HELD_ITEMS
     items = [("Estus Flask", "always")]
-    heals = [(min(h["hp"], hp) / max(h["seconds"], 0.1), n, h) for n, h in data.heals.items()
-             if n != "Estus Flask" and h["seconds"] > 0]
-    if heals:
-        v, n, h = max(heals)
-        items.append((n, f"heals {min(h['hp'], hp)} of {hp} max HP in {h['seconds']:g} s ({v:.0f} HP/s)"))
+    # each pool best first, as (value, name, why); its head is the build's pick, the rest QUICK_MIN's fill
+    heals = sorted(((min(h["hp"], hp) / max(h["seconds"], 0.1), n,
+                     f"heals {min(h['hp'], hp)} of {hp} max HP in {h['seconds']:g} s "
+                     f"({min(h['hp'], hp) / max(h['seconds'], 0.1):.0f} HP/s)")
+                    for n, h in data.heals.items() if n != "Estus Flask" and h["seconds"] > 0 and held_item(n)),
+                   reverse=True)
+    resins = []
     if buffable(ar):
         base = hit_damage(ar, respond(dfn, ar), 1.0)
-        best = None
         for n, b in data.item_buffs.items():
-            if b["type"] not in ELEMENTS:
+            if b["type"] not in ELEMENTS or not held_item(n):
                 continue
             add = dict(ar)
             add[b["type"]] = add.get(b["type"], 0) + buff_attack(data, b, weapon, eff)
             gain = hit_damage(add, respond(dfn, add), 1.0) - base
-            if gain > 0 and (best is None or gain > best[0]):
-                best = (gain, n, b)
-        if best:
-            items.append((best[1], f"+{best[0]:.0f} per MV-1 hit ({best[0] / base:.0%}) for {best[2]['seconds']:g} s"))
-    for group, words in THROWN_GROUPS.items():
-        cands = [(thrown_value(data, t, dfn)[0], n) for n, t in data.throwables.items()
-                 if any(w in n for w in words)]
-        cands = [c for c in cands if c[0] > 0]
-        if cands:
-            v, n = max(cands)
-            items.append((n, f"{v:.0f} HP per throw (flat, unscaled)"))
+            if gain > 0:
+                resins.append((gain, n, f"+{gain:.0f} per MV-1 hit ({gain / base:.0%}) for {b['seconds']:g} s"))
+        resins.sort(reverse=True)
+    throws = {group: sorted(((v, n, f"{v:.0f} HP per throw (flat, unscaled)")
+                             for v, n in ((thrown_value(data, t, dfn)[0], n) for n, t in data.throwables.items()
+                                          if any(w in n for w in words) and held_item(n)) if v > 0), reverse=True)
+              for group, words in THROWN_GROUPS.items()}
     mix = threat_mix(data, corpus)
-    guards = [(sum(mix.get(k, 0) * v for k, v in b["add"].items()), n, b) for n, b in data.defense_buffs.items()
-              if b["source"] == "item"]
-    if guards:
-        v, n, b = max(guards)
-        if v > 0:
-            items.append((n, " ".join(f"{k} +{x}" for k, x in b["add"].items()) + f" for {b['seconds']:g} s"))
+    guards = sorted(((v, n, " ".join(f"{k} +{x}" for k, x in b["add"].items()) + f" for {b['seconds']:g} s")
+                     for v, n, b in ((sum(mix.get(k, 0) * x for k, x in b["add"].items()), n, b)
+                                     for n, b in data.defense_buffs.items() if b["source"] == "item" and held_item(n))
+                     if v > 0), reverse=True)
+    for pool in (heals, resins, *throws.values(), guards):
+        if pool:
+            items.append(pool[0][1:])
+    # QUICK_MIN: the next-best heal, throw (either group), defensive item and resin in turn
+    spare = [heals[1:], sorted((x for t in throws.values() for x in t[1:]), reverse=True), guards[1:], resins[1:]]
+    while len(items) < QUICK_MIN and any(spare):
+        for pool in spare:
+            if pool and len(items) < QUICK_MIN:
+                _, n, why = pool.pop(0)
+                items.append((n, why + "; fills the quick slots"))
     worn = sum(item_weight(data, s, k) for s, k in zip(ARMOR_SLOTS, armor_keys(data, g["armor"])) if k)
     worn += sum(item_weight(data, "ring", r) for r in rings)
     held = [data.key_by_name.get(g["primary"][0])] + [data.key_by_name.get(n) for n, _, _ in g["weapons_1h"][:1]]
@@ -5554,20 +5600,49 @@ def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, 
             v, note, _, am = ranged_pick(data, key, linf, eff, "damage", dfn, rings)
             if v > 0 and am and (best is None or v / cost > best[0]):
                 best = (v / cost, key, linf, note, am, v)
+    def fill(slots, key, linf, why=""):
+        """The two `slots` from `key`'s ammunition by its own shot's damage: the best, then the
+        best of another element, else the next best."""
+        ranked = sorted(((hit_damage(sar, respond(dfn, sar), hit["mv"], "physical", hit["lower"])
+                          * data.damage_scale.get(key, 1.0), n)
+                         for n, sar, hit in ranged_options(data, key, linf, eff, rings, special=False)
+                         if held_item(n)), reverse=True)
+        picked = ranked[:1]
+        first_types = set(data.ammo[ranked[0][1]]["flat"]) if ranked else set()
+        picked += [x for x in ranked[1:] if set(data.ammo[x[1]]["flat"]) != first_types][:1]
+        picked += [x for x in ranked if x not in picked][:len(slots) - len(picked)]
+        for slot, (v2, n) in zip(slots, picked):
+            ammo[slot] = (n, f"{v2:.0f} per shot{why}")
+
     if best:
         per, key, linf, note, am, v = best
         launcher = (data.weapons[key]["name"], linf,
                     f"{v:.0f} per shot ({note}), {per:.1f} per stamina point; "
                     f"load {worn + item_weight(data, 'weapon', key):.1f} of {cap:.1f}")
-        slots = BOLT_SLOTS if data.ranged[key]["kind"] == "crossbow" else ARROW_SLOTS
-        ranked = sorted(((hit_damage(sar, respond(dfn, sar), hit["mv"], "physical", hit["lower"])
-                          * data.damage_scale.get(key, 1.0), n)
-                         for n, sar, hit in ranged_options(data, key, linf, eff, rings, special=False)), reverse=True)
-        picked = [ranked[0]] if ranked else []
-        first_types = set(data.ammo[ranked[0][1]]["flat"]) if ranked else set()
-        picked += [x for x in ranked[1:] if set(data.ammo[x[1]]["flat"]) != first_types][:1]
-        for slot, (v2, n) in zip(slots, picked):
-            ammo[slot] = (n, f"{v2:.0f} per shot")
+        fill(BOLT_SLOTS if data.ranged[key]["kind"] == "crossbow" else ARROW_SLOTS, key, linf)
+    # user rule 2026-10-24: every arrow and bolt slot is full. The slots the launcher does not fire
+    # from take the ammunition of a stand-in: the bow (arrow slots) or crossbow (bolt slots) with the
+    # most damage per stamina point the build can fire, load aside, else the one it is nearest to firing
+    for slots, kind in ((ARROW_SLOTS, "bow"), (BOLT_SLOTS, "crossbow")):
+        if any(s in ammo for s in slots):
+            continue
+        cands = []
+        for key, r in data.ranged.items():
+            if r["kind"] != kind:
+                continue
+            req = data.weapons[key].get("require") or {}
+            short = sum(max(0, v - eff.get(s, 0)) for s, v in req.items())
+            if not weapon_ok(data, key, eff, kind in TWO_HANDED_LAUNCHERS):
+                cands.append(((0, -short, 0.0), key, None))
+                continue
+            cost = shot_stamina(data, key) or 1.0
+            for linf in data.weapons[key].get("infusions") or {}:
+                v = ranged_pick(data, key, linf, eff, "damage", dfn, rings)[0]
+                cands.append(((1, 0, v / cost), key, linf))
+        if cands:
+            _, key, linf = max(cands, key=lambda c: c[0])
+            linf = linf or next(iter(data.weapons[key].get("infusions") or {"No_Infusion": 0}))
+            fill(slots, key, linf, f" from a {data.weapons[key]['name']}")
     return {"items": items[:QUICK_SLOTS], "launcher": launcher, "ammo": ammo, "max_hp": hp}
 
 

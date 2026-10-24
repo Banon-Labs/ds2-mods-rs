@@ -29,9 +29,13 @@ compare across infusions, so the top row over all ten files is the level's weapo
 WHAT GOES ON THE BODY: the primary in RH1, in RH2 the other weapon `generate_build` grants with
 the highest moveset rate at the build's stats (`backup_weapon`), the four rings it wears, its armour, and what the recommender's `choose_kit` carries: the
 quick items in slot order (Estus Flask, a heal, a resin when the primary is buffable, the best knife
-and urn, a defensive item), a bow, greatbow or crossbow in RH3 when one fits the stats and the load,
-and its best ammunition in the arrow or bolt slots. The other weapons it lists are already in the
-mule's bag.
+and urn, a defensive item, then runners-up until at least half the ten slots are full), a bow,
+greatbow or crossbow in RH3 when one fits the stats and the load, and ammunition in all four arrow
+and bolt slots. Every armour slot holds a piece (the recommender's FULL_ARMOR; `--allow-bare`
+lets one go bare). The other weapons it lists are already in the mule's bag.
+
+ITEMS AND ARMOUR THE MULE HOLDS: `--held-from` limits the armour (HELD_ARMOR) and the quick items
+and ammunition (HELD_ITEMS) to what the bag holds, as it does the rings below.
 
 RINGS THE MULE HOLDS: with `--held-from SAVE --base-slot N` every ring is one that slot's bag
 holds -- a corpus "Chloranthy Ring" comes out as the mule's "Chloranthy Ring+2", chosen before the
@@ -183,9 +187,13 @@ def main() -> int:
     ap.add_argument("--spend", choices=["curves", "ehp"], default="curves",
                     help="how generate_build spends the free points (the recommender's --spend); "
                          "give the one the --best-dir sweep ranked with")
+    ap.add_argument("--allow-bare", action="store_true",
+                    help="let an armour slot go bare when no piece is worth its weight (default: every "
+                         "slot holds a piece, the recommender's FULL_ARMOR)")
     a = ap.parse_args()
     rec = _load("ds2_builds_recommend", "ds2-builds-recommend.py")
     rec.SPEND.update(mode=a.spend)
+    rec.FULL_ARMOR = not a.allow_bare
     data = load_data(rec)
     if a.max_hp:
         stats = {s: int(v) for s, v in (kv.split("=") for kv in a.max_hp.split(","))}
@@ -202,7 +210,11 @@ def main() -> int:
         writer = _load("ds2_sl2_builds", "ds2-sl2-builds.py")
         held = writer.held_names(a.held_from, a.base_slot, writer.RING_IDS)
         rec.HELD_RINGS = {k for k, v in data.rings.items() if norm(v["name"]) in held}
-        print(f"rings: {len(rec.HELD_RINGS)} that the bag of slot {a.base_slot} holds", file=sys.stderr)
+        held = writer.held_names(a.held_from, a.base_slot, writer.ARMOR_IDS)
+        rec.HELD_ARMOR = {k for s in rec.ARMOR_SLOTS for k, v in data.armor[s].items() if norm(v["name"]) in held}
+        rec.HELD_ITEMS = {rec.norm(n) for n in writer.held_names(a.held_from, a.base_slot, range(50_000_000, 70_000_000))}
+        print(f"rings: {len(rec.HELD_RINGS)}, armour: {len(rec.HELD_ARMOR)}, items: {len(rec.HELD_ITEMS)} "
+              f"that the bag of slot {a.base_slot} holds", file=sys.stderr)
     corpus, _ = rec.load_corpus(data)
     builds = []
     for i, level in enumerate(int(x) for x in a.levels.split(",")):
