@@ -667,6 +667,31 @@ test_the_output_flag_names_the_file_it_created if {
 	written(GAP_GENERATOR_OUTPUT) == {"/home/banon/projects/ds2-mods-rs/crates/darksouls2/src/param/generated.rs"}
 }
 
+# GAP 2026-10-24, verbatim: the Bash cwd was the crate directory, so the path on the command
+# line had no `crates/` in it, and this rewrote crates/ds2-build-recommender-core/src/corpus.rs.
+GAP_SED_RELATIVE_TO_A_CRATE_CWD := `sed -i 's/^pub const FORMAT: &str = "ds2-build-recommender-data 21";/pub const FORMAT: \&str = "ds2-build-recommender-data 22";/' src/corpus.rs`
+
+CRATE_CWD := "/home/banon/projects/ds2-mods-rs/crates/ds2-build-recommender-core"
+
+bash_event_in(cwd, cmd, signal) := object.union(bash_event(cmd, signal), {"cwd": cwd})
+
+test_deny_sed_on_a_path_relative_to_a_crate_cwd if {
+	denied(bash_event_in(CRATE_CWD, GAP_SED_RELATIVE_TO_A_CRATE_CWD, UNPROVEN_SPENT))
+}
+
+test_a_relative_path_resolves_against_the_hook_cwd if {
+	paths := guard.written_crate_paths with input as bash_event_in(CRATE_CWD, GAP_SED_RELATIVE_TO_A_CRATE_CWD, UNPROVEN_SPENT)
+	paths == {"/home/banon/projects/ds2-mods-rs/crates/ds2-build-recommender-core/src/corpus.rs"}
+}
+
+test_a_crate_scoped_record_opens_a_path_relative_to_that_crate_cwd if {
+	not denied(bash_event_in(CRATE_CWD, GAP_SED_RELATIVE_TO_A_CRATE_CWD, PROVEN_CHECK))
+}
+
+test_allow_a_relative_rust_path_when_the_cwd_is_outside_crates if {
+	not denied(bash_event_in("/tmp/scratch", "sed -i 's/a/b/' src/lib.rs", UNPROVEN_SPENT))
+}
+
 test_deny_sed_in_place_on_a_quoted_literal_path if {
 	denied(bash_event(`sed -i 's/a/b/' "crates/ds2-hook/src/lib.rs"`, UNPROVEN_SPENT))
 }

@@ -105,6 +105,8 @@ class PolicyCase:
     # that an allow here is attributable to the project rule and a deny to its own reason text.
     project_only: bool = False
     stack_merge: str = STACK_ALONE
+    # The hook event's `cwd`, relative to this checkout; empty means the checkout root.
+    cwd: str = ""
 
 
 _FRIDA_DIR = Path(tempfile.mkdtemp(prefix="cupcake-frida-evidence-"))
@@ -220,7 +222,7 @@ def run_case(case: PolicyCase) -> None:
     event = {
         "session_id": f"cupcake-policy-regression-{case.name}",
         "transcript_path": f"/tmp/cupcake-policy-regression-{case.name}.jsonl",
-        "cwd": str(REPO_ROOT),
+        "cwd": str(REPO_ROOT / case.cwd),
         "hook_event_name": "PreToolUse",
         "tool_name": case.tool_name,
         "tool_input": tool_input,
@@ -630,6 +632,17 @@ def cases() -> list[PolicyCase]:
             "sed -i 's/a/b/' crates/ds2-menu-row/src/lib.rs",
             frida_evidence="none",
             expected_text="Bash spelling of the same edit",
+        ),
+        # GAP 2026-10-24, verbatim: with the Bash cwd at the crate directory the path has no
+        # `crates/` in it, and this rewrote crates/ds2-build-recommender-core/src/corpus.rs.
+        PolicyCase(
+            "deny-bash-sed-on-a-path-relative-to-a-crate-cwd",
+            False,
+            "sed -i 's/^pub const FORMAT: &str = \"ds2-build-recommender-data 21\";"
+            "/pub const FORMAT: \\&str = \"ds2-build-recommender-data 22\";/' src/corpus.rs",
+            frida_evidence="none",
+            expected_text="Bash spelling of the same edit",
+            cwd="crates/ds2-build-recommender-core",
         ),
         # The three commands that wrote a crate source past the gate on 2026-10-14, with this
         # checkout as the root and the generator's own `cd` dropped: a path through `$f`, an
