@@ -180,8 +180,12 @@ def main() -> int:
     ap.add_argument("--rings", default="", help="with --max-hp: worn rings, comma-separated names")
     ap.add_argument("--held-from", type=Path, help="give only rings the bag of --base-slot in this save holds")
     ap.add_argument("--base-slot", type=int, help="with --held-from: the slot ds2-sl2-builds.py copies from")
+    ap.add_argument("--spend", choices=["curves", "ehp"], default="curves",
+                    help="how generate_build spends the free points (the recommender's --spend); "
+                         "give the one the --best-dir sweep ranked with")
     a = ap.parse_args()
     rec = _load("ds2_builds_recommend", "ds2-builds-recommend.py")
+    rec.SPEND.update(mode=a.spend)
     data = load_data(rec)
     if a.max_hp:
         stats = {s: int(v) for s, v in (kv.split("=") for kv in a.max_hp.split(","))}
