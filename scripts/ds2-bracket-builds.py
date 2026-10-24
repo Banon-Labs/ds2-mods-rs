@@ -2,12 +2,10 @@
 """The recommender's best build at the top level of every Seamless Co-op invasion bracket, as the
 JSON `scripts/ds2-sl2-builds.py` writes into a save.
 
-    # 1. rank every weapon of every infusion at each level (slow: run in the background)
-    for inf in No_Infusion Fire Magic Lightning Dark Poison Bleed Raw Enchanted Mundane; do
-      python3 scripts/ds2-builds-recommend.py --best-weapons $inf --sweep 20,40,70,100,125,155,200,250,838 \\
-          --top 5 --json --jobs 8 > DIR/$inf.json
-    done
-    # 2. pick the top row per level across infusions and generate its whole build
+    # 1+2. rank every weapon of every infusion at each level by the moveset rate, then pick the
+    # top row per level and generate its whole build (hours: run it detached)
+    setsid nohup scripts/ds2-bracket-sweep.sh DIR > DIR/run.log 2>&1 &
+    # or step 2 alone over existing --best-weapons --json files
     python3 scripts/ds2-bracket-builds.py --best-dir DIR -o builds.json
     # check the max-HP arithmetic against a live character (scripts/frida/build-check.js)
     python3 scripts/ds2-bracket-builds.py --max-hp "VIG=10,END=8,VIT=8,ATT=6,STR=12,DEX=14,INT=6,FTH=6,ADP=3" \\
@@ -19,14 +17,21 @@ scripts/frida/bracket-scout.js; `crates/ds2-invadable-hosts/src/census.rs` BRACK
 and the last one's highest is the game's ceiling, 838.
 
 "BEST" is the recommender's own measure, nothing added here: `--best-weapons` ranks each weapon of
-an infusion at the build `optimize_build` makes for it, by the R1 damage it lands in 1.5 s against
-the bracket's average defender, which answers each attack with its best counter ring. Scores
+an infusion at the build `optimize_build` makes for it, and `scripts/ds2-bracket-sweep.sh` ranks
+by `--rank moveset`: the whole moveset's PvP rate in HP per second (`moveset_metrics`: R1/R2
+chains, roll/run/backstep/jump attacks, each engagement's damage and status per committed second,
+times reach, trade and punish factors whose weights `scripts/ds2-moveset-fit.py` fitted to what
+real builds carry) against the bracket's average defender, which answers each attack with its best
+counter ring. Files ranked by the R1 window (`--rank window`) work too. Scores
 compare across infusions, so the top row over all ten files is the level's weapon, and
 `generate_build` makes its whole build: class, stats, rings, armour under 70% load.
 
 WHAT GOES ON THE BODY: the primary in RH1, the next one-handed weapon `generate_build` lists in
-RH2, the four rings it wears, its armour, and the Estus Flask in the first item slot. The other
-weapons it lists are already in the mule's bag.
+RH2, the four rings it wears, its armour, and what the recommender's `choose_kit` carries: the
+quick items in slot order (Estus Flask, a heal, a resin when the primary is buffable, the best knife
+and urn, a defensive item), a bow, greatbow or crossbow in RH3 when one fits the stats and the load,
+and its best ammunition in the arrow or bolt slots. The other weapons it lists are already in the
+mule's bag.
 
 HP is the game's MAX, because the save's HP field is the CURRENT value and the game recomputes
 the max on load (measured 2026-10-23: a save written with 800 came up 800/1064): the recommender's
@@ -115,12 +120,20 @@ def build_for(rec, data, corpus, level: int, slot: int, inf: str, row: dict) -> 
             equip[slot_name] = {"name": piece}
     for i, ring in enumerate(worn):
         equip[f"ring{i + 1}"] = {"name": ring}
-    equip["item1"] = {"name": "Estus Flask"}
+    kit = rec.choose_kit(data, corpus, g, row["key"], inf, level)
+    for i, (name, _) in enumerate(kit["items"]):
+        equip[f"item{i + 1}"] = {"name": name}
+    if kit["launcher"]:
+        name, linf, _ = kit["launcher"]
+        equip["rh3"] = {"name": name, "infusion": linf}
+    for slot_name, (name, _) in kit["ammo"].items():
+        equip[slot_name] = {"name": name}
     cls = data.classes[g["class"]]
     return {"slot": slot, "name": short_name(level, g["primary"][0], inf), "class": g["class"],
             "class_level": int(cls["level"]), "soul_level": level, "stats": g["stats"],
             "hp": max_hp(rec, data, g["stats"], keys), "two_handed": g["two_handed"],
             "score": row["score"], "equip": equip,
+            "kit": {"items": kit["items"], "launcher": kit["launcher"], "ammo": kit["ammo"]},
             "generated": {k: g[k] for k in ("primary", "weapons_1h", "weapons_2h_only", "rings", "armor",
                                             "armor_note", "value", "objective")}}
 
