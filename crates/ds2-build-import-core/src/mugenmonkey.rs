@@ -220,6 +220,7 @@ pub fn parse(html: &str, id: u32) -> Result<Build, ParseError> {
         rings,
         spells,
         items,
+        ammo: Vec::new(),
         stats: Stats {
             vigor: stat("Vigor")?,
             endurance: stat("Endurance")?,

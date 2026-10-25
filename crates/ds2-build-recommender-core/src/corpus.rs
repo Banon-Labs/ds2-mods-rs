@@ -47,6 +47,7 @@ mod adaptive;
 mod arsenal;
 mod best;
 mod chain;
+mod kit;
 mod moveset;
 mod poise;
 mod ranged;
@@ -59,7 +60,7 @@ mod trade;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 23";
+pub const FORMAT: &str = "ds2-build-recommender-data 24";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -387,6 +388,9 @@ struct Weapon {
     weight: f64,
     /// `(stat, value)`, in the planner's order.
     require: Vec<(usize, i32)>,
+    /// Its uninfused row's elemental base and scaling, magic, fire, lightning, dark: what a
+    /// resin's buff adds to (the script's `data.weapon_elements`, `EL`).
+    elements: Option<[(f64, f64); 4]>,
     /// The R1's hyperarmor multiplier one- and two-handed, `0` for none.
     hyperarmor: [f64; 2],
     /// The counter-hit multiplier, `0` for none.
@@ -802,6 +806,11 @@ pub struct CorpusBackend {
     ring_defense: Vec<(usize, adaptive::Change)>,
     /// The script's `data.defense_buffs`, in its order.
     buffs: Vec<adaptive::Buff>,
+    /// What a build's quick slots can carry: the script's `data.heals`, `data.item_buffs` and
+    /// `data.throwables`, each in its order.
+    heals: Vec<kit::Heal>,
+    item_buffs: Vec<kit::ItemBuff>,
+    throwables: Vec<kit::Throwable>,
     /// The script's `counter_rings`, as indices into `rings`: what an adaptive defender swaps in.
     counters: Vec<usize>,
     /// Per SL bracket, the adaptive average defender over its `bracket_builds`.
@@ -1024,6 +1033,7 @@ impl CorpusBackend {
                     high_stamina,
                     weight,
                     require,
+                    elements: None,
                     hyperarmor,
                     counter,
                     damage_scale,
@@ -1043,6 +1053,7 @@ impl CorpusBackend {
                 });
             }
             "SC" => self.parse_stamina(line, &mut fields)?,
+            "EL" | "HL" | "IB" | "TH" => self.parse_kit(tag, line, &mut fields)?,
             "CH" => self.parse_chain(line, &mut fields)?,
             "PO" => self.parse_poise(line, &mut fields)?,
             "FS" | "XT" => self.parse_trade(tag, line, &mut fields)?,
@@ -4579,6 +4590,32 @@ impl RecommenderBackend for CorpusBackend {
                 &granted,
             )
         };
+        let common: Vec<usize> = self
+            .common_rings()
+            .into_iter()
+            .filter(|ring| !suggested.contains(ring) && !self.no_use.contains(ring))
+            .collect();
+        // The script's choose_kit reads the first four distinct rings the build lists, the
+        // suggested ones and then the common ones.
+        let mut kit_rings: Vec<usize> = Vec::new();
+        for &ring in suggested.iter().chain(&common) {
+            if !kit_rings.contains(&ring) && kit_rings.len() < crate::backend::SUGGESTED_RINGS {
+                kit_rings.push(ring);
+            }
+        }
+        let held: Vec<&str> = std::iter::once(primary.name.as_str())
+            .chain(weapons_1h.first().map(|row| row.weapon.as_str()))
+            .collect();
+        let kit = self.choose_kit(
+            primary,
+            infusion,
+            &stats,
+            &kit_rings,
+            &armor,
+            &held,
+            u32::from(sl),
+            defender,
+        );
         Some(GeneratedBuild {
             class: self.classes[class].name.clone(),
             sl,
@@ -4589,12 +4626,8 @@ impl RecommenderBackend for CorpusBackend {
             weapons_1h,
             weapons_2h_only,
             suggested_rings: suggested.iter().map(name).collect(),
-            common_rings: self
-                .common_rings()
-                .iter()
-                .filter(|ring| !suggested.contains(ring) && !self.no_use.contains(ring))
-                .map(name)
-                .collect(),
+            common_rings: common.iter().map(name).collect(),
+            kit,
             armor,
             armor_note,
             trade: trades.map(|(chosen, _)| chosen.public()),

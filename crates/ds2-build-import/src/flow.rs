@@ -458,6 +458,23 @@ fn apply(
             }
         }
     }
+    // Quick items and ammunition, a full stack each, one per call: see `crate::stack_items`.
+    let stacks = crate::stack_items(build);
+    if !stacks.is_empty() {
+        // SAFETY: as the grant above -- the game thread, a character loaded, the prologue
+        // re-checked inside.
+        match unsafe { crate::game::give_items(&stacks, 1) } {
+            Ok(stocked) => log_line(format_args!(
+                "{LOG_PREFIX} stocked {stocked}/{} quick item and ammunition stacks of {} for \
+                 build {}: {:?}",
+                stacks.len(),
+                crate::STACK_QUANTITY,
+                build.id,
+                stacks.iter().map(|spawn| spawn.item_id).collect::<Vec<_>>()
+            )),
+            Err(error) => log_line(format_args!("{LOG_PREFIX} stocking failed: {error}")),
+        }
+    }
 
     equip_everything(build);
     join_covenant(build);
@@ -587,6 +604,7 @@ const fn flat_slot(kind: ds2_build_import_core::equip::SlotKind, position: usize
         SlotKind::Ring => ds2_rva::ITEM_SLOT_RING_FLAT_BASE,
         SlotKind::Spell => ds2_rva::ITEM_SLOT_SPELL_FLAT_BASE,
         SlotKind::Hotbar => ds2_rva::ITEM_SLOT_HOTBAR_FLAT_BASE,
+        SlotKind::Ammo => ds2_rva::ITEM_SLOT_AMMO_FLAT_BASE,
     };
     base + position
 }

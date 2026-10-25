@@ -3397,6 +3397,30 @@ type Note = Vec<([f32; 4], String)>;
 /// is granted beside it, why armour is missing, and what Apply does with a slot the build leaves
 /// alone.
 fn slot_notes(build: &GeneratedBuild, slot: Slot, held: &Held) -> Vec<Note> {
+    let kit = &build.kit;
+    let picked = match slot {
+        Slot::Item(i) => kit.items.get(usize::from(i)),
+        Slot::Arrows(i) => kit.ammo.get(usize::from(i)).and_then(Option::as_ref),
+        Slot::Bolts(i) => kit.ammo.get(2 + usize::from(i)).and_then(Option::as_ref),
+        _ => None,
+    };
+    if let (Some(pick), Held::Item(_)) = (picked, held) {
+        let stack = if pick.name == "Estus Flask" {
+            "Apply fills the flask"
+        } else {
+            "Apply tops it up to a full stack"
+        };
+        return vec![
+            vec![(TEXT, pick.why.clone())],
+            vec![(DIM, stack.to_owned())],
+        ];
+    }
+    if let (Slot::RightHand(2), Some(launcher), Held::Item(_)) = (slot, &kit.launcher, held) {
+        return vec![
+            vec![(TEXT, launcher.why.clone())],
+            vec![(DIM, "Swap to it from the primary for range".to_owned())],
+        ];
+    }
     match (slot, held) {
         (Slot::RightHand(_) | Slot::LeftHand(_), Held::Item(_)) => vec![vec![
             (

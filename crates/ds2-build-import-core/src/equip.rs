@@ -46,6 +46,8 @@ pub enum SlotKind {
     Spell,
     /// Ten consumable quick slots.
     Hotbar,
+    /// Four: two of arrows, then two of bolts. The planner has none; a generated build fills them.
+    Ammo,
 }
 
 impl SlotKind {
@@ -53,7 +55,7 @@ impl SlotKind {
     pub const fn positions(self) -> usize {
         match self {
             SlotKind::Weapon => 6,
-            SlotKind::Armour | SlotKind::Ring => 4,
+            SlotKind::Armour | SlotKind::Ring | SlotKind::Ammo => 4,
             SlotKind::Spell => 14,
             SlotKind::Hotbar => 10,
         }
@@ -92,6 +94,11 @@ impl SlotKind {
             SlotKind::Ring => format!("ring {}", position + 1),
             SlotKind::Spell => format!("attunement {}", position + 1),
             SlotKind::Hotbar => format!("hotbar {}", position + 1),
+            SlotKind::Ammo => format!(
+                "{} {}",
+                if position < 2 { "arrows" } else { "bolts" },
+                position % 2 + 1
+            ),
         }
     }
 
@@ -103,6 +110,7 @@ impl SlotKind {
             SlotKind::Ring => "ring",
             SlotKind::Spell => "spell",
             SlotKind::Hotbar => "hotbar",
+            SlotKind::Ammo => "ammunition",
         }
     }
 }
@@ -148,6 +156,7 @@ pub fn plan(build: &Build) -> Vec<PlannedSlot> {
         (SlotKind::Ring, &build.rings),
         (SlotKind::Spell, &build.spells),
         (SlotKind::Hotbar, &build.items),
+        (SlotKind::Ammo, &build.ammo),
     ] {
         for (position, name) in names.iter().enumerate() {
             if is_empty_slot(name) || position >= kind.positions() {
@@ -181,6 +190,7 @@ mod tests {
             rings: Vec::new(),
             spells: spells.iter().map(|s| (*s).into()).collect(),
             items: Vec::new(),
+            ammo: Vec::new(),
             stats: Stats::default(),
         }
     }

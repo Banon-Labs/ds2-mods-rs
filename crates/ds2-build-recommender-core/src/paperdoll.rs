@@ -220,6 +220,11 @@ impl Paperdoll {
     }
 }
 
+/// The id the Estus Flask's icon is filed under: `ic_0060155000.tpf`, the unsafe row's. The name
+/// is three safe rows (60155010/20/30), none with an icon file of its own
+/// (`scripts/ds2-item-icons.py locate`, 2026-09-30).
+const ESTUS_ICON: u32 = 60_155_000;
+
 /// What `slot` holds in the build Apply is handed.
 fn read(import: &Build, slot: Slot) -> Held {
     match slot {
@@ -231,8 +236,9 @@ fn read(import: &Build, slot: Slot) -> Held {
         Slot::Chest => worn(import.armor.get(1), Held::Bare),
         Slot::Hands => worn(import.armor.get(2), Held::Bare),
         Slot::Legs => worn(import.armor.get(3), Held::Bare),
-        // A generated build names no quick item and no ammunition.
-        Slot::Item(_) | Slot::Arrows(_) | Slot::Bolts(_) => Held::Kept,
+        Slot::Item(i) => worn(import.items.get(usize::from(i)), Held::Kept),
+        Slot::Arrows(i) => worn(import.ammo.get(usize::from(i)), Held::Kept),
+        Slot::Bolts(i) => worn(import.ammo.get(2 + usize::from(i)), Held::Kept),
     }
 }
 
@@ -262,7 +268,11 @@ fn worn(name: Option<&String>, empty: Held) -> Held {
         Some(name) if !is_empty_slot(name) => Held::Item(Piece {
             name: name.clone(),
             infusion: None,
-            item: weapons::item_id(name),
+            item: if name == "Estus Flask" {
+                Some(ESTUS_ICON)
+            } else {
+                weapons::item_id(name)
+            },
         }),
         _ => empty,
     }
@@ -334,7 +344,8 @@ mod tests {
     }
 
     /// The stub build as Apply leaves it: its weapon in right hand 1, its three rings, its one
-    /// piece of armour with the rest bare, and every other slot as the character has it.
+    /// piece of armour with the rest bare, its kit in the belt and quivers, and every other slot
+    /// as the character has it.
     #[test]
     fn the_stub_build_fills_what_apply_equips_and_keeps_the_rest() {
         let doll = Paperdoll::of(&stub(false));
@@ -354,12 +365,19 @@ mod tests {
             Slot::LeftHand(1),
             Slot::LeftHand(2),
             Slot::Ring(3),
-            Slot::Item(0),
-            Slot::Arrows(1),
-            Slot::Bolts(0),
+            Slot::Item(5),
+            Slot::Item(9),
         ] {
             assert_eq!(doll.held(slot), &Held::Kept, "{slot:?}");
         }
+        let name = |slot: Slot| match doll.held(slot) {
+            Held::Item(piece) => piece.name.clone(),
+            other => panic!("{slot:?} holds {other:?}"),
+        };
+        assert_eq!(name(Slot::Item(0)), "Estus Flask");
+        assert_eq!(name(Slot::Item(4)), "Small Orange Burr");
+        assert_eq!(name(Slot::Arrows(1)), "Iron Arrow");
+        assert_eq!(name(Slot::Bolts(0)), "Wood Bolt");
         let names: Vec<&str> = (0..3)
             .map(|i| match doll.held(Slot::Ring(i)) {
                 Held::Item(ring) => ring.name.as_str(),

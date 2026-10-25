@@ -6771,10 +6771,19 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             at0(5) per(5), in DMG order
 #   RE bracket evade(99)                                      roll_evade at the bracket for agility
 #                                                             rows 1-99 (none unread)
+#   EL base:coef(4)                                           the last W's data.weapon_elements,
+#                                                             magic fire lightning dark: what
+#                                                             buff_attack reads
+#   HL name hp seconds                                        data.heals, in its order
+#   IB name type scale flat seconds                           data.item_buffs, in its order: type a
+#                                                             DMG index, else poison or bleed
+#   TH name mv:lower:flat(5) ..                               data.throwables, in its order: each
+#                                                             of its hits, flat comma-separated
+#                                                             in DMG order
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 23"
+BACKEND_FORMAT = "ds2-build-recommender-data 24"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -6990,6 +6999,9 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
             out.append("\t".join(["I", INFUSION_CODE[inf], *(_num(atk.get(k, 0)) for k in ATK_KEYS),
                                   *(_num(sc.get(k, 1 if k == "modifier" else 0)) for k in SCALE_KEYS),
                                   *(_num(float(rate.get(k, 0.0))) for k in DMG)]))
+        we = data.weapon_elements.get(key)
+        if we:  # what buff_attack reads, for choose_kit's resins
+            out.append("\t".join(["EL", *(f"{_num(float(we[e][0]))}:{_num(float(we[e][1]))}" for e in ELEMENTS)]))
         for two in (False, True):
             tl = r1_timeline(attacks, w["name"], two) or r1_timeline(attacks, key.replace("_", " "), two)
             if tl:
@@ -7036,6 +7048,16 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
     for name, a in sorted(data.ammo.items()):
         out.append("\t".join(["AM", name, _num(a["type"]), *(_num(a["flat"].get(k, 0)) for k in DMG),
                               *(_num(a["status"].get(k, 0)) for k in STATUS_PROC), _num(a["mv"]), _num(a["lower"])]))
+    # choose_kit's quick items: the heals, the weapon buffs (resins) and the thrown items
+    for name, h in data.heals.items():
+        out.append("\t".join(["HL", name, _num(h["hp"]), _num(float(h["seconds"]))]))
+    for name, b in data.item_buffs.items():
+        out.append("\t".join(["IB", name, str(DMG.index(b["type"])) if b["type"] in DMG else b["type"],
+                              _num(float(b["scale"])), _num(b["flat"]), _num(float(b["seconds"]))]))
+    for name, t in data.throwables.items():
+        out.append("\t".join(["TH", name, *(f"{_num(h['mv'])}:{_num(h['lower'])}:"
+                                             + ",".join(_num(h["flat"].get(k, 0)) for k in DMG)
+                                             for h in t["hits"])]))
     floors = bracket_floors(data, corpus, r1)
     for i, (lo, _) in enumerate(SL_BRACKETS):
         dfn, _ = bracket_defense(data, corpus, lo)
@@ -7491,8 +7513,11 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append(f"pub const ADAPTIVE_GENERATE: AdaptiveGenerateCases = {_rs(a_gen)};\n")
     flexes: list = []  # the generated builds, as flexibility() questions: filled by expect_builds
     offhands: list = []  # every GENERATE and GENERATE_ONE_HANDED build's left hand
-    opt, gen = expect_builds(data, corpus, EXPECT_BUILDS, EXPECT_NAKED, "two", flexes, offhands=offhands)
-    opt_one, gen_one = expect_builds(data, corpus, EXPECT_ONE_HANDED, [], "one", flexes, offhands=offhands)
+    kits: list = []  # and its quick items, launcher and ammunition
+    opt, gen = expect_builds(data, corpus, EXPECT_BUILDS, EXPECT_NAKED, "two", flexes, offhands=offhands,
+                             kits=kits)
+    opt_one, gen_one = expect_builds(data, corpus, EXPECT_ONE_HANDED, [], "one", flexes, offhands=offhands,
+                                     kits=kits)
     out.append("// weapon, infusion, sl, objective -> class, two-handed, stats, value.")
     out.append(f"pub const OPTIMIZE: OptimizeCases = {_rs(opt)};\n")
     out.append("// weapon, infusion, sl, objective, allow naked -> class, two-handed, stats, 1H rows, 2H-only")
@@ -7505,6 +7530,9 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append("// weapon, infusion, sl, objective, allow naked, grip -> the left hand choose_offhand put")
     out.append("// beside it (expect_offhand), None for a launcher: GENERATE's and GENERATE_ONE_HANDED's.")
     out.append(f"pub const OFFHAND: OffhandCases = {_rs(offhands)};\n")
+    out.append("// weapon, infusion, sl, objective, allow naked, grip -> choose_kit's quick items (name, why),")
+    out.append("// launcher (name, infusion code, why), ammunition by slot ammo1-4 (name, why), max HP.")
+    out.append(f"pub const KIT: KitCases = {_rs(kits)};\n")
     gen_class = []
     for cls, weapon, inf, sl, objective in EXPECT_AS_CLASS:
         _, got = expect_builds(data, corpus, [(weapon, inf, sl, objective)], [], "two", only_class=cls)
@@ -7554,6 +7582,15 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     return backend_expectations_rest(data, corpus, out, mins, flexes)
 
 
+def expect_kit(kit: dict):
+    """choose_kit's answer as a KIT fixture tuple: the quick items, the launcher (None for none),
+    every ammunition slot in ARROW_SLOTS + BOLT_SLOTS order (None for an empty one), max HP."""
+    launcher = kit["launcher"] and _Some((kit["launcher"][0], INFUSION_CODE[kit["launcher"][1]],
+                                          kit["launcher"][2]))
+    ammo = [kit["ammo"].get(s) for s in ARROW_SLOTS + BOLT_SLOTS]
+    return ([tuple(i) for i in kit["items"]], launcher, [a and _Some(tuple(a)) for a in ammo], kit["max_hp"])
+
+
 def expect_offhand(o: dict | None):
     """offhand_summary's answer as an OFFHAND fixture tuple: left hand and its infusion code ("" for
     none), the stance rate, the primary's alone, the home stance, every stance's rate, per family
@@ -7572,10 +7609,11 @@ def expect_offhand(o: dict | None):
 
 def expect_builds(data: Data, corpus: list[Build], cases: list, naked_cases: list, grip: str,
                   flexes: list | None = None, only_class: str | None = None, defender=None,
-                  offhands: list | None = None):
+                  offhands: list | None = None, kits: list | None = None):
     """The script's --optimize and --generate answers for `cases` (plus `naked_cases` generated with
     --allow-naked) at `grip`, and for `only_class` alone when given, against `defender`
-    (defender_defense), as fixture tuples. `offhands` gets each generated build's OFFHAND tuple."""
+    (defender_defense), as fixture tuples. `offhands` gets each generated build's OFFHAND tuple,
+    `kits` its KIT tuple (expect_kit)."""
     arr = lambda d: [int(d[s]) for s in STATS]
     opt, gen = [], []
     for weapon, inf, sl, objective in cases:
@@ -7592,6 +7630,9 @@ def expect_builds(data: Data, corpus: list[Build], cases: list, naked_cases: lis
             continue
         if offhands is not None:
             offhands.append((weapon, INFUSION_CODE[inf], sl, objective, naked, grip, expect_offhand(g["offhand"])))
+        if kits is not None:
+            kits.append((weapon, INFUSION_CODE[inf], sl, objective, naked, grip,
+                         expect_kit(choose_kit(data, corpus, g, weapon, inf, sl, defender))))
         rings, suggested = g["rings"], []
         while len(rings) >= 3 and rings[0] == rings[1] == rings[2]:
             suggested.append(rings[0])

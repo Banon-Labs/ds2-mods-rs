@@ -50,7 +50,7 @@ impl Weapon {
     }
 
     /// The script's `shot_stamina`: menu stamina one shot costs.
-    fn shot_stamina(&self) -> Option<f64> {
+    pub(super) fn shot_stamina(&self) -> Option<f64> {
         self.stamina.map(|cost| cost.ranged / STAMINA_UNIT)
     }
 }

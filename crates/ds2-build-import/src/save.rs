@@ -295,6 +295,7 @@ fn json(build: &Build) -> String {
         ("rings", &build.rings),
         ("spells", &build.spells),
         ("items", &build.items),
+        ("ammo", &build.ammo),
     ] {
         let joined = list
             .iter()

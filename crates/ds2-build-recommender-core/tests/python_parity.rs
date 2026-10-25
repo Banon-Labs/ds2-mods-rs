@@ -294,6 +294,25 @@ type OffhandCase = (
     OffhandRow,
 );
 type OffhandCases = &'static [OffhandCase];
+/// (name, why).
+type Pick = (&'static str, &'static str);
+/// The quick items, the launcher (name, infusion code, why), the four ammunition slots, max HP.
+type KitRow = (
+    &'static [Pick],
+    Option<(&'static str, &'static str, &'static str)>,
+    &'static [Option<Pick>],
+    u32,
+);
+/// weapon, infusion code, sl, objective, allow naked, grip ("two"/"one"), then the kit.
+type KitCases = &'static [(
+    &'static str,
+    &'static str,
+    u16,
+    &'static str,
+    bool,
+    &'static str,
+    KitRow,
+)];
 
 /// `got` as the script's `expect_offhand` writes it, to compare with a fixture's.
 fn offhand_row(got: Option<&backend::Offhand>) -> Option<OffhandView> {
@@ -1511,6 +1530,8 @@ fn every_generated_grant_names_a_real_item() {
             .chain(import.armor.iter().cloned())
             .chain(import.rings.iter().cloned())
             .chain(import.spells.iter().cloned())
+            .chain(import.items.iter().cloned())
+            .chain(import.ammo.iter().cloned())
             .chain(extras.into_iter().map(|(name, _)| name));
         for name in names {
             if is_empty_slot(&name) {
@@ -2022,6 +2043,59 @@ fn code_of(infusion: Infusion) -> String {
         .chars()
         .find(|&c| weapons::infusion_for_code(c) == Some(infusion))
         .map_or_else(String::new, String::from)
+}
+
+#[test]
+fn the_kit_is_the_scripts() {
+    let (mut launchers, mut filled) = (0, 0);
+    for &(weapon, code, sl, goal, naked, grip, want) in expected::KIT {
+        let grip = if grip == "one" {
+            Grip::OneHanded
+        } else {
+            Grip::TwoHanded
+        };
+        let got = backend()
+            .generate_build(
+                weapon,
+                infusion(code),
+                sl,
+                objective(goal),
+                naked,
+                grip,
+                &STATIC,
+            )
+            .unwrap_or_else(|| panic!("{weapon} SL {sl}: the script built it"))
+            .kit;
+        let at = format!("{weapon} {code} SL {sl} {goal} naked={naked}");
+        let pick = |p: &backend::KitPick| (p.name.clone(), p.why.clone());
+        let own = |(name, why): Pick| (name.to_owned(), why.to_owned());
+        let (items, launcher, ammo, max_hp) = want;
+        assert_eq!(got.max_hp, max_hp, "{at}: max HP");
+        assert_eq!(
+            got.items.iter().map(pick).collect::<Vec<_>>(),
+            items.iter().copied().map(own).collect::<Vec<_>>(),
+            "{at}: quick items"
+        );
+        assert_eq!(
+            got.launcher
+                .as_ref()
+                .map(|l| (l.name.clone(), code_of(l.infusion), l.why.clone())),
+            launcher.map(|(name, code, why)| (name.to_owned(), code.to_owned(), why.to_owned())),
+            "{at}: launcher"
+        );
+        assert_eq!(
+            got.ammo
+                .iter()
+                .map(|a| a.as_ref().map(pick))
+                .collect::<Vec<_>>(),
+            ammo.iter().map(|a| a.map(own)).collect::<Vec<_>>(),
+            "{at}: ammunition"
+        );
+        launchers += usize::from(launcher.is_some());
+        filled += usize::from(items.len() >= backend::QUICK_MIN);
+    }
+    assert!(launchers >= 1, "no case picked a launcher");
+    assert_eq!(filled, expected::KIT.len(), "every case fills QUICK_MIN");
 }
 
 #[test]
