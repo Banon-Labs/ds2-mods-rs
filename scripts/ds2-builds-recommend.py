@@ -3008,10 +3008,10 @@ RANKS = {"window": None, "per-stamina": "damage_per_stamina", "bar": "bar_damage
 # he can press. Time only: DS2's hitbox geometry and the roll's root motion were not read, so a
 # roller is in the path until the 110300 window ends and out of it after (INFERRED).
 
-#: The roll clip whose i-frames are scored. c000100_pl.tae has four roll pairs
-#: (docs/DS2-BUILD-MECHANICS.md "Roll i-frames"); which one the Morpheme network's SM_Dodge plays
-#: at which load was not traced. 120020 is taken: full i-frames (110100) to 0.133 s, then 110300
-#: 0.100-0.567 s at the agility rate (INFERRED choice).
+#: The roll clip whose i-frames are scored: full i-frames (110100) to 0.133 s, then 110300
+#: 0.100-0.567 s at the agility rate. The four dodge-roll clips 120020/21/30/31 carry the same
+#: windows, and below 70% load (every build here) the roll plays at speed 1.0
+#: (docs/DS2-BUILD-MECHANICS.md "Which roll, at which load"), so the choice does not matter.
 ROLL_ANIM = 120020
 TAE_IFRAME_FULL, TAE_IFRAME_AGILITY = 110100, 110300
 #: Reaction, network and timing constants: er-mods-rs's (er-mechanics-ashes.py, all INFERRED there:

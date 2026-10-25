@@ -232,8 +232,28 @@ The builder stores step, roll and jump rates, times 0.01, at its output's `+0x7c
 So a roll's i-frames are `rate x` its 110300 window, from the window's start. In `c000100_pl.tae`
 the 110300 windows are 110011/110031 `0.133-0.500 s`, 110051/110071 `0.333-0.667 s`,
 120020/120021/120030/120031 `0.100-0.567 s` (these four also carry a 110100 window to 0.133 s) and
-140020 `0-0.433 s`. Which of these the roll plays at which equip load was not traced (the
-Morpheme network picks the animation); the rate, not the window, is what AGL moves.
+140020 `0-0.433 s`. The rate, not the window, is what AGL moves.
+
+**Which roll, at which load** (EXE + network + regulation, read 2026-10-24). The 110011-110071
+clips are backsteps (`a00_11_00x1_StepBack*` in the anibnd) and 140020 is the fall's
+`RollLanding`. The dodge roll's clips are `a00_12_0020/0021/0030/0031_DodgeRolling{Short,Long}`,
+whose 110100/110300 windows are identical, so which one plays does not move the i-frames; 120040
+`DodgeRollingFailed` has none. Load reaches the roll only as play speed:
+
+- `ChrDodgeMotionCtrl` (vtable `0x1410e2530`) binds `DodgeDistance, DodgeLoadWeight,
+  DodgeDirection, DodgeSpeed, Step...` (`0x14035f440`). `c0001.nmb` has no `DodgeLoadWeight`
+  control parameter, so that binding drives nothing.
+- Its update `0x14035f750` sets `DodgeSpeed` (slot 3) to 1.0, or, when `[[chr+0xb8]+0x9f] == 2`,
+  to `PlayerGameParamCalculator` slot 7 (`0x140381960` -> `0x1403201b0`) with id 0x1a: a
+  piecewise-linear lookup of `ChrEquipLoadParam` row 26 against row 1's load-ratio points, at
+  `[[chr+0xb0]+0x30] x 100`.
+- Row 1 is `0, 30, 70, 100, 120` (%); row 26 is `1.0, 1.0, 1.0, 0.9, 0.95`. `DodgeSpeed` feeds the
+  three play-speed nodes (type 125) `0x17f7/0x17fe/0x1800`.
+
+So below 70% load every roll plays at 1.0 and has the same i-frames in seconds; only AGL moves
+them. From 70% to 100% the roll slows to 0.9, which stretches its windows by up to 1/0.9 in real
+time. `RollAnim`/`RollAnim_Speed` are not the dodge: they are bound with `SlopeRoll`/`PitchAnim`
+(`0x140363600`), body tilt, and `RollAnim_Speed` feeds no node.
 
 ## 4. Stamina
 
@@ -315,8 +335,8 @@ maxHP = hpMax[VGR] + additionalHp[END] + additionalHp[VIT] + additionalHp[ATT] +
 - How two max-load multipliers combine (product or sum).
 - The exact interpolation rule and the stat it reads (base or modified) for the scaled bonus
   (Ring of the Embedded, Chime of Screams). The rule above matches SoulsPlanner but is not traced.
-- Units of `evasionInvincibleTime` (it tracks about 26 x the roll rate). Roll i-frames in frames
-  need which animation the roll plays (section 3, "Roll i-frames").
+- Units of `evasionInvincibleTime` (it tracks about 26 x the roll rate). The dodge roll's clip no longer
+  matters for it (section 3, "Which roll, at which load").
 - What roll i-frames are worth against damage. In hits to kill, a roll avoids a randomly timed
   hit with probability `rate x W / D` (W the 110300 window, D the roll's committed length), and a
   build survives `1 / (1 - s x W / D x rate)` times as many hits when a share `s` of them is met
@@ -328,8 +348,8 @@ maxHP = hpMax[VGR] + additionalHp[END] + additionalHp[VIT] + additionalHp[ATT] +
   middle of the presses that escape; a hit live before the press, or after the i-frames while he
   is still inside the 110300 window, catches him. Against each SL bracket's R1s that avoids about
   0.20 of swings at agility row 1, 0.38 at row 10 and 0.42-0.45 from row 20 on (`RE` records).
-  Every constant of the behaviour is INFERRED, and so is the clip: 120020 is scored, as
-  untraced as above.
+  Every constant of the behaviour is INFERRED. The clip is not: all four dodge-roll clips share
+  their windows and play at speed 1.0 below 70% load (section 3).
 - That the displayed AGL is read from MenuStatsParam by the same index (it matches exactly).
 - Whether a ring's max-HP factor multiplies the whole of section 7's sum. The recommender assumes
   it does.
