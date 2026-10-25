@@ -234,8 +234,8 @@ impl CorpusBackend {
         let defending = self.defending(sl, against);
         let ar = self.attack_rating(primary.infusion(infusion), &eff, rings);
         // `int(hit_points(eff) * prod(...))`: the product is over the rings' HP factors in order.
-        #[allow(clippy::cast_possible_truncation)]
         // DEBT: ds2-mods-rs-59p7 -- Python's `int()` of a max HP, always in u32 range.
+        #[allow(clippy::cast_possible_truncation)]
         let hp = (self.hit_points(&eff) * self.ring_factor(rings, Factor::Hp)) as i64;
 
         let mut items = vec![KitPick {
@@ -248,8 +248,8 @@ impl CorpusBackend {
             .filter(|heal| heal.name != "Estus Flask" && heal.seconds > 0.0)
             .map(|heal| {
                 let got = heal.hp.min(hp);
-                #[allow(clippy::cast_precision_loss)]
                 // DEBT: ds2-mods-rs-59p7 -- hit points, far inside f64's exact integers.
+                #[allow(clippy::cast_precision_loss)]
                 let per = got as f64 / heal.seconds.max(0.1);
                 (
                     per,
