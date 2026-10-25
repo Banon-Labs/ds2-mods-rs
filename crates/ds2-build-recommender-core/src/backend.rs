@@ -247,6 +247,23 @@ pub struct WeaponMetrics {
     /// The same rate with the left hand stance swapping pairs it with, under
     /// [`crate::model::Rank::Stance`] only.
     pub stance: Option<Offhand>,
+    /// What else the build's stats swing well, under [`crate::model::Rank::Moveset`] and
+    /// [`crate::model::Rank::Stance`], for the rows ranked by it.
+    pub arsenal: Option<Arsenal>,
+}
+
+/// The other weapon classes a build's stats swing well: the script's `arsenal`. The row's score
+/// is `value`.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Arsenal {
+    /// The mean of the row's own rate and its best other classes' (each at most the row's own),
+    /// a missing class `0`.
+    pub mean: f64,
+    /// The row's own rate blended with `mean`: what the row ranks by.
+    pub value: f64,
+    /// Its best other classes, best first: class, weapon (soulsplanner key), infusion, whether
+    /// two-handed, and the moveset rate in HP a second.
+    pub classes: Vec<(String, String, Infusion, bool, f64)>,
 }
 
 /// What the left hand holds beside the primary, and the build's rate swapping stance with it: the

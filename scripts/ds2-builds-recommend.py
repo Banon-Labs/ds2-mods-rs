@@ -4758,6 +4758,111 @@ def row_status(data: Data, corpus: list[Build], sl: int, defender, weapon: str, 
     return out
 
 
+# --------------------------------------------------------------------------------------------
+# arsenal: what else a build's stats swing well
+#
+# A build's stats are optimized for one weapon, but a build that also swings other weapon classes
+# well can swap movesets to what the fight needs. arsenal() reads, at the row's own stats and
+# rings, the best moveset rate each other melee class reaches, and best_weapons ranks the
+# moveset and stance rows by a blend of the primary's rate and the mean of the build's best
+# ARSENAL_K slots. Only weapons whose uninfused scaling stays on the primary's own stats count:
+# no STR weapon on a DEX build unless the primary is innately both (scaling_axis).
+
+#: The stat line an uninfused weapon's scaling is read at, and how far each stat is raised
+#: (scaling_axis).
+AXIS_BASE, AXIS_STEP = 20, 20
+#: A weapon scales on every requirement stat whose gain is at least this share of its largest.
+#: Over the 290 melee and ranged weapons with an uninfused row, the second stat's gain over the
+#: first's is 0.06 at the 25th percentile, 0.33 at the median, 0.52 at the 75th and 0.80 at the
+#: 90th (scripts/ds2-arsenal-evidence.py axes, 2026-10-24): 0.75 makes the top tenth or so
+#: two-stat weapons -- Spear 21/27, Yorgh's Spear 29/22, Berserker Blade 20/26 -- and keeps the
+#: Ashen Warrior Sword (30 STR / 21 DEX, 0.70) a STR weapon.
+AXIS_BOTH = 0.75
+#: Weapon classes that are not a melee moveset to swap to: shields, catalysts and launchers.
+NOT_ARSENAL = {"Normal Shield", "Small Shield", "Greatshield", "Staff", "Chime", "Flame", "Bow", "Greatbow",
+               "Crossbow"}
+#: Per class, how many of its weapons -- best one-hit damage first -- have their moveset scored.
+ARSENAL_SHORTLIST = 2
+#: The arsenal's slots: the primary and its best ARSENAL_K - 1 other classes. The SL 155 run
+#: (bracket-ehp-155, the top five rows of every infusion) averages 8.2 other classes within 0.8 of
+#: the row's own moveset rate (scripts/ds2-arsenal-evidence.py arsenal, 2026-10-24): a build
+#: below that baseline is thinner than the top builds are.
+ARSENAL_K = 9
+#: The arsenal mean's share of a row's ranked value; the primary's own rate keeps the rest.
+ARSENAL_WEIGHT = 0.25
+#: best_weapons reads the arsenal of its rows best first until this many are in their final
+#: order; the rest keep their own score (an arsenal never raises a row, so none of them can pass).
+ARSENAL_EXACT = 15
+
+
+def scaling_axis(data: Data, weapon: str) -> frozenset:
+    """The requirement stats `weapon` uninfused scales on: each whose raise from AXIS_BASE by
+    AXIS_STEP (the others at AXIS_BASE or the weapon's requirement) adds at least AXIS_BOTH of the
+    largest such gain to its attack rating. Empty when no stat adds any. Cached on `data`."""
+    cache = data.__dict__.setdefault("_axis_cache", {})
+    if weapon not in cache:
+        base = dict.fromkeys(STATS, AXIS_BASE)
+        for s, v in (data.weapons[weapon].get("require") or {}).items():
+            base[s] = max(base.get(s, 0), int(v))
+        ar0 = sum(attack_rating(data, weapon, "No_Infusion", base).values())
+        gains = {}
+        for s in REQ_STATS:
+            up = dict(base)
+            up[s] += AXIS_STEP
+            gains[s] = sum(attack_rating(data, weapon, "No_Infusion", up).values()) - ar0
+        top = max(gains.values())
+        cache[weapon] = frozenset(s for s in REQ_STATS if top > 0 and gains[s] >= AXIS_BOTH * top)
+    return cache[weapon]
+
+
+def arsenal(data: Data, corpus: list[Build], attacks: dict, weapon: str, eff: dict, rings, sl: int, dfn: dict,
+            own: float, defender=None) -> dict:
+    """The build's arsenal at effective stats `eff` with `rings`: per melee class other than
+    `weapon`'s, its best moveset rate (moveset_metrics, in the better grip `eff` wields) among the
+    weapons whose scaling_axis is within `weapon`'s, each at the infusion with the most one-hit
+    damage against `dfn` -- the class's ARSENAL_SHORTLIST best by that damage scored. Unclassed
+    weapons are left out.
+
+    `own` is the row's own rate. The arsenal mean is (own + the best ARSENAL_K - 1 class rates,
+    each capped at own) / ARSENAL_K, a missing class 0; the value is (1 - ARSENAL_WEIGHT) x own +
+    ARSENAL_WEIGHT x that mean, never above own. Returns {"arsenal": the mean, "arsenal_value":
+    the value, "arsenal_classes": [[class, weapon, infusion, two-handed, rate], ...] best first}."""
+    axis = scaling_axis(data, weapon)
+    mine = data.weapon_class.get(weapon)
+    shortlist = {}
+    for key, w in data.weapons.items():
+        cls = data.weapon_class.get(key)
+        if (not cls or cls == mine or cls in NOT_ARSENAL or key in EMPTY or CATALYST.search(key)
+                or w.get("isShield") or key in data.ranged or "No_Infusion" not in (w.get("infusions") or {})
+                or not weapon_ok(data, key, eff, True) or not scaling_axis(data, key) <= axis):
+            continue
+        best = None
+        for inf in w["infusions"]:
+            ar = attack_rating(data, key, inf, eff, rings)
+            hit = sum(damage(k, v, dfn[k]) for k, v in ar.items())
+            if ar and (best is None or hit > best[0]):
+                best = (hit, inf)
+        if best:
+            shortlist.setdefault(cls, []).append((best[0], key, best[1]))
+    classes = []
+    for cls, cands in shortlist.items():
+        top = None
+        for _, key, inf in sorted(cands, key=lambda c: -c[0])[:ARSENAL_SHORTLIST]:
+            for two in (False, True):
+                if not weapon_ok(data, key, eff, two):
+                    continue
+                m = moveset_metrics(data, corpus, attacks, key, inf, two, eff, rings, sl, dfn, defender)
+                if m and (top is None or m["moveset"] > top[4]):
+                    top = [cls, key, inf, two, m["moveset"]]
+        if top:
+            classes.append(top)
+    classes.sort(key=lambda c: -c[4])
+    classes = classes[:ARSENAL_K - 1]
+    mean = (own + sum(min(own, c[4]) for c in classes)) / ARSENAL_K
+    return {"arsenal": mean, "arsenal_value": (1 - ARSENAL_WEIGHT) * own + ARSENAL_WEIGHT * mean,
+            "arsenal_classes": classes}
+
+
 def best_weapons(data: Data, corpus: list[Build], inf: str, sl: int, objective: str = "damage",
                  grip: str = "two", flex_weight: float | None = None, spells=(), only_class: str | None = None,
                  use_floors: bool = True, defender=None, weapon_class: str | None = None, window: float = 0.0,
@@ -4778,7 +4883,29 @@ def best_weapons(data: Data, corpus: list[Build], inf: str, sl: int, objective: 
             rows = pool.map(_best_weapon_job, keys)
     else:
         rows = [best_weapon_row(data, corpus, key, *args) for key in keys]
-    return sorted((r for r in rows if r), key=lambda r: -r[0])
+    rows = sorted((r for r in rows if r), key=lambda r: -r[0])
+    if objective == "damage" and window and rank in ("moveset", "stance"):
+        rows = with_arsenal(data, corpus, attacks, rows, sl, defender)
+    return rows
+
+
+def with_arsenal(data: Data, corpus: list[Build], attacks: dict, rows: list[tuple], sl: int, defender=None):
+    """best_weapons' rows (best first) ranked by their arsenal_value: each row's arsenal (its
+    metrics gain arsenal()'s keys and its score becomes the value) read best first until
+    ARSENAL_EXACT rows have one and the next row's own score is no higher than the
+    ARSENAL_EXACT-th value. The rows after keep their own score and no arsenal keys; as an arsenal
+    never raises a score, none of them belongs above those."""
+    dfn, _ = defender_defense(data, corpus, sl, defender)
+    out, values = [], []
+    for i, r in enumerate(rows):
+        if len(values) >= ARSENAL_EXACT and r[0] <= sorted(values, reverse=True)[ARSENAL_EXACT - 1]:
+            out.extend(rows[i:])
+            break
+        score, key, val, cls, two, st, worn, label, ammo, m = r
+        a = arsenal(data, corpus, attacks, key, gear_stats(data, st, worn), worn, sl, dfn, score, defender)
+        values.append(a["arsenal_value"])
+        out.append((a["arsenal_value"], key, val, cls, two, st, worn, label, ammo, {**m, **a}))
+    return sorted(out, key=lambda r: -r[0])
 
 
 _row_attacks: dict = {}  # id(data) -> load_attacks(data), read once for every row_metrics
@@ -7617,6 +7744,12 @@ def expect_best_weapons(data: Data, corpus: list[Build]) -> list:
                      (float(f["f_reach"]), float(f["f_stagger"]), float(f["f_trade"]), float(f["f_punish"]),
                       float(f["f_stamina"]), opt(f["caught"])))
                     for fam, f in m["families"].items()]))
+            kept = r[9]
+            arsenal_row = None
+            if "arsenal" in kept:
+                arsenal_row = _Some((float(kept["arsenal"]), float(kept["arsenal_value"]),
+                                     [(cl, k, INFUSION_CODE[i], t, float(rate))
+                                      for cl, k, i, t, rate in kept["arsenal_classes"]]))
             rows.append((float(score), key, float(val), data.classes[c]["name"], two, [int(st[s]) for s in STATS],
                          [data.rings[x]["name"] for x in worn], label,
                          _Some((ammo["ammo"] or "", ammo["shot"])) if ammo else None,
@@ -7626,7 +7759,7 @@ def expect_best_weapons(data: Data, corpus: list[Build]) -> list:
                           opt(m.get("poise_damage_per_hit")), opt_int(m.get("armor_break")),
                           opt_int(m.get("hits_to_stagger")), float(m.get("defender_poise", 0.0))),
                          status, opt(m.get("damage_with_status")), stamina, moveset,
-                         expect_offhand(m.get("offhand"))))
+                         expect_offhand(m.get("offhand")), arsenal_row))
         out.append((INFUSION_CODE[inf], sl, objective, grip, cls, float(window), rank, with_status, defender or [],
                     buff, rows))
     return out

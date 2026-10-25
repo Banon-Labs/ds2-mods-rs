@@ -257,7 +257,16 @@ type BestRow = (
     StaminaMetrics,
     MovesetMetrics,
     OffhandRow,
+    ArsenalRow,
 );
+/// The other classes a build's stats swing well (the script's `arsenal`): the mean, the value
+/// the row ranks by, then per class its name, weapon key, infusion code, whether two-handed and
+/// moveset rate.
+type ArsenalRow = Option<(
+    f64,
+    f64,
+    &'static [(&'static str, &'static str, &'static str, bool, f64)],
+)>;
 /// The left hand stance swapping pairs a weapon with (the script's `expect_offhand`): its name
 /// and infusion code ("" for none), the stance rate, the primary's alone, the home stance, every
 /// stance's rate, per family (family, stance, engagement, rate), power stance (owner, STR and DEX
@@ -1775,7 +1784,7 @@ fn best_weapons_is_the_scripts() {
     let (mut compared, mut launchers, mut timed, mut poised, mut procs) = (0, 0, 0, 0, 0);
     let (mut held, mut staggered, mut barred) = (0, 0, 0);
     let (mut ranked_moveset, mut self_charged, mut moved) = (0, 0, 0);
-    let (mut ranked_stance, mut paired) = (0, 0);
+    let (mut ranked_stance, mut paired, mut armed) = (0, 0, 0);
     for &(code, sl, goal, grip, class, window, by, with_status, keys, who, want) in
         expected::BEST_WEAPONS
     {
@@ -1820,6 +1829,7 @@ fn best_weapons_is_the_scripts() {
                 stamina,
                 moveset,
                 offhand,
+                arsenal,
             ) = *want;
             let at = format!("{case}: {key}");
             assert_eq!(row.weapon, key, "{case}");
@@ -1937,6 +1947,33 @@ fn best_weapons_is_the_scripts() {
                 offhand_want(offhand),
                 "{at}: stance swapping"
             );
+            let got_arsenal = m.arsenal.as_ref().map(|a| {
+                let classes: Vec<_> = a
+                    .classes
+                    .iter()
+                    .map(|(class, key, inf, two, rate)| {
+                        (class.clone(), key.clone(), *inf, *two, *rate as f32)
+                    })
+                    .collect();
+                (a.mean as f32, a.value as f32, classes)
+            });
+            let want_arsenal = arsenal.map(|(mean, value, classes)| {
+                let classes: Vec<_> = classes
+                    .iter()
+                    .map(|&(class, key, code, two, rate)| {
+                        (
+                            class.to_owned(),
+                            key.to_owned(),
+                            infusion(code),
+                            two,
+                            rate as f32,
+                        )
+                    })
+                    .collect();
+                (mean as f32, value as f32, classes)
+            });
+            assert_eq!(got_arsenal, want_arsenal, "{at}: arsenal");
+            armed += usize::from(arsenal.is_some_and(|a| !a.2.is_empty()));
             ranked_stance += usize::from(offhand.is_some());
             paired += usize::from(offhand.is_some_and(|o| !o.0.is_empty()));
             if let Some((_, families)) = moveset {
@@ -1972,6 +2009,10 @@ fn best_weapons_is_the_scripts() {
     assert!(
         ranked_stance >= 5 && paired >= 1,
         "{ranked_stance} rows ranked by stance, {paired} with a left hand"
+    );
+    assert!(
+        armed >= 10,
+        "{armed} rows ranked by an arsenal of other classes"
     );
 }
 

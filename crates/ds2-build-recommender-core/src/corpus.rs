@@ -44,6 +44,7 @@ use crate::model::{
 use crate::weapons;
 
 mod adaptive;
+mod arsenal;
 mod best;
 mod chain;
 mod moveset;
