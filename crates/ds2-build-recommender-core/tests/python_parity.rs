@@ -21,7 +21,7 @@ use ds2_build_recommender_core::backend::{
 };
 use ds2_build_recommender_core::corpus::CorpusBackend;
 use ds2_build_recommender_core::model::{
-    BestWeaponsOpts, Defender, Grip, Mode, Objective, PanelState, Rank, Reply, STAT_COUNT,
+    BestWeaponsOpts, Defender, Grip, Mode, Objective, PanelState, Rank, Reply, STAT_COUNT, Spend,
     StatusFilter, WeaponsForOpts, soul_level,
 };
 use ds2_build_recommender_core::weapons;
@@ -256,10 +256,108 @@ type BestRow = (
     Option<f64>,
     StaminaMetrics,
     MovesetMetrics,
+    OffhandRow,
 );
+/// The left hand stance swapping pairs a weapon with (the script's `expect_offhand`): its name
+/// and infusion code ("" for none), the stance rate, the primary's alone, the home stance, every
+/// stance's rate, per family (family, stance, engagement, rate), power stance (owner, STR and DEX
+/// it needs, met), whether the follow-ups chain, and the partner the stats fall short of.
+type OffhandRow = Option<(
+    &'static str,
+    &'static str,
+    f64,
+    f64,
+    &'static str,
+    &'static [(&'static str, f64)],
+    &'static [(&'static str, &'static str, &'static str, f64)],
+    Option<(&'static str, &'static [u16], bool)>,
+    bool,
+    Option<(&'static str, &'static [u16])>,
+)>;
+/// weapon, infusion code, sl, objective, allow naked, grip ("two"/"one"), then the left hand.
+type OffhandCase = (
+    &'static str,
+    &'static str,
+    u16,
+    &'static str,
+    bool,
+    &'static str,
+    OffhandRow,
+);
+type OffhandCases = &'static [OffhandCase];
+
+/// `got` as the script's `expect_offhand` writes it, to compare with a fixture's.
+fn offhand_row(got: Option<&backend::Offhand>) -> Option<OffhandView> {
+    got.map(|o| {
+        let left = o.left.as_ref();
+        (
+            left.map_or(String::new(), |(_, name, _)| name.clone()),
+            left.map_or(String::new(), |&(_, _, inf)| code_of(inf)),
+            o.stance,
+            o.solo,
+            o.home.clone(),
+            o.stances.clone(),
+            o.families
+                .iter()
+                .map(|f| {
+                    (
+                        f.family.clone(),
+                        f.stance.clone(),
+                        f.engagement.clone(),
+                        f.rate,
+                    )
+                })
+                .collect(),
+            o.power_stance
+                .as_ref()
+                .map(|ps| (ps.owner.clone(), ps.need.to_vec(), ps.met)),
+            o.chain,
+            o.ps_short
+                .as_ref()
+                .map(|(name, need)| (name.clone(), need.to_vec())),
+        )
+    })
+}
+
+/// [`OffhandRow`] owned, as [`offhand_row`] builds it from the port.
+type OffhandView = (
+    String,
+    String,
+    f64,
+    f64,
+    String,
+    Vec<(String, f64)>,
+    Vec<(String, String, String, f64)>,
+    Option<(String, Vec<u16>, bool)>,
+    bool,
+    Option<(String, Vec<u16>)>,
+);
+
+/// A fixture's [`OffhandRow`] owned, to compare with [`offhand_row`]'s.
+fn offhand_want(want: OffhandRow) -> Option<OffhandView> {
+    want.map(
+        |(left, code, stance, solo, home, stances, families, ps, chain, short)| {
+            (
+                left.to_owned(),
+                code.to_owned(),
+                stance,
+                solo,
+                home.to_owned(),
+                stances.iter().map(|&(s, v)| (s.to_owned(), v)).collect(),
+                families
+                    .iter()
+                    .map(|&(f, s, e, r)| (f.to_owned(), s.to_owned(), e.to_owned(), r))
+                    .collect(),
+                ps.map(|(owner, need, met)| (owner.to_owned(), need.to_vec(), met)),
+                chain,
+                short.map(|(name, need)| (name.to_owned(), need.to_vec())),
+            )
+        },
+    )
+}
 /// Under `--rank moveset`: the rate, then per family its best engagement -- family, engagement,
 /// rate, raw rate, damage, status, self-damage, startup, commit, stamina, reach, and the reach,
-/// stagger, trade, punish and stamina factors.
+/// stagger, trade, punish and stamina factors and the share of reacting rolls the opener catches.
 type MovesetMetrics = Option<(f64, &'static [FamilyRow])>;
 type FamilyRow = (
     &'static str,
@@ -273,7 +371,7 @@ type FamilyRow = (
     f64,
     Option<f64>,
     Option<f64>,
-    (f64, f64, f64, f64, f64),
+    (f64, f64, f64, f64, f64, Option<f64>),
 );
 /// infusion code, sl, objective, grip, weapon class, window, rank, with status, defender keys,
 /// who answers (`static` or a buff setting), rows.
@@ -650,8 +748,19 @@ fn optimize_is_the_scripts() {
             expected::HELD_OPTIMIZE
                 .iter()
                 .map(|(held, case)| (case, Grip::TwoHanded, &[][..], Reply::Static, *held)),
-        );
-    for (&(weapon, code, sl, goal, want), grip, keys, reply, held) in cases {
+        )
+        .map(|(case, grip, keys, reply, held)| (case, grip, keys, reply, held, Spend::Curves))
+        .chain(expected::EHP_OPTIMIZE.iter().map(|case| {
+            (
+                case,
+                Grip::TwoHanded,
+                &[][..],
+                Reply::Static,
+                &[][..],
+                Spend::Ehp,
+            )
+        }));
+    for (&(weapon, code, sl, goal, want), grip, keys, reply, held, spend) in cases {
         let holding;
         let backend = if held.is_empty() {
             backend()
@@ -668,6 +777,7 @@ fn optimize_is_the_scripts() {
             &Limits {
                 defender: &defender(keys),
                 reply,
+                spend,
                 ..STATIC
             },
         );
@@ -750,9 +860,23 @@ fn generate_build_is_the_scripts() {
             expected::HELD_GENERATE
                 .iter()
                 .map(|(held, case)| (case, Grip::TwoHanded, None, &[][..], Reply::Static, *held)),
-        );
+        )
+        .map(|(case, grip, only, keys, reply, held)| {
+            (case, grip, only, keys, reply, held, Spend::Curves)
+        })
+        .chain(expected::EHP_GENERATE.iter().map(|case| {
+            (
+                case,
+                Grip::TwoHanded,
+                None,
+                &[][..],
+                Reply::Static,
+                &[][..],
+                Spend::Ehp,
+            )
+        }));
     let mut held_rings = 0;
-    for (&(weapon, code, sl, goal, naked, want), grip, only, keys, reply, held) in cases {
+    for (&(weapon, code, sl, goal, naked, want), grip, only, keys, reply, held, spend) in cases {
         let holding;
         let backend = if held.is_empty() {
             backend()
@@ -781,6 +905,7 @@ fn generate_build_is_the_scripts() {
                 class: only,
                 defender: &defender(keys),
                 reply,
+                spend,
                 ..STATIC
             },
         );
@@ -1636,6 +1761,7 @@ fn rank(name: &str) -> Rank {
         "per-stamina" => Rank::PerStamina,
         "bar" => Rank::Bar,
         "moveset" => Rank::Moveset,
+        "stance" => Rank::Stance,
         other => panic!("rank {other}"),
     }
 }
@@ -1649,6 +1775,7 @@ fn best_weapons_is_the_scripts() {
     let (mut compared, mut launchers, mut timed, mut poised, mut procs) = (0, 0, 0, 0, 0);
     let (mut held, mut staggered, mut barred) = (0, 0, 0);
     let (mut ranked_moveset, mut self_charged, mut moved) = (0, 0, 0);
+    let (mut ranked_stance, mut paired) = (0, 0);
     for &(code, sl, goal, grip, class, window, by, with_status, keys, who, want) in
         expected::BEST_WEAPONS
     {
@@ -1692,6 +1819,7 @@ fn best_weapons_is_the_scripts() {
                 with,
                 stamina,
                 moveset,
+                offhand,
             ) = *want;
             let at = format!("{case}: {key}");
             assert_eq!(row.weapon, key, "{case}");
@@ -1789,7 +1917,14 @@ fn best_weapons_is_the_scripts() {
                             f.commit_s,
                             f.stamina,
                             f.reach_m,
-                            (f.f_reach, f.f_stagger, f.f_trade, f.f_punish, f.f_stamina),
+                            (
+                                f.f_reach,
+                                f.f_stagger,
+                                f.f_trade,
+                                f.f_punish,
+                                f.f_stamina,
+                                f.caught,
+                            ),
                         )
                     })
                     .collect();
@@ -1797,6 +1932,13 @@ fn best_weapons_is_the_scripts() {
             });
             let want_moveset = moveset.map(|(rate, families)| (rate, families.to_vec()));
             assert_eq!(got_moveset, want_moveset, "{at}: moveset metrics");
+            assert_eq!(
+                offhand_row(m.stance.as_ref()),
+                offhand_want(offhand),
+                "{at}: stance swapping"
+            );
+            ranked_stance += usize::from(offhand.is_some());
+            paired += usize::from(offhand.is_some_and(|o| !o.0.is_empty()));
             if let Some((_, families)) = moveset {
                 ranked_moveset += 1;
                 self_charged += usize::from(families.iter().any(|f| f.6 > 0.0));
@@ -1826,5 +1968,58 @@ fn best_weapons_is_the_scripts() {
         ranked_moveset >= 10 && self_charged >= 1 && moved >= 5,
         "{ranked_moveset} rows ranked by moveset, {self_charged} charging their wielder, {moved} \
          with a movement attack"
+    );
+    assert!(
+        ranked_stance >= 5 && paired >= 1,
+        "{ranked_stance} rows ranked by stance, {paired} with a left hand"
+    );
+}
+
+/// An infusion's one-letter code, as the fixtures write it.
+fn code_of(infusion: Infusion) -> String {
+    "NMFLDPBREU"
+        .chars()
+        .find(|&c| weapons::infusion_for_code(c) == Some(infusion))
+        .map_or_else(String::new, String::from)
+}
+
+#[test]
+fn the_left_hand_is_the_scripts() {
+    let (mut paired, mut power_stanced, mut swapped) = (0, 0, 0);
+    for &(weapon, code, sl, goal, naked, grip, want) in expected::OFFHAND {
+        let grip = if grip == "one" {
+            Grip::OneHanded
+        } else {
+            Grip::TwoHanded
+        };
+        let got = backend()
+            .generate_build(
+                weapon,
+                infusion(code),
+                sl,
+                objective(goal),
+                naked,
+                grip,
+                &STATIC,
+            )
+            .unwrap_or_else(|| panic!("{weapon} SL {sl}: the script built it"));
+        assert_eq!(
+            offhand_row(got.offhand.as_ref()),
+            offhand_want(want),
+            "{weapon} {code} SL {sl} {goal}: the left hand"
+        );
+        if let Some((left, _, stance, solo, home, _, families, ps, ..)) = want {
+            paired += usize::from(!left.is_empty());
+            power_stanced += usize::from(home == "PS" || ps.is_some_and(|(_, _, met)| met));
+            swapped += usize::from(families.iter().any(|&(_, s, ..)| s != home));
+            assert!(
+                stance >= solo,
+                "{weapon} SL {sl}: a left hand never costs rate"
+            );
+        }
+    }
+    assert!(
+        paired >= 3,
+        "{paired} builds with a left hand, {power_stanced} power stancing, {swapped} swapping"
     );
 }

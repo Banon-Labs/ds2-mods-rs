@@ -9,10 +9,11 @@
 use ds2_build_import_core::Infusion;
 
 use super::{
-    Against, CorpusBackend, Defense, EMPTY, Hit, Stats, Weapon, norm, py_max, py_round, py_sum,
+    Against, CorpusBackend, Defense, EMPTY, Hit, Query, Stats, Weapon, norm, py_max, py_round,
+    py_sum,
 };
 use crate::backend::{BestWeaponRow, WeaponMetrics};
-use crate::model::{Grip, Objective, Rank};
+use crate::model::{Grip, Objective, Rank, Spend};
 
 /// How long the sustained-damage metric repeats the R1 chain: the script's `SUSTAIN_HORIZON`.
 const SUSTAIN_HORIZON: f64 = 5.0;
@@ -29,6 +30,7 @@ pub(super) struct Ask<'a> {
     pub(super) class: Option<&'a str>,
     pub(super) floors: bool,
     pub(super) against: Against,
+    pub(super) spend: Spend,
     /// Seconds; `0` scores the optimizer's own value.
     pub(super) window: f64,
     pub(super) rank: Rank,
@@ -78,6 +80,7 @@ impl CorpusBackend {
             ask.class,
             ask.floors,
             ask.against,
+            ask.spend,
         )?;
         let eff = self.gear_stats(&stats, &worn);
         let defending = self.defending(ask.sl, ask.against);
@@ -91,6 +94,7 @@ impl CorpusBackend {
             Rank::PerStamina => Some(metrics.stamina.as_ref()?.damage_per_stamina),
             Rank::Bar => metrics.stamina.as_ref()?.bar_damage,
             Rank::Moveset => Some(metrics.moveset.as_ref()?.moveset),
+            Rank::Stance => Some(metrics.stance.as_ref()?.stance),
             Rank::Window => None,
         };
         let ammo = if weapon.ranged.is_some() {
@@ -169,6 +173,34 @@ impl CorpusBackend {
                         &defending.base,
                         ask.against.worn,
                     );
+                } else if ask.rank == Rank::Stance {
+                    // The left hand stance swapping pairs it with, among the weapons these stats
+                    // rank best over the window.
+                    let query = Query {
+                        one_hand: false,
+                        class: None,
+                        per_class: false,
+                        window: ask.window,
+                        raw_ar: false,
+                        objective: Objective::Damage,
+                        top: usize::MAX,
+                        weapon: None,
+                        defender: ask.against,
+                    };
+                    let candidates = self.rank(&eff, ask.sl, &query);
+                    metrics.stance = self
+                        .choose_offhand(
+                            weapon,
+                            ask.infusion,
+                            &eff,
+                            &worn,
+                            ask.sl,
+                            &defending.base,
+                            ask.against.worn,
+                            &candidates,
+                            None,
+                        )
+                        .filter(|o| o.stance != 0.0);
                 }
                 if by.is_some() {
                     score = ranked(&metrics)?;

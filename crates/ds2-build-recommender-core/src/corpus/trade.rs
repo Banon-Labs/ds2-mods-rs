@@ -318,12 +318,14 @@ fn cmp(a: f64, b: f64) -> Ordering {
 }
 
 /// Who the armour is chosen for in the script's `generate_armor`: the levelled `stats`, the
-/// weights of what it holds, the rings it wears and its load scarcity.
+/// weights of what it holds, the rings it wears, its load scarcity and its bracket's threat mix.
 pub(super) struct Wearer<'a> {
     pub(super) stats: &'a Stats,
     pub(super) held: &'a [f64],
     pub(super) rings: &'a [usize],
     pub(super) scarcity: f64,
+    /// The threat mix of its SL bracket: what `best_armor` weights each defense by.
+    pub(super) mix: [f64; 5],
 }
 
 /// What [`CorpusBackend::trade_armor`] decided: the set, the numbers of it and of `best_armor`'s
@@ -411,6 +413,13 @@ impl CorpusBackend {
                 }
             }
         }
+        let out = self.armor_defense(&eff, pieces);
+        self.with_ring_defense(out, rings)
+    }
+
+    /// The script's `_armor_defense`: the armour and stat part of a defense, `pieces` worn at
+    /// effective stats `eff`.
+    pub(super) fn armor_defense(&self, eff: &Stats, pieces: &[&Wearable]) -> Defense {
         let tables = &self.tables.defense;
         let pb = tables[0].at(eff[END] + eff[VIT] + eff[STR] + eff[DEX]);
         let mut out = [0.0; 8];
@@ -436,6 +445,11 @@ impl CorpusBackend {
             out[1 + element] = tables[1 + element].at(index)
                 + py_sum(pieces.iter().map(|piece| piece.defense[1 + element]));
         }
+        out
+    }
+
+    /// `out` plus each of `rings`' defense changes, a physical one on every physical type too.
+    pub(super) fn with_ring_defense(&self, mut out: Defense, rings: &[usize]) -> Defense {
         for &ring in rings {
             for &(kind, value) in self.ring_change(ring).map_or(&[][..], Vec::as_slice) {
                 out[kind] += value;
@@ -449,11 +463,10 @@ impl CorpusBackend {
         out
     }
 
-    /// A piece's defense weighted by the corpus threat mix, summed as the script's `sum` does.
-    fn armor_value(&self, piece: &Wearable) -> f64 {
+    /// A piece's defense weighted by threat `mix`, summed as the script's `sum` does.
+    fn armor_value(piece: &Wearable, mix: &[f64; 5]) -> f64 {
         py_sum(
-            self.threat_mix
-                .iter()
+            mix.iter()
                 .zip(piece.defense)
                 .map(|(share, defense)| share * defense),
         )
@@ -466,12 +479,12 @@ impl CorpusBackend {
     /// count; the slots are combined keeping, per poise sum, the sets no lighter one outscores.
     fn armor_poise_steps(&self, wearer: &Wearer<'_>) -> Vec<(f64, [&Wearable; 4])> {
         let (stats, rings) = (wearer.stats, wearer.rings);
-        let (_, _, Some(top)) = self.best_armor(stats, wearer.held, rings, 0.0) else {
+        let (_, _, Some(top)) = self.best_armor(stats, wearer.held, rings, 0.0, &wearer.mix) else {
             return Vec::new();
         };
-        let value = top
-            .iter()
-            .fold(0.0, |total, piece| total + self.armor_value(piece));
+        let value = top.iter().fold(0.0, |total, piece| {
+            total + Self::armor_value(piece, &wearer.mix)
+        });
         let weight = top.iter().fold(0.0, |total, piece| total + piece.weight);
         let price = if weight > 0.0 { value / weight } else { 0.0 };
         let k = wearer.scarcity * LOAD_PRICE * price;
@@ -487,7 +500,14 @@ impl CorpusBackend {
             let mut cands: Vec<(f64, f64, f64, &Wearable)> = slot
                 .iter()
                 .filter(|piece| piece.require.iter().all(|&(stat, need)| need <= st[stat]))
-                .map(|piece| (piece.weight, self.armor_value(piece), piece.poise, piece))
+                .map(|piece| {
+                    (
+                        piece.weight,
+                        Self::armor_value(piece, &wearer.mix),
+                        piece.poise,
+                        piece,
+                    )
+                })
                 .collect();
             cands.sort_by(|a, b| {
                 cmp(a.0, b.0)

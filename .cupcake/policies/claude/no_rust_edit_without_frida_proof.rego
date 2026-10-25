@@ -477,10 +477,25 @@ resolved_words(bare) := braced | plain if {
 
 # Every crate Rust path a word can stand for: itself, bare, and whatever a variable at its front
 # resolves to.
+# A relative path names a file under the shell's working directory, not under the repo root.
+# GAP 2026-10-24: with the Bash cwd at crates/ds2-build-recommender-core,
+# `sed -i '...' src/corpus.rs` rewrote a crate source and was allowed, because `src/corpus.rs`
+# has no `crates/` in it and nothing joined it to the hook input's `cwd`. An absolute path, or
+# an event with no `cwd`, is taken as written.
+hook_cwd := object.get(input, "cwd", "")
+
+resolved_against_cwd(path) := path if {
+	startswith(path, "/")
+} else := path if {
+	not is_string(hook_cwd)
+} else := path if {
+	hook_cwd == ""
+} else := concat("/", [trim_right(hook_cwd, "/"), trim_prefix(path, "./")])
+
 word_paths(word) := {path |
 	bare := bare_word(word)
 	some candidate in ({bare} | resolved_words(bare))
-	path := crate_rust_path(candidate)
+	path := crate_rust_path(resolved_against_cwd(candidate))
 }
 
 redirect_token(word) if {

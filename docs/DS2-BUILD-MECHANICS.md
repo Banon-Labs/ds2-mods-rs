@@ -322,6 +322,14 @@ maxHP = hpMax[VGR] + additionalHp[END] + additionalHp[VIT] + additionalHp[ATT] +
   build survives `1 / (1 - s x W / D x rate)` times as many hits when a share `s` of them is met
   with a roll. `s` is behaviour, not game data. Fitted to the corpus it does not hold out
   (branch `optimizer-agl-rate-model`, `scripts/ds2-agility-cases.py`; issue p5z4.31).
+  Since 2026-10-24 (p5z4.59) the recommender scores it instead with er-mods-rs's reaction roll
+  (`ds2-builds-recommend.py` "The roll"): half the attacks meet a player who sees them start and
+  rolls after a lognormal reaction (median 0.25 s) plus two 0.05 s network legs, aiming at the
+  middle of the presses that escape; a hit live before the press, or after the i-frames while he
+  is still inside the 110300 window, catches him. Against each SL bracket's R1s that avoids about
+  0.20 of swings at agility row 1, 0.38 at row 10 and 0.42-0.45 from row 20 on (`RE` records).
+  Every constant of the behaviour is INFERRED, and so is the clip: 120020 is scored, as
+  untraced as above.
 - That the displayed AGL is read from MenuStatsParam by the same index (it matches exactly).
 - Whether a ring's max-HP factor multiplies the whole of section 7's sum. The recommender assumes
   it does.
