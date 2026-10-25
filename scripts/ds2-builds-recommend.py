@@ -2816,10 +2816,17 @@ def r1_reach(data: Data, attacks: dict, weapon: str, names: list[str], two_hand:
 
 def attack_reach(data: Data, weapon: str, a: dict | None) -> float | None:
     """r1_reach's measure for any one attack `a` of `weapon` (an attacks.json row). None without
-    the attack or the shape data."""
+    the attack or the shape data.
+
+    A twinblade's segments are its two blades, not one chain: every twinblade's hitbox is dummy
+    polys 100 and 101 at equal radius, and all but the Sorcerer's at equal length (1.2 m before
+    damageHitLengthScale). Chained, they would put the Dragonrider Twinblade's tip at 1.69 m, past
+    a Halberd's two-handed R1 at 1.55 m. Its reach is the longer blade's. INFERRED from that
+    symmetry; the model's dummy poly positions were not read."""
     if not a or not data.hit_shape:
         return None
     rs, ls = data.reach_scale.get(weapon, (1.0, 1.0))
+    twin = norm(data.weapon_class.get(weapon) or "") == norm("Twinblade")
     best = None
     for h in live_hits(a):
         row, rows, segs, used = h.get("dmg"), set(), [], set()
@@ -2830,7 +2837,10 @@ def attack_reach(data: Data, weapon: str, a: dict | None) -> float | None:
                 used.add(pid)
                 segs.append((rad, ln))
             row = child
-        if segs:
+        if segs and twin:
+            r = max(ln * ls + rad * rs for rad, ln in segs)
+            best = r if best is None else max(best, r)
+        elif segs:
             r = sum(ln for _, ln in segs) * ls + segs[-1][0] * rs
             best = r if best is None else max(best, r)
     return None if best is None else round(best, 3)
@@ -7720,14 +7730,20 @@ def trade_selftest_cases() -> list:
 def metrics_selftest_cases() -> list:
     """r1_reach / r1_metrics on regulation rows (scripts/ds2-hit-shape.py prints them): the Dagger's
     one segment, the Whip's three dummy polys end to end, the Greatsword's child sphere on the same
-    dummy poly and the Winged Spear's on a body dummy poly, neither adding length."""
+    dummy poly and the Winged Spear's on a body dummy poly, neither adding length, and the
+    Dragonrider Twinblade's two blades, of which only the longer counts."""
     A = dict(SELFTEST_ATTACKS)
     A[("whip", "Single1HandNormal1st")] = {"anim": -1, "spd": [1.0, 1.0], "hits": [_hit(16, 20, 1.0, dmg=10011000)]}
     A[("greatsword", "Single1HandNormal1st")] = {"anim": -1, "spd": [1.0, 1.0], "hits": [_hit(23, 29, 1.0, dmg=10042700)]}
     A[("wingedspear", "Single1HandNormal1st")] = {"anim": -1, "spd": [1.0, 1.0],
                                                    "hits": [_hit(14, 20, 1.0, dmg=10017820)]}
+    A[("dragonridertwinblade", "Single2HandNormal1st")] = {"anim": -1, "spd": [0.85, 1.0],
+                                                            "hits": [_hit(10, 27, 0.72, n=3, interval=0.2,
+                                                                          dmg=10015900)]}
     fake = type("Reach", (), {"damage_scale": {"Greatsword": 2.0}, "reach_scale": {"Dagger": (1.0, 0.7),
-                                                                                   "Greatsword": (1.0, 1.1)},
+                                                                                   "Greatsword": (1.0, 1.1),
+                                                                                   "Dragonrider_Twinblade": (1.0, 0.6)},
+                              "weapon_class": {"Dragonrider_Twinblade": "Twinblade"},
                               "hit_shape": {"10004100": (1, 100, 0.3, 0.3, 0),
                                             "10011000": (1, 100, 0.25, 1.0, 10011001),
                                             "10011001": (1, 101, 0.25, 1.1, 10011002),
@@ -7735,7 +7751,9 @@ def metrics_selftest_cases() -> list:
                                             "10042700": (1, 100, 0.3, 1.55, 10042701),
                                             "10042701": (1, 100, 0.4, 0.01, 0),
                                             "10017820": (1, 100, 0.3, 1.55, 40000010),
-                                            "40000010": (1, 1, 0.3, 0.1, 0)}})
+                                            "40000010": (1, 1, 0.3, 0.1, 0),
+                                            "10015900": (1, 100, 0.25, 1.2, 10015901),
+                                            "10015901": (1, 101, 0.25, 1.2, 0)}})
     ar, dfn = {"physical": 100}, {"physical": 0}
     dagger = r1_metrics(fake, A, "Dagger", ["Dagger"], False, ar, dfn, anim_len=lambda anim: 1.0)
     return [
@@ -7743,6 +7761,8 @@ def metrics_selftest_cases() -> list:
         ("whip reach 1.0 + 1.1 + 0.2 + 0.25", r1_reach(fake, A, "Whip", ["Whip"], False), 2.55),
         ("greatsword child sphere adds no length", r1_reach(fake, A, "Greatsword", ["Greatsword"], False), 2.005),
         ("spear body-dummy-poly child adds none", r1_reach(fake, A, "Winged_Spear", ["Winged Spear"], False), 1.85),
+        ("twinblade reach is one blade, 1.2 x 0.6 + 0.25",
+         r1_reach(fake, A, "Dragonrider_Twinblade", ["Dragonrider Twinblade"], True), 0.97),
         ("no 2H row, no reach", r1_reach(fake, A, "Dagger", ["Dagger"], True), None),
         # frame 8 at the mean of speeds 1.1/1.2; the anim's 1.0 s ends 0.5 s after frame 15
         ("dagger startup 8/30/1.15", dagger["startup_s"], 0.232),
