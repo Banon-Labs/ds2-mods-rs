@@ -87,6 +87,10 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
+      # test-cupcake-policies.py reads the signal commands out of .cupcake/rulebook.yml.
+      - name: Install PyYAML
+        run: python -m pip install pyyaml
+
       # clang/lld/llvm are what cargo-xwin drives. wine executes the cfg(windows) test binaries in
       # the host-tests leg; it is installed in both legs so the two legs differ only in check.sh's
       # own argument.

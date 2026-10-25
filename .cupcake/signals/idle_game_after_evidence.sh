@@ -20,6 +20,7 @@
 # CUPCAKE_IDLE_GAME_MACHINE_OVERRIDE=dead|<pid>|<start epoch> replaces only pgrep and /proc, so the
 # Stop guard tests read the transcript half for real whatever is running on the test machine.
 set -uo pipefail
+cat >/dev/null
 if [ -n "${CUPCAKE_IDLE_GAME_OVERRIDE+set}" ]; then
     [ -n "$CUPCAKE_IDLE_GAME_OVERRIDE" ] && printf '%s\n' "$CUPCAKE_IDLE_GAME_OVERRIDE"
     exit 0
