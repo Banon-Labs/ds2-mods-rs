@@ -50,6 +50,7 @@ mod moveset;
 mod poise;
 mod ranged;
 mod stamina;
+mod stance;
 mod status;
 mod trade;
 
@@ -57,7 +58,7 @@ mod trade;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 22";
+pub const FORMAT: &str = "ds2-build-recommender-data 23";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -418,6 +419,11 @@ struct Weapon {
     moves: [Vec<moveset::Move>; 2],
     /// HP each landed hit costs its wielder: the script's `data.self_hit`, `0` for most weapons.
     self_hit: f64,
+    /// Its power stance category and left-hand damage scale: the script's `data.stance` (`ST`).
+    stance: Option<(u32, f64)>,
+    /// Every attack of its other stances with a live hit, by full slot name: what the script's
+    /// `stance_metrics` reads beyond `moves` (`SM`).
+    stance_moves: Vec<moveset::Move>,
 }
 
 /// One attack chain as the bleed/poison ranking counts it.
@@ -1031,6 +1037,8 @@ impl CorpusBackend {
                     strike: Default::default(),
                     moves: Default::default(),
                     self_hit: 0.0,
+                    stance: None,
+                    stance_moves: Vec::new(),
                 });
             }
             "SC" => self.parse_stamina(line, &mut fields)?,
@@ -1038,7 +1046,7 @@ impl CorpusBackend {
             "PO" => self.parse_poise(line, &mut fields)?,
             "FS" | "XT" => self.parse_trade(tag, line, &mut fields)?,
             "SP" => self.parse_proc(line, &mut fields)?,
-            "MV" | "MC" | "SH" | "MW" | "SR" | "MB" => {
+            "MV" | "MC" | "SH" | "MW" | "SR" | "MB" | "ST" | "SM" => {
                 self.parse_moveset(tag, line, &mut fields)?
             }
             "RM" => {
@@ -3987,11 +3995,15 @@ impl CorpusBackend {
     ///
     /// `best_armor`'s set is kept unless a poise step trades better over `granted` (weapon index,
     /// infusion, two-handed: every weapon the build lists, primary first) against `sl`'s bracket.
+    /// The `offhand`'s weight, the left hand stance swapping holds, is carried beside them.
+    // DEBT: ds2-mods-rs-59p7 -- the script's own argument list; bundle the row's question.
+    #[allow(clippy::too_many_arguments)]
     fn generate_armor(
         &self,
         stats: &Stats,
         weapons: &[f64],
         catalysts: &[f64],
+        offhand: Option<f64>,
         rings: &[usize],
         sl: u32,
         granted: &[(usize, Infusion, bool)],
@@ -4014,6 +4026,7 @@ impl CorpusBackend {
         if let Some((&first, rest)) = catalysts.split_first() {
             held.push(heaviest(first, rest));
         }
+        held.extend(offhand);
         let scarcity = self.load_scarcity(stats);
         let mix = self.bracket_mix(sl);
         let (cap, carried, set) = self.best_armor(stats, &held, rings, scarcity, &mix);
@@ -4522,22 +4535,48 @@ impl RecommenderBackend for CorpusBackend {
             "the optimizer spends exactly the points `sl` has"
         );
         let name = |ring: &usize| self.rings[*ring].1.clone();
+        let weapons: Vec<f64> = std::iter::once(primary.weight)
+            .chain(
+                weapons_1h
+                    .iter()
+                    .chain(&weapons_2h_only)
+                    .map(|row| self.weight_by_name(&row.weapon)),
+            )
+            .collect();
+        let held: Vec<f64> = catalysts
+            .iter()
+            .map(|pick| self.weight_by_name(&pick.name))
+            .collect();
+        // The left hand stance swapping pairs with the primary, chosen before the armour so its
+        // weight counts against the load, and no heavier than leaves a full set wearable.
+        let offhand = self.choose_offhand(
+            primary,
+            infusion,
+            &eff,
+            &worn,
+            u32::from(sl),
+            &self.defending(u32::from(sl), defender).base,
+            defender.worn,
+            &ranked,
+            (!allow_naked).then(|| self.offhand_room(&stats, &weapons, &held, &suggested)),
+        );
+        let offhand_weight = offhand
+            .as_ref()
+            .and_then(|o| o.left.as_ref())
+            .and_then(|(key, ..)| self.weapon_by_key(key))
+            .map(|weapon| weapon.weight);
         let (armor, armor_note, trades) = if allow_naked {
             (Vec::new(), None, None)
         } else {
-            let weapons: Vec<f64> = std::iter::once(primary.weight)
-                .chain(
-                    weapons_1h
-                        .iter()
-                        .chain(&weapons_2h_only)
-                        .map(|row| self.weight_by_name(&row.weapon)),
-                )
-                .collect();
-            let held: Vec<f64> = catalysts
-                .iter()
-                .map(|pick| self.weight_by_name(&pick.name))
-                .collect();
-            self.generate_armor(&stats, &weapons, &held, &suggested, u32::from(sl), &granted)
+            self.generate_armor(
+                &stats,
+                &weapons,
+                &held,
+                offhand_weight,
+                &suggested,
+                u32::from(sl),
+                &granted,
+            )
         };
         Some(GeneratedBuild {
             class: self.classes[class].name.clone(),
@@ -4545,6 +4584,7 @@ impl RecommenderBackend for CorpusBackend {
             stats: levelled,
             primary: (primary.key.clone(), infusion),
             two_handed,
+            offhand,
             weapons_1h,
             weapons_2h_only,
             suggested_rings: suggested.iter().map(name).collect(),

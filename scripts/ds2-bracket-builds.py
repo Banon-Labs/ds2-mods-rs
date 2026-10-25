@@ -27,7 +27,9 @@ compare across infusions, so the top row over all ten files is the level's weapo
 `generate_build` makes its whole build: class, stats, rings, armour under 70% load.
 
 WHAT GOES ON THE BODY: the primary in RH1 and nothing in RH2 (a second melee weapon to soft-swap
-to is not part of an optimal build), the four rings it wears, its armour, and what the recommender's `choose_kit` carries: the
+to is not part of an optimal build), in LH1 the left hand the recommender's `choose_offhand` pairs
+with it for stance swapping (one-handed, two-handed, the left weapon two-handed, power stance,
+cross-hand chains; nothing when no pair beats the primary alone), the four rings it wears, its armour, and what the recommender's `choose_kit` carries: the
 quick items in slot order (Estus Flask, a heal, a resin when the primary is buffable, the best knife
 and urn, a defensive item, then runners-up until at least half the ten slots are full), a bow,
 greatbow or crossbow in RH3 when one fits the stats and the load, and ammunition in all four arrow
@@ -122,6 +124,9 @@ def build_for(rec, data, corpus, level: int, slot: int, inf: str, row: dict) -> 
     worn = list(dict.fromkeys(g["rings"]))[:4]
     keys = [ring_key(data, n) for n in worn]
     equip = {"rh1": {"name": g["primary"][0], "infusion": g["primary"][1]}}
+    off = g.get("offhand") or {}
+    if off.get("left"):
+        equip["lh1"] = {"name": off["left"], "infusion": off["infusion"]}
     for slot_name, piece in zip(("head", "chest", "hands", "legs"), g["armor"]):
         if piece != "Naked":
             equip[slot_name] = {"name": piece}
@@ -141,8 +146,8 @@ def build_for(rec, data, corpus, level: int, slot: int, inf: str, row: dict) -> 
             "hp": max_hp(rec, data, g["stats"], keys), "two_handed": g["two_handed"],
             "score": row["score"], "equip": equip,
             "kit": {"items": kit["items"], "launcher": kit["launcher"], "ammo": kit["ammo"]},
-            "generated": {k: g[k] for k in ("primary", "weapons_1h", "weapons_2h_only", "rings", "armor",
-                                            "armor_note", "value", "objective")}}
+            "generated": {k: g[k] for k in ("primary", "offhand", "weapons_1h", "weapons_2h_only", "rings",
+                                            "armor", "armor_note", "value", "objective")}}
 
 
 def main() -> int:

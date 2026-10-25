@@ -244,6 +244,59 @@ pub struct WeaponMetrics {
     pub stamina: Option<StaminaMetrics>,
     /// The whole moveset's `PvP` rate, under [`crate::model::Rank::Moveset`] only.
     pub moveset: Option<MovesetMetrics>,
+    /// The same rate with the left hand stance swapping pairs it with, under
+    /// [`crate::model::Rank::Stance`] only.
+    pub stance: Option<Offhand>,
+}
+
+/// What the left hand holds beside the primary, and the build's rate swapping stance with it: the
+/// script's `choose_offhand` and `stance_metrics` (docs/DS2-STANCES.md).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Offhand {
+    /// The left hand: soulsplanner key, display name and infusion; `None` for an empty hand.
+    pub left: Option<(String, String, Infusion)>,
+    /// The stance rate with it, in HP a second: what [`crate::model::Rank::Stance`] ranks by.
+    pub stance: f64,
+    /// The primary's alone, swapping only its own grip.
+    pub solo: f64,
+    /// The stance the build stands in: `1H`, `2H` or `PS`.
+    pub home: String,
+    /// Every stance the pair has (`1H`, `2H`, `L2H`, `PS`) and its own rate.
+    pub stances: Vec<(String, f64)>,
+    /// Per family its engagement and the stance it is thrown from.
+    pub families: Vec<StanceFamily>,
+    /// Whether the pair power stances: whose L1/L2 play, the STR and DEX it needs, and whether
+    /// the stats meet them. `None` for a pair that cannot.
+    pub power_stance: Option<PowerStanceNeed>,
+    /// Whether a cross-hand follow-up is the chain attack (power stance's stats are met).
+    pub chain: bool,
+    /// The best-ranked power stance partner the stats fall short of: its name and the STR and DEX
+    /// it needs.
+    pub ps_short: Option<(String, [u16; 2])>,
+}
+
+/// One family's engagement in a stance-swapping build.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct StanceFamily {
+    /// `r1`, `r2`, `move` or `jump`.
+    pub family: String,
+    /// The stance it is thrown from.
+    pub stance: String,
+    /// Its attacks' slots, a left-hand one marked `L:`.
+    pub engagement: String,
+    /// Its rate.
+    pub rate: f64,
+}
+
+/// A pair's power stance.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct PowerStanceNeed {
+    /// The weapon whose L1/L2 play, by display name.
+    pub owner: String,
+    /// The STR and DEX it needs.
+    pub need: [u16; 2],
+    /// Whether the build's stats meet them and both weapons' one-handed requirements.
+    pub met: bool,
 }
 
 /// A weapon's whole moveset in its grip: the script's `moveset_metrics`.
@@ -431,6 +484,9 @@ pub struct GeneratedBuild {
     pub primary: (String, Infusion),
     /// Whether the primary is two-handed.
     pub two_handed: bool,
+    /// The left hand stance swapping pairs with the primary (Apply puts it in LH1); `None` for a
+    /// launcher, or a backend that does not choose one.
+    pub offhand: Option<Offhand>,
     /// The best one-handable other weapons, at most [`WEAPONS_1H_TOP`].
     pub weapons_1h: Vec<ResultRow>,
     /// The best two-hand-only other weapons, at most [`WEAPONS_2H_ONLY_TOP`].
@@ -1157,11 +1213,15 @@ const NO_COVENANT: &str = "No_Covenant";
 pub fn to_import(generated: &GeneratedBuild) -> (Build, Vec<(String, Infusion)>) {
     let stats = to_stats(&generated.stats);
     let (primary, infusion) = &generated.primary;
-    // `LH1, RH1, LH2, RH2, LH3, RH3`, each followed by its infusion: the primary is RH1.
-    let mut hands = vec![
-        EMPTY_HAND.to_owned(),
-        weapons::planner_name(Infusion::None).to_owned(),
-    ];
+    // `LH1, RH1, LH2, RH2, LH3, RH3`, each followed by its infusion: the primary is RH1, the left
+    // hand stance swapping pairs it with LH1.
+    let mut hands = match generated.offhand.as_ref().and_then(|o| o.left.as_ref()) {
+        Some((key, _, infusion)) => vec![key.clone(), weapons::planner_name(*infusion).to_owned()],
+        None => vec![
+            EMPTY_HAND.to_owned(),
+            weapons::planner_name(Infusion::None).to_owned(),
+        ],
+    };
     hands.push(primary.clone());
     hands.push(weapons::planner_name(*infusion).to_owned());
     while hands.len() < 12 {
@@ -1430,6 +1490,7 @@ impl RecommenderBackend for StubBackend {
             stats: built.stats,
             primary: (primary.key.to_owned(), Infusion::None),
             two_handed: built.two_handed,
+            offhand: None,
             weapons_1h,
             weapons_2h_only,
             suggested_rings,

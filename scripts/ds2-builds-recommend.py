@@ -175,6 +175,8 @@ class Data:
         self.hit_flat = {}  # PlayerDamageParam row -> DMG key -> flat attack (regulation_hit_flat)
         self.damage_scale = {}  # weapon key -> WeaponParam.damageScale where not 1.0 (regulation_damage_scale)
         self.self_hit = {}  # weapon key -> HP each landed hit costs its wielder (regulation_self_hits)
+        # weapon key -> (WeaponTypeParam.dualWieldingPermission, leftDamageScale) (regulation_stance)
+        self.stance = {}
         self.hit_shape = {}  # PlayerDamageParam row -> its hitbox shape (regulation_reach)
         self.reach_scale = {}  # weapon key -> (radius scale, length scale) where not 1.0 (regulation_reach)
         self.hit_poise = {}  # PlayerDamageParam row -> (poiseDamage, armorBreak) (regulation_poise)
@@ -1255,7 +1257,8 @@ def apply_regulation(data: Data) -> str:
             + "; " + regulation_defense_buffs(data, emevd, members, d, names)
             + "; " + regulation_consumables(data, emevd, members, d, names)
             + "; " + regulation_weapon_elements(data, d, names)
-            + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_reach(data, d, names)
+            + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_stance(data, d, names)
+            + "; " + regulation_reach(data, d, names)
             + "; " + regulation_self_hits(data, emevd, members, d, names)
             + "; " + regulation_poise(data, d, names) + "; " + regulation_stamina(data, d, names)
             + "; " + regulation_status(data, d, names)
@@ -1425,6 +1428,27 @@ def regulation_damage_scale(data: Data, d: dict, names: dict) -> str:
         if wp and wp["damageScale"] != 1.0:
             data.damage_scale[key] = wp["damageScale"]
     return f"damageScale off 1.0 on {len(data.damage_scale)} weapons"
+
+
+def regulation_stance(data: Data, d: dict, names: dict) -> str:
+    """data.stance: weapon key -> (WeaponTypeParam.dualWieldingPermission, leftDamageScale), joined
+    by name as regulation_damage_scale joins. REGULATION, read 2026-10-24: the permission is the
+    weapon's power stance category, 0 for one that cannot power stance (every shield but Reeve's
+    and Orma's, staves, chimes, flames, bows), and its values rise in darksouls2.wiki.gg's
+    Dual_Wielding priority order (POWER_STANCE). leftDamageScale is 0.9 on every melee weapon but a
+    handful of shields: the hand scale the attack builder holds in `k` for the left hand
+    (docs/DS2-DPS-MECHANICS.md, "rightDamageScale" read the same way for launchers)."""
+    by_name = {}
+    for wid, w in d["WeaponParam"].items():
+        by_name.setdefault(norm(names.get(wid, "")), w)
+    data.stance = {}
+    for key, w in data.weapons.items():
+        wp = by_name.get(norm(w.get("name", key)))
+        t = wp and d["WeaponTypeParam"].get(str(wp["weaponTypeId"]))
+        if t:
+            data.stance[key] = (int(t["dualWieldingPermission"]), float(t["leftDamageScale"]))
+    can = sum(1 for p, _ in data.stance.values() if p)
+    return f"power stance category on {len(data.stance)} weapons ({can} can power stance)"
 
 
 #: PlayerDamageParam.damageCategory of the rows a weapon hits its own wielder with (REGULATION: both
@@ -2969,8 +2993,10 @@ def shot_metrics(data: Data, weapon: str, shot: float, st: dict, rings=()) -> di
 #: --rank: what best_weapon_row's score is, for the damage objective. "window" (the default) the
 #: R1 hits landed within --window; "per-stamina" those hits' damage over the stamina their attacks
 #: cost; "bar" the damage of the R1 chain a full bar of the build's own max stamina pays for;
-#: "moveset" the whole moveset's PvP rate (moveset_metrics).
-RANKS = {"window": None, "per-stamina": "damage_per_stamina", "bar": "bar_damage", "moveset": "moveset"}
+#: "moveset" the whole moveset's PvP rate (moveset_metrics); "stance" the same rate with the left
+#: hand choose_offhand picks and the build swapping stance (stance_metrics).
+RANKS = {"window": None, "per-stamina": "damage_per_stamina", "bar": "bar_damage", "moveset": "moveset",
+         "stance": "stance"}
 
 
 # --- The roll: neither side stands still (er-mods-rs er-mechanics-ashes.py, ashes-of-war.md 16a) --
@@ -3190,11 +3216,33 @@ def move_attack(attacks: dict, names: list[str], two_hand: bool, suffix: str) ->
 def move_stamina(data: Data, weapon: str, two_hand: bool, suffix: str) -> float | None:
     """Menu stamina one attack costs: meleeAttackBaseCost x its WeaponStaminaCostParam field
     (MOVE_COST_FIELD), / 10 -- attack_stamina's formula for any slot (INFERRED as there)."""
+    return slot_stamina(data, weapon, ("Single2Hand" if two_hand else "Single1Hand") + suffix)
+
+
+#: WeaponStaminaCostParam's field suffix per attack slot prefix, in place of MOVE_COST_FIELD's "1H"
+#: (the paramdef's names: normal1stDual1H, rollingLeft, ...).
+STANCE_COST_FIELD = {"Single1Hand": "1H", "Single2Hand": "2H", "Dual1Hand": "Dual1H", "Dual2Hand": "Dual2H",
+                     "Left1Hand": "Left"}
+#: The fields of the slots that have no MOVE_COST_FIELD suffix: two-handed L1/L2, power stance
+#: L1/L2 and the attacks out of a raised guard.
+OPPOSITE_COST_FIELD = {"OppositeSingle2HandNormal": "single2HandOppositeNormal",
+                       "OppositeSingle2HandStrong": "single2HandOppositeStrong",
+                       "OppositeDual2HandNormal1st": "dual2HandOppositeNormal1st",
+                       "OppositeDual2HandNormal2nd": "dual2HandOppositeNormal2nd",
+                       "OppositeDual2HandStrong": "dual2HandOppositeStrong",
+                       "GuardNormal1st": "guardNormal1st", "GuardNormal2nd": "guardNormal2nd"}
+
+
+def slot_stamina(data: Data, weapon: str, slot: str) -> float | None:
+    """move_stamina for any attack slot of WeaponActionCategoryParam (`Left1HandRolling`,
+    `OppositeDual2HandStrong`): its STANCE_COST_FIELD or OPPOSITE_COST_FIELD field."""
     c = data.stamina_cost.get(weapon)
     if not c:
         return None
-    field = MOVE_COST_FIELD[suffix]
-    field = field.replace("1H", "2H") if two_hand else field
+    field = OPPOSITE_COST_FIELD.get(slot)
+    if field is None:
+        prefix = next(p for p in STANCE_COST_FIELD if slot.startswith(p))
+        field = MOVE_COST_FIELD[slot[len(prefix):]].replace("1H", STANCE_COST_FIELD[prefix])
     rate = c["rates"].get(field, c["rates"].get("N" + field))
     return None if rate is None else c["melee"] * rate / STAMINA_UNIT
 
@@ -3311,19 +3359,9 @@ def moveset_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str,
     counter hits (p5z4.15), guard and parry, power stance (p5z4.16)."""
     w = data.weapons[weapon]
     names = [w["name"], weapon.replace("_", " ")]
-    table = speed_windows()
-    br = moveset_bracket(data, corpus, sl, attacks)
-    ar = attack_rating(data, weapon, inf, st, rings)
-    scale = data.damage_scale.get(weapon, 1.0)
-    poises = br["poises"] or [0.0]
-    my_poise = float(np.mean(poises))
-    bar = max_stamina(data, st, rings)
-    regen = data.stamina_regen
-    status = {}
-    for s in STATUS_PROC:
-        per = objective_value(data, weapon, inf, st, s, {})
-        if per > 0 and data.status_procs.get(s):
-            status[s] = (per, defender_status_cuts(data, corpus, sl, s, defender))
+    sc = MoveScorer(data, corpus, attacks, st, rings, sl, dfn, defender)
+    hand = sc.hand(weapon, inf)
+    g = "Single2Hand" if two_hand else "Single1Hand"
     families = {}
     for fam, engagements in MOVE_FAMILIES.items():
         best = None
@@ -3331,70 +3369,445 @@ def moveset_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str,
             atts = [move_attack(attacks, names, two_hand, sfx) for sfx in eng]
             if not all(a and live_hits(a) for a in atts):
                 continue
-            opener = strike_of(data, weapon, atts[0], table)
-            startup, _ = attack_commit(atts[0], table)
-            stagger = 0.0
-            if opener:
-                stagger = sum(opener["ab"] >= 1 or opener["pd"] >= p for p in poises) / len(poises)
-            land = [1.0] + [stagger + (1 - stagger) * FOLLOW_UNSTAGGERED] * (len(atts) - 1)
-            dmg, hits, landed, commit, cost = 0.0, 0, 0.0, MOVE_ENTRY.get(eng[0], 0.0), 0.0
-            for a, p, sfx in zip(atts, land, eng):
-                for h in live_hits(a, distinct=True):
-                    n = max(1, h.get("n") or 1)
-                    hits += n
-                    landed += p * n
-                    dmg += p * n * hit_damage(ar, dfn, h["rate"], h.get("type") or "physical", h.get("lower", 0),
-                                              h.get("flat") or NO_FLAT) * scale
-                commit += attack_commit(a, table)[1]
-                c = move_stamina(data, weapon, two_hand, sfx)
-                cost = None if c is None or cost is None else cost + c
-            st_hp = sum(status_metrics(data.status_procs[s], per, cuts, hits, commit)["status_damage_per_window"]
-                        for s, (per, cuts) in status.items())
-            own = landed * data.self_hit.get(weapon, 0)
-            reach = attack_reach(data, weapon, atts[0])
-            f_reach = (min(REACH_CLAMP[1], max(REACH_CLAMP[0], (reach / br["reach"]) ** REACH_EXP))
-                       if reach and br["reach"] else 1.0)
-            f_stagger = 1 + STAGGER_BONUS * stagger
-            f_trade = 1.0
-            if opener and br["counters"]:
-                won = lost = 0
-                for c in br["counters"]:
-                    mine, theirs = trade(opener, c, my_poise, c["poise"])
-                    won += mine and not theirs
-                    lost += theirs and not mine
-                f_trade = 1 + TRADE_BONUS * (won - lost) / len(br["counters"])
-            cover = (len(br["recovery"]) - bisect.bisect_left(br["recovery"], startup)) / len(br["recovery"]) \
-                if br["recovery"] else 0.5
-            f_punish = 1 + MOVESET_PUNISH * (2 * cover - 1)
-            f_stamina = 1.0
-            if cost and bar and regen is not None:
-                W = MOVESET_STAMINA_WINDOW
-                f_stamina = min(1.0, (bar + regen * W) / (cost + regen * commit) * commit / W)
-            ex = moveset_exponents()
-            net = dmg + st_hp - own
-            # A committed defender meets the contest (trade, punish); a reacting one rolls and is
-            # caught at `caught` (rolls_caught). The two split the defenders rather than multiply,
-            # so a fast startup is not rewarded twice (er-mods-rs slot_score).
-            contest = f_trade ** ex["f_trade"] * f_punish ** ex["f_punish"]
-            caught = rolls_caught(attack_live_seconds(atts[0], table), br["rolls"])
-            meet = contest if caught is None else (1 - REACT_SHARE) * contest + REACT_SHARE * caught
-            rate = ex[fam] * net / commit * (f_reach ** ex["f_reach"] * f_stagger ** ex["f_stagger"]
-                                             * meet * f_stamina ** ex["f_stamina"])
-            row = {"engagement": "+".join(eng), "rate": round(rate, 2), "raw": round(net / commit, 3),
-                   "damage": round(dmg, 1),
-                   "status": round(st_hp, 1), "self": round(own, 1), "startup_s": round(startup, 3), "commit_s": round(commit, 3),
-                   "stamina": None if cost is None else round(cost, 1), "reach_m": reach,
-                   "caught": None if caught is None else round(caught, 3),
-                   "f_reach": round(f_reach, 3), "f_stagger": round(f_stagger, 3), "f_trade": round(f_trade, 3),
-                   "f_punish": round(f_punish, 3), "f_stamina": round(f_stamina, 3)}
-            if best is None or rate > best["rate"]:
+            row = sc.engagement(fam, [(a, g + sfx, [hand], weapon) for a, sfx in zip(atts, eng)],
+                                MOVE_ENTRY.get(eng[0], 0.0), "+".join(eng))
+            if best is None or row["_rate"] > best["rate"]:
                 best = row
         if best:
             families[fam] = best
+    for row in families.values():
+        del row["_rate"]
+    return matching_law(families)
+
+
+def matching_law(families: dict) -> dict:
+    """moveset_metrics' result over its families' best rows: {"moveset": sum(s^2) / sum(s) over
+    the positive rates, "families": families}; {} when no rate is positive."""
     s = [f["rate"] for f in families.values() if f["rate"] > 0]
     if not s:
         return {}
     return {"moveset": round(sum(x * x for x in s) / sum(s), 2), "families": families}
+
+
+class MoveScorer:
+    """moveset_metrics' engagement rate, for engagements whose attacks come from any hand: what it
+    holds is what every engagement at effective stats `st` with `rings`, against `dfn` and `sl`'s
+    bracket, is weighed against (moveset_bracket, the bar and its regen)."""
+
+    def __init__(self, data: Data, corpus: list[Build], attacks: dict, st: dict, rings, sl: int, dfn: dict,
+                 defender=None):
+        self.data, self.corpus, self.st, self.rings, self.sl, self.dfn = data, corpus, st, rings, sl, dfn
+        self.defender = defender
+        self.table = speed_windows()
+        self.br = moveset_bracket(data, corpus, sl, attacks)
+        self.poises = self.br["poises"] or [0.0]
+        self.my_poise = float(np.mean(self.poises))
+        self.bar = max_stamina(data, st, rings)
+        self.regen = data.stamina_regen
+        self.status: dict = {}
+
+    def hand(self, weapon: str, inf: str, side: float = 1.0) -> tuple:
+        """One hand's weapon as an engagement step reads it: (weapon, infusion, attack rating,
+        scale), the scale WeaponParam.damageScale x `side` (the left hand's leftDamageScale, 1 for
+        the right). Its poison and bleed build-up per hit is kept for the status term, by weapon and
+        infusion: a twin in the left hand at another infusion builds up its own."""
+        data = self.data
+        if (weapon, inf) not in self.status:
+            self.status[weapon, inf] = {}
+            for s in STATUS_PROC:
+                per = objective_value(data, weapon, inf, self.st, s, {})
+                if per > 0 and data.status_procs.get(s):
+                    self.status[weapon, inf][s] = (per, defender_status_cuts(data, self.corpus, self.sl, s,
+                                                                             self.defender))
+        scale = data.damage_scale.get(weapon, 1.0)
+        return (weapon, inf, attack_rating(data, weapon, inf, self.st, self.rings),
+                scale if side == 1.0 else scale * side)
+
+    def engagement(self, fam: str, steps: list, entry: float, label: str) -> dict:
+        """One engagement's row, as moveset_metrics' docstring scores it. `steps` are its attacks
+        in order, each (attacks.json row, its WeaponActionCategoryParam slot, the hands its live
+        hits strike with -- two for a power stance L1/L2, whose every hitbox has a twin with no
+        damage row: the other hand's blade -- and the weapon whose row it is, whose stamina it
+        costs). The opener's strike, reach and roll catch are its row's weapon's; `entry` is the
+        seconds before the opener can start. `_rate` is the unrounded rate."""
+        data, br, table, poises = self.data, self.br, self.table, self.poises
+        (a0, _, _, weapon) = steps[0]
+        opener = strike_of(data, weapon, a0, table)
+        startup, _ = attack_commit(a0, table)
+        stagger = 0.0
+        if opener:
+            stagger = sum(opener["ab"] >= 1 or opener["pd"] >= p for p in poises) / len(poises)
+        land = [1.0] + [stagger + (1 - stagger) * FOLLOW_UNSTAGGERED] * (len(steps) - 1)
+        dmg, hits, landed, commit, cost = 0.0, Counter(), Counter(), entry, 0.0
+        for (a, slot, hands, payer), p in zip(steps, land):
+            for h in live_hits(a, distinct=True):
+                n = max(1, h.get("n") or 1)
+                for w, wi, ar, scale in hands:
+                    hits[w, wi] += n
+                    landed[w, wi] += p * n
+                    dmg += p * n * hit_damage(ar, self.dfn, h["rate"], h.get("type") or "physical",
+                                              h.get("lower", 0), h.get("flat") or NO_FLAT) * scale
+            commit += attack_commit(a, table)[1]
+            c = slot_stamina(data, payer, slot)
+            cost = None if c is None or cost is None else cost + c
+        st_hp = sum(status_metrics(data.status_procs[s], per, cuts, hits[h], commit)["status_damage_per_window"]
+                    for h in hits for s, (per, cuts) in self.status.get(h, {}).items())
+        own = sum(n * data.self_hit.get(w, 0) for (w, _), n in landed.items())
+        reach = attack_reach(data, weapon, a0)
+        f_reach = (min(REACH_CLAMP[1], max(REACH_CLAMP[0], (reach / br["reach"]) ** REACH_EXP))
+                   if reach and br["reach"] else 1.0)
+        f_stagger = 1 + STAGGER_BONUS * stagger
+        f_trade = 1.0
+        if opener and br["counters"]:
+            won = lost = 0
+            for c in br["counters"]:
+                mine, theirs = trade(opener, c, self.my_poise, c["poise"])
+                won += mine and not theirs
+                lost += theirs and not mine
+            f_trade = 1 + TRADE_BONUS * (won - lost) / len(br["counters"])
+        cover = (len(br["recovery"]) - bisect.bisect_left(br["recovery"], startup)) / len(br["recovery"]) \
+            if br["recovery"] else 0.5
+        f_punish = 1 + MOVESET_PUNISH * (2 * cover - 1)
+        f_stamina = 1.0
+        if cost and self.bar and self.regen is not None:
+            W = MOVESET_STAMINA_WINDOW
+            f_stamina = min(1.0, (self.bar + self.regen * W) / (cost + self.regen * commit) * commit / W)
+        ex = moveset_exponents()
+        net = dmg + st_hp - own
+        # A committed defender meets the contest (trade, punish); a reacting one rolls and is
+        # caught at `caught` (rolls_caught). The two split the defenders rather than multiply,
+        # so a fast startup is not rewarded twice (er-mods-rs slot_score).
+        contest = f_trade ** ex["f_trade"] * f_punish ** ex["f_punish"]
+        caught = rolls_caught(attack_live_seconds(a0, table), br["rolls"])
+        meet = contest if caught is None else (1 - REACT_SHARE) * contest + REACT_SHARE * caught
+        rate = ex[fam] * net / commit * (f_reach ** ex["f_reach"] * f_stagger ** ex["f_stagger"]
+                                         * meet * f_stamina ** ex["f_stamina"])
+        return {"engagement": label, "rate": round(rate, 2), "raw": round(net / commit, 3),
+                "damage": round(dmg, 1),
+                "status": round(st_hp, 1), "self": round(own, 1), "startup_s": round(startup, 3),
+                "commit_s": round(commit, 3),
+                "stamina": None if cost is None else round(cost, 1), "reach_m": reach,
+                "caught": None if caught is None else round(caught, 3),
+                "f_reach": round(f_reach, 3), "f_stagger": round(f_stagger, 3), "f_trade": round(f_trade, 3),
+                "f_punish": round(f_punish, 3), "f_stamina": round(f_stamina, 3), "_rate": rate}
+
+
+# --- Stance swapping: the right hand's weapon with what the left holds, in every grip ---------------
+#
+# docs/DS2-STANCES.md has the sources. A build changes stance between engagements: one-handed, the
+# right weapon two-handed (tap Y), the left weapon two-handed (hold Y) or power stance (hold Y with
+# a pair that can), and each stance has its own attack slots (WeaponActionCategoryParam, whose
+# Japanese field names say which: Single1Hand/Single2Hand one weapon, Left1Hand the left weapon's
+# L1/L2, Dual1Hand the chain attack (二刀流), Dual2Hand and OppositeDual2Hand power stance
+# (二刀流両手, its L1/L2 逆腕), OppositeSingle2Hand the two-handed L1/L2, Guard* out of a raised
+# shield (ガード構え)).
+
+#: Power stance pairs, darksouls2.wiki.gg Dual_Wielding (COMMUNITY), keyed by
+#: WeaponTypeParam.dualWieldingPermission (regulation_stance), whose values rise in that page's
+#: priority order -- 20 claws and fists, 30 daggers, 40 thrusting swords, 50 straight and curved
+#: swords and katanas, 55 Bewitched Alonne Sword, 60 twinblades, 70 hammers, 80 greatswords, 85
+#: Majestic Greatsword, 90 axes, 100 ultra and curved greatswords, 110 greataxes, 120 great
+#: hammers, 130 reapers, 140 halberds, 150 spears, 160 lances, 170 whips, 180 crossbows, 190
+#: repeating crossbows, 220 Reeve's and 230 Orma's Greatshield, 240 Work Hook -- and whose
+#: reclassified weapons (Crypt Blacksword a greataxe, Spitfire Spear a lance, ...) are the page's
+#: (checked 2026-10-24). Per category: (the categories it pairs with at the same priority, where
+#: the right hand's weapon sets the moveset; those of higher priority, which set it). A pair is
+#: listed on either side. The page's left-handed Majestic Greatsword category is not told apart.
+POWER_STANCE = {
+    20: ({20, 30, 170, 240}, {40, 50, 55, 150, 160}),
+    30: ({30}, {40, 50, 55, 150, 160}),
+    40: ({40}, {50, 55, 150, 160}),
+    50: ({50}, {55, 70, 80, 85, 90, 150, 160}),
+    55: ({55}, {70, 85, 90, 150, 160}),
+    60: ({60}, {140}),
+    70: ({70}, {90, 110, 120}),
+    80: ({80}, {85, 100, 110, 120}),
+    85: ({85}, {100, 110, 120}),
+    90: ({90}, {110, 120}),
+    100: ({100}, {110, 120}),
+    110: ({110}, {120}),
+    120: ({120}, set()),
+    130: ({130}, {140}),
+    140: ({140}, set()),
+    150: ({150}, {160}),
+    160: ({160}, set()),
+    170: ({170}, set()),
+    180: ({180}, set()),
+    190: ({190}, set()),
+    220: (set(), {230}),
+}
+#: Power stance, and the chain attack out of the other hand, need STR and DEX at 1.5x the higher
+#: one-handed requirement of the two, rounded down (wiki.gg; ds2-grip-state-chain read the 1.5x and
+#: no halving in the grip writer, EXE).
+POWER_STANCE_STATS, POWER_STANCE_RATE = ("strength", "dexterity"), 1.5
+#: Seconds a stance change costs an engagement thrown from a stance other than the one the build
+#: stands in. INFERRED stand-in: DS2's grip-change animations were not read and no frame data was
+#: found (2026-10-24); er-mods-rs's roll entry, 20 frames at 30 fps, as MOVE_ENTRY's.
+STANCE_SWAP = 20 / 30
+#: generate_build's left-hand candidates scored in full: its weapons_for ranking's best melee
+#: weapons, then the next ones that can power stance with the primary.
+OFFHAND_TRIES, OFFHAND_PS_TRIES = 10, 5
+#: Movement openers a cross-hand engagement starts from (the other hand's R1/L1 follows).
+CROSS_MOVES = ("Rolling", "Dash", "Step")
+
+
+def power_stance(data: Data, right: str, left: str, st: dict) -> dict | None:
+    """Whether `right` and `left` power stance (POWER_STANCE): {"owner": the weapon whose L1/L2
+    rows play, "need": the STR and DEX it takes, "met": whether `st` meets them and both weapons'
+    one-handed requirements}; None when the pair cannot."""
+    a, b = data.stance.get(right, (0, 1.0))[0], data.stance.get(left, (0, 1.0))[0]
+    if not (a and b):
+        return None
+    same_a, up_a = POWER_STANCE.get(a, (set(), set()))
+    same_b, up_b = POWER_STANCE.get(b, (set(), set()))
+    if b in same_a or a in same_b:
+        owner = right
+    elif b in up_a:
+        owner = left
+    elif a in up_b:
+        owner = right
+    else:
+        return None
+    req = lambda k, s: (data.weapons[k].get("require") or {}).get(s, 0)
+    need = {s: int(POWER_STANCE_RATE * max(req(right, s), req(left, s))) for s in POWER_STANCE_STATS}
+    met = (all(st.get(s, 0) >= v for s, v in need.items())
+           and weapon_ok(data, right, st, False) and weapon_ok(data, left, st, False))
+    return {"owner": owner, "need": need, "met": met}
+
+
+def stance_metrics(data: Data, corpus: list[Build], attacks: dict, right: str, rinf: str, left: str | None,
+                   linf: str | None, st: dict, rings, sl: int, dfn: dict, defender=None) -> dict:
+    """The PvP rate of `right`+`rinf` in the right hand with `left`+`linf` in the left (None for an
+    empty hand; a shield key for a shield) when the build swaps stance, at effective stats `st`
+    with `rings` against `dfn` and `sl`'s bracket. Each stance is scored as moveset_metrics scores a
+    grip (MoveScorer), over the engagements it can throw:
+
+    * 1H (the right weapon one-handed): its Single1Hand moveset; the left weapon's L1/L2 moveset
+      (Left1Hand, x its leftDamageScale); cross-hand strings -- R1 then L1, L1 then R1, R2 then L2,
+      L2 then R2, a rolling, running or backstep attack of one hand then the other's R1/L1 -- whose
+      follow-up is its weapon's chain attack (Dual1Hand) when the pair meets power stance's stats
+      (wiki.gg: the chain needs them) and its plain one otherwise; and with a shield, the right
+      weapon's attacks out of a raised guard (GuardNormal: spears, rapiers, halberds, lances).
+    * 2H: the right weapon's Single2Hand moveset and its two-handed L2 where it hits
+      (OppositeSingle2HandStrong: the ultra greatswords' and great hammers' L2; a parry has no
+      damage row and is not counted).
+    * L2H: the same of the left weapon, two-handed (STR halved, as weapon_ok).
+    * PS (power_stance met): the right weapon's R1/R2 (Dual2Hand) and the owner's power stance
+      L1, L1 L1 and L2 (OppositeDual2Hand), each hitbox struck by both blades at their own attack
+      ratings, at the owner's stamina cost.
+
+    Each stance's rate is its own weapon's moveset (moveset_metrics, family by family) with the
+    other hand's engagements taken where they raise it. The build stands in its best stance that
+    swings the right weapon (home: 1H, 2H or PS); a family may take another stance's engagement at
+    STANCE_SWAP more seconds, again only where that raises the rate -- the matching law falls when
+    a family under half of it rises, and an option the build carries it may leave unused -- so the
+    rate is never under the primary's own best grip. Returns {"stance": that rate, "home",
+    "stances": each stance's own rate, "families": per family its row and "stance", "power_stance":
+    power_stance's answer, "chain": whether the cross-hand follow-ups are chain attacks}; {} when no
+    stance has an attack. Not counted: block and guard stability, parries and their ripostes
+    (p5z4.15), guard breaks (no damage), accel's startup cut (no numbers found)."""
+    sc = MoveScorer(data, corpus, attacks, st, rings, sl, dfn, defender)
+    names = {k: [data.weapons[k]["name"], k.replace("_", " ")] for k in (right, left) if k}
+
+    def row(k: str, slot: str) -> dict | None:
+        a = next((a for a in (attacks.get((norm(nm), slot)) for nm in names[k]) if a), None)
+        return a if a and live_hits(a) else None
+
+    R = (right, sc.hand(right, rinf), "")
+    shield = bool(left and data.weapons[left].get("isShield"))
+    L = (left, sc.hand(left, linf, data.stance.get(left, (0, 0.9))[1]), "L:") if left and not shield else None
+    ps = power_stance(data, right, left, st) if L else None
+    chain = bool(ps and ps["met"])
+
+    def eng(fam: str, parts: list, entry: float = 0.0) -> list:
+        """`parts` [(hand, slot, hands struck with, stamina payer)] as one engagement, [] when an
+        attack has no live hit."""
+        steps = []
+        for (k, hand, tag), slot, hands, payer in parts:
+            a = row(k, slot)
+            if a is None:
+                return []
+            steps.append((a, slot, hands or [hand], payer or k))
+        return [(fam, steps, entry, "+".join(tag + slot for (_, _, tag), slot, *_ in parts))]
+
+    def moveset(h: tuple, prefix: str) -> list:
+        return [e for fam, engs in MOVE_FAMILIES.items() for s in engs
+                for e in eng(fam, [(h, prefix + x, None, None) for x in s], MOVE_ENTRY.get(s[0], 0.0))]
+
+    stances = {}  # stance -> (its weapon's own moveset, the engagements the other hand adds)
+    if weapon_ok(data, right, st, False):
+        out = []
+        if L and weapon_ok(data, left, st, False):
+            out += moveset(L, "Left1Hand")
+            plain = {"": "Single1Hand", "L:": "Left1Hand"}  # by hand: the left may be the primary's twin
+            for x, y in ((R, L), (L, R)):
+                follow = "Dual1Hand" if chain else plain[y[2]]
+                for fam, a, b in (("r1", "Normal1st", "Normal1st"), ("r2", "Strong1st", "Strong1st")):
+                    out += eng(fam, [(x, plain[x[2]] + a, None, None), (y, follow + b, None, None)])
+                for m in CROSS_MOVES:
+                    out += eng("move", [(x, plain[x[2]] + m, None, None), (y, follow + "Normal1st", None, None)],
+                               MOVE_ENTRY[m])
+        if shield and weapon_ok(data, left, st, False):
+            out += eng("r1", [(R, "GuardNormal1st", None, None)])
+            out += eng("r1", [(R, "GuardNormal1st", None, None), (R, "GuardNormal2nd", None, None)])
+        stances["1H"] = (moveset(R, "Single1Hand"), out)
+    if weapon_ok(data, right, st, True):
+        stances["2H"] = (moveset(R, "Single2Hand"), eng("r2", [(R, "OppositeSingle2HandStrong", None, None)]))
+    if L and weapon_ok(data, left, st, True):
+        stances["L2H"] = (moveset(L, "Single2Hand"), eng("r2", [(L, "OppositeSingle2HandStrong", None, None)]))
+    if chain:
+        both, owner = [R[1], L[1]], (R if ps["owner"] == right else L)
+        stances["PS"] = (moveset(R, "Dual2Hand"),
+                         eng("r1", [(owner, "OppositeDual2HandNormal1st", both, None)])
+                         + eng("r1", [(owner, "OppositeDual2HandNormal1st", both, None),
+                                      (owner, "OppositeDual2HandNormal2nd", both, None)])
+                         + eng("r2", [(owner, "OppositeDual2HandStrong", both, None)]))
+
+    def rows(engs: list, extra: float, tag: str) -> list:
+        return [sc.engagement(fam, steps, entry + extra, label) | {"stance": tag, "_fam": fam}
+                for fam, steps, entry, label in engs]
+
+    def law(families: dict) -> float:
+        return matching_law(families).get("moveset", 0.0)
+
+    def offer(families: dict, offered: list) -> dict:
+        """`families` with each offered row taken in its family where it raises the matching law,
+        best rate first: sum(s^2) / sum(s) falls when a family below half of it rises or a weak
+        one joins, and an option the build carries is one it may leave unused."""
+        families = dict(families)
+        for r in sorted(offered, key=lambda r: -r["_rate"]):
+            f = r["_fam"]
+            if f in families and r["_rate"] <= families[f]["rate"]:
+                continue
+            tried = families | {f: r}
+            if law(tried) > law(families):
+                families = tried
+        return families
+
+    own = {}
+    for name, (base, added) in stances.items():
+        fams = {}
+        for r in rows(base, 0.0, name):  # the stance's own weapon: its moveset_metrics, family by family
+            if r["_fam"] not in fams or r["_rate"] > fams[r["_fam"]]["rate"]:
+                fams[r["_fam"]] = r
+        own[name] = offer(fams, rows(added, 0.0, name))
+    scores = {name: law(f) for name, f in own.items()}
+    if not any(scores.values()):
+        return {}
+    # The right hand's weapon is the build's: it stands in a stance that swings it, and the left
+    # weapon two-handed is a stance it swaps to. Standing in L2H would rank every primary by its
+    # best left hand, which is that weapon's own row.
+    home = max((s for s in scores if s != "L2H"), key=scores.get, default="L2H")
+    families = offer(own[home], [r for name, (base, added) in stances.items() if name != home
+                                 for r in rows(base + added, STANCE_SWAP, name)])
+    for r in families.values():
+        r.pop("_rate", None)
+        r.pop("_fam", None)
+    return {"stance": law(families), "home": home, "stances": scores, "families": families,
+            "power_stance": ps, "chain": chain}
+
+
+def offhand_room(data: Data, stats: dict, rings, held) -> float:
+    """The weight a left hand may add and still leave the build a full set of armour under
+    EQUIP_CAP: best_armor's budget beside the `held` weapons (keys) and `rings`, less its lightest
+    wearable piece in every slot, whatever FULL_ARMOR says -- a left hand is not worth going bare
+    for. Without it a second great hammer left generate_armor no set at all, at SL 100."""
+    worn = [r for r in rings if r in data.rings]
+    cap = max_load(data, stats, worn) * EQUIP_CAP
+    eff = gear_stats(data, stats, worn)
+    carried = sum(data.weapons.get(w, {}).get("weight", 0) for w in held)
+    carried += sum(data.rings.get(r, {}).get("weight", 0) for r in rings if r in data.rings)
+    lightest = sum(min((v.get("weight", 0) for k, v in data.armor[slot].items()
+                        if armor_allowed(k, True) and armor_ok(data, slot, k, eff)), default=0)
+                   for slot in ARMOR_SLOTS)
+    return cap - carried - lightest
+
+
+def choose_offhand(data: Data, corpus: list[Build], attacks: dict, weapon: str, inf: str, st: dict, rings,
+                   sl: int, dfn: dict, ranked: list, defender=None, room: float | None = None) -> dict:
+    """What the left hand holds beside `weapon`+`inf`: of nothing, the primary's own twin, a shield
+    when the primary attacks out of a raised guard (the lightest it wields), and `ranked`
+    (weapons_for rows at these stats, best first: each weapon at its best infusion there) -- its
+    first OFFHAND_TRIES melee weapons, then the next OFFHAND_PS_TRIES that can power stance with
+    the primary -- the one stance_metrics rates highest, of those no heavier than `room`
+    (offhand_room; None for no limit). Returns stance_metrics' answer for it plus
+    "left" and "left_infusion" (None for an empty hand), "solo" (the primary alone, swapping only
+    its own grip) and "ps_short": for the best-ranked power stance partner the stats fall short of,
+    (its key, the STR and DEX it needs); None when none does."""
+    melee, seen, by_name = [], set(), {}
+    for k, w in data.weapons.items():  # generate_build's: a name's first key
+        by_name.setdefault(w["name"], k)
+    for _, name, winf, _, _ in ranked:
+        key = by_name.get(name)
+        if (not key or key in seen or key in data.ranged or CATALYST.search(key)
+                or data.weapons[key].get("isShield")):
+            continue
+        seen.add(key)
+        melee.append((key, winf))
+    picks = melee[:OFFHAND_TRIES]
+    pairs = [m for m in melee[OFFHAND_TRIES:] if power_stance(data, weapon, m[0], st) is not None]
+    picks += pairs[:OFFHAND_PS_TRIES]
+    if weapon not in seen:
+        picks.append((weapon, inf))
+    guard = next((a for a in (attacks.get((norm(nm), "GuardNormal1st"))
+                              for nm in (data.weapons[weapon]["name"], weapon.replace("_", " "))) if a), None)
+    if guard and live_hits(guard):
+        shields = [k for k, w in data.weapons.items() if w.get("isShield") and weapon_ok(data, k, st, False)]
+        if shields:
+            picks.append((min(shields, key=lambda k: (data.weapons[k].get("weight", 0), k)), "No_Infusion"))
+    base = stance_metrics(data, corpus, attacks, weapon, inf, None, None, st, rings, sl, dfn, defender)
+    best = base | {"left": None, "left_infusion": None}
+    short = None
+    for key, linf in picks:
+        if room is not None and data.weapons[key].get("weight", 0) > room:
+            continue  # it would leave no armour under EQUIP_CAP (offhand_room)
+        m = stance_metrics(data, corpus, attacks, weapon, inf, key, linf, st, rings, sl, dfn, defender)
+        if m and m["stance"] > best.get("stance", 0.0):
+            best = m | {"left": key, "left_infusion": linf}
+        ps = m.get("power_stance") if m else None
+        if short is None and ps and not ps["met"]:
+            short = (key, ps["need"])
+    if "stance" not in best:  # nothing the primary throws scores
+        return {}
+    return best | {"solo": base.get("stance", 0.0), "ps_short": short}
+
+
+def offhand_summary(data: Data, o: dict) -> dict | None:
+    """choose_offhand's answer as generate_build returns it, by display name: the left hand
+    ("left", "infusion"; None for an empty hand), the stance rate with it and the primary's alone,
+    the home stance and every stance's rate, per family the stance and engagement it throws, whether
+    the pair power stances (and which weapon's L1/L2 play) and chains, and the power stance the
+    stats fall short of. None for a launcher."""
+    if not o:
+        return None
+    name = lambda k: data.weapons[k]["name"] if k else None
+    ps = o.get("power_stance")
+    short = o.get("ps_short")
+    return {"left": name(o.get("left")), "infusion": o.get("left_infusion"), "stance": o.get("stance", 0.0),
+            "solo": o.get("solo", 0.0), "home": o.get("home"), "stances": o.get("stances", {}),
+            "families": {f: {"stance": r["stance"], "engagement": r["engagement"], "rate": r["rate"]}
+                         for f, r in (o.get("families") or {}).items()},
+            "power_stance": ps and {"owner": name(ps["owner"]), "need": ps["need"], "met": ps["met"]},
+            "chain": bool(o.get("chain")), "ps_short": short and (name(short[0]), short[1])}
+
+
+def offhand_lines(o: dict | None) -> list[str]:
+    """--generate's lines for offhand_summary's answer."""
+    if not o:
+        return []
+    left = f"{o['left']} ({o['infusion'].replace('_', ' ')})" if o["left"] else "empty"
+    ps = o["power_stance"]
+    out = [f"left hand: {left}; stance rate {o['stance']:.2f} against {o['solo']:.2f} for the primary alone, "
+           f"stands in {o['home']} (" + ", ".join(f"{s} {v:.2f}" for s, v in o["stances"].items()) + ")"]
+    if ps:
+        out.append(f"power stance: {'yes' if ps['met'] else 'no'}, {ps['owner']}'s L1/L2, needs "
+                   + " ".join(f"{s[:3].upper()} {v}" for s, v in ps["need"].items())
+                   + ("; cross-hand follow-ups are chain attacks" if o["chain"] else ""))
+    if o["ps_short"]:
+        name, need = o["ps_short"]
+        out.append(f"power stance with {name} needs " + " ".join(f"{s[:3].upper()} {v}" for s, v in need.items()))
+    out += [f"  {f:4} {r['stance']:3} {r['engagement']} {r['rate']:.2f}" for f, r in o["families"].items()]
+    return out
 
 
 HYPERARMOR =Path.home() / ".cache/ds2-builds/hyperarmor.json"  # weapon name -> WeaponParam.uninterruptibleRate
@@ -4310,6 +4723,13 @@ def best_weapon_row(data: Data, corpus: list[Build], weapon: str, inf: str, sl: 
         if rank == "moveset":
             metrics.update(moveset_metrics(data, corpus, attacks, weapon, inf, two, gear_stats(data, st, worn),
                                            worn, sl, dfn, defender))
+        elif rank == "stance":
+            eff = gear_stats(data, st, worn)
+            ranked, _, _ = weapons_for(data, eff, sl, corpus, top=10_000, window=window, defender=defender)
+            o = choose_offhand(data, corpus, attacks, weapon, inf, eff, worn, sl, dfn, ranked, defender)
+            if o.get("stance"):
+                metrics["stance"] = o["stance"]
+                metrics["offhand"] = offhand_summary(data, o)
         if by:
             if by not in metrics:
                 return None
@@ -5556,11 +5976,12 @@ def suggest_rings(data: Data, near: Counter, every: Counter | None = None, n: in
 
 def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: bool, stats: dict,
                    rings: list[str], listed=(), catalysts=(), sl: int | None = None,
-                   granted=()) -> tuple[list[str], str | None, dict]:
+                   granted=(), offhand: tuple[str, str] | None = None) -> tuple[list[str], str | None, dict]:
     """The generated build's armour, for a build wearing `rings` and holding the heaviest one of the
     primary and the `listed` weapons (keys) -- any one of them can be equipped in its place without
     passing 70% -- plus, for a build that casts, the heaviest of its `catalysts` (keys), which is
-    held beside the weapon. As display names head/chest/hands/legs ("Naked" for a slot left bare),
+    held beside the weapon, and the `offhand` (key, infusion) choose_offhand puts in the left
+    hand. As display names head/chest/hands/legs ("Naked" for a slot left bare),
     a note when the load cap left a slot bare or left no set at all -- never a silent naked build --
     or when poise drove the pick, and the trade numbers (below; {} without them). Under FULL_ARMOR
     every slot holds a piece unless no set with four fits the load at all.
@@ -5585,6 +6006,8 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
     held = [(max([weapon, *listed], key=weight), inf)]  # max keeps the first of a tie: the primary
     if catalysts:
         held.append((max(catalysts, key=weight), "No_Infusion"))
+    if offhand:
+        held.append(offhand)
     wearer = Build("", stats, ["Naked"] * 4, held, int(two), rings, [])
     mix, scarcity = threat_mix(data, corpus, sl), load_scarcity(data, stats)
     full = FULL_ARMOR
@@ -5680,8 +6103,15 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     listed = [by_name[name] for name, _, _ in one[:15] + only2[:5]]
     catalysts = [c for _, c, _, _ in best_catalysts(data, spells, eff)]
     granted = [(weapon, inf, two)] + [(by_name[n], i, grips[n]) for n, i, _ in one[:15] + only2[:5]]
+    weight = lambda k: data.weapons.get(k, {}).get("weight", 0)
+    held = [max([weapon, *listed], key=weight)] + ([max(catalysts, key=weight)] if catalysts else [])
+    offhand = (choose_offhand(data, corpus, data.__dict__.setdefault("_attacks", load_attacks(data)), weapon, inf,
+                              eff, worn, sl, defender_defense(data, corpus, sl, defender)[0], rows, defender,
+                              None if allow_naked else offhand_room(data, stats, suggested, held))
+               if weapon not in data.ranged else {})
+    left = (offhand["left"], offhand["left_infusion"]) if offhand.get("left") else None
     armor, armor_note, trades = ([], None, {}) if allow_naked else generate_armor(
-        data, corpus, weapon, inf, two, stats, suggested, listed, catalysts, sl, granted)
+        data, corpus, weapon, inf, two, stats, suggested, listed, catalysts, sl, granted, left)
     return {"class": cls, "sl": sl, "stats": stats, "two_handed": two, "objective": objective, "value": round(val),
             "primary": (data.weapons[weapon]["name"], inf), "weapons_1h": one[:15], "weapons_2h_only": only2[:5],
             "rings": [data.rings[r]["name"] for r in suggested for _ in range(3)]
@@ -5690,6 +6120,7 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             "trade_rate": trades.get("trade_rate"), "exchange": trades.get("exchange"),
             "trade_previous": trades.get("previous"), "trade_basis": trades.get("basis"),
             "trade_candidates": trades.get("candidates"), "granted": granted,
+            "offhand": offhand_summary(data, offhand),
             "flex": flexibility(data, corpus, stats, sl, armor_keys(data, armor), suggested),
             "spells": [data.spells[s]["name"] for s in spells], "slots": slots,
             "ring_trades": ring_trades(data, corpus, weapon, sl, grip, spells, cls, use_floors, worn),
@@ -6189,6 +6620,13 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             ("-" none); hits n:mv:type:lower:flat
 #                                                             (live_hits distinct, flat "-" none);
 #                                                             strike_of's fields, or one "-"
+#   ST category left_scale                                   the last W's data.stance:
+#                                                             dualWieldingPermission and
+#                                                             leftDamageScale (regulation_stance)
+#   SM slot startup commit reach stamina hits strike          one attack of a STANCE_SLOTS slot
+#                                                             (stance_metrics), as MV with the
+#                                                             full slot name and slot_stamina;
+#                                                             an MC record follows it
 #   SH hp                                                     data.self_hit of the last W
 #   MW f_reach f_stagger f_trade f_punish f_stamina r1 r2      moveset_exponents
 #     move jump
@@ -6209,7 +6647,7 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 22"
+BACKEND_FORMAT = "ds2-build-recommender-data 23"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -6335,6 +6773,38 @@ def _moveset_records(data: Data, attacks: dict, key: str, name: str, timing, bra
     return out
 
 
+#: The attack slots stance_metrics reads beyond the MV records' Single1Hand and Single2Hand ones.
+STANCE_SLOTS = ([p + s for p in ("Left1Hand", "Dual1Hand", "Dual2Hand")
+                 for s in dict.fromkeys(x for engs in MOVE_FAMILIES.values() for eng in engs for x in eng)]
+                + ["OppositeSingle2HandStrong", "OppositeDual2HandNormal1st", "OppositeDual2HandNormal2nd",
+                   "OppositeDual2HandStrong", "GuardNormal1st", "GuardNormal2nd"])
+
+
+def _stance_records(data: Data, attacks: dict, key: str, name: str, timing, bracket_rolls: list) -> list[str]:
+    """export_backend's ST record for one weapon and an SM and MC record per STANCE_SLOTS attack
+    with a live hit, as stance_metrics reads it (its `row`: the first name with the slot)."""
+    out = []
+    if key in data.stance:
+        perm, left = data.stance[key]
+        out.append("\t".join(["ST", _num(perm), _num(float(left))]))
+    names = [name, key.replace("_", " ")]
+    for slot in STANCE_SLOTS:
+        a = next((a for a in (attacks.get((norm(nm), slot)) for nm in names) if a), None)
+        if not a or not live_hits(a):
+            continue
+        startup, commit = attack_commit(a, timing)
+        hits = " ".join(
+            ":".join([_num(max(1, h.get("n") or 1)), _num(h["rate"]), HIT_CODE.get(h.get("type") or "physical", "p"),
+                      _num(h.get("lower", 0)), ",".join(map(_num, h["flat"])) if h.get("flat") else "-"])
+            for h in live_hits(a, distinct=True))
+        strike = strike_of(data, key, a, timing)
+        out.append("\t".join(["SM", slot, _num(float(startup)), _num(float(commit)), _opt(attack_reach(data, key, a)),
+                              _opt(slot_stamina(data, key, slot)), hits,
+                              *(_strike_fields(strike) if strike else ["-"])]))
+        out.append("\t".join(["MC", *(_opt(rolls_caught(attack_live_seconds(a, timing), r)) for r in bracket_rolls)]))
+    return out
+
+
 def export_backend(data: Data, corpus: list[Build]) -> str:
     attacks = data.__dict__.setdefault("_attacks", load_attacks(data))
     bracket_rolls = [moveset_bracket(data, corpus, lo, attacks)["rolls"] for lo, _ in SL_BRACKETS]
@@ -6420,6 +6890,7 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                 if hit:
                     out.append("\t".join(["FS", "2" if two else "1", *_strike_fields(hit)]))
             out.extend(_moveset_records(data, attacks, key, w["name"], timing, bracket_rolls))
+            out.extend(_stance_records(data, attacks, key, w["name"], timing, bracket_rolls))
         if data.self_hit.get(key):
             out.append("\t".join(["SH", _num(data.self_hit[key])]))
         r = data.ranged.get(key)
@@ -6728,6 +7199,8 @@ EXPECT_BEST_WEAPONS = [
     # one-handed, whose resistance the procs read
     ("No_Infusion", 150, "damage", "two", "Katana", 1.5, "moveset", False, None, "static"),
     ("Bleed", 100, "damage", "one", "Twinblade", 2.0, "moveset", False, HAVEL, "static"),
+    # stance swapping: each dagger with the left hand choose_offhand pairs it with
+    ("Lightning", 120, "damage", "two", "Dagger", 1.5, "stance", False, None, "static"),
 ]
 
 
@@ -6890,8 +7363,9 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append(f"pub const ADAPTIVE_OPTIMIZE: AdaptiveOptimizeCases = {_rs(a_opt)};\n")
     out.append(f"pub const ADAPTIVE_GENERATE: AdaptiveGenerateCases = {_rs(a_gen)};\n")
     flexes: list = []  # the generated builds, as flexibility() questions: filled by expect_builds
-    opt, gen = expect_builds(data, corpus, EXPECT_BUILDS, EXPECT_NAKED, "two", flexes)
-    opt_one, gen_one = expect_builds(data, corpus, EXPECT_ONE_HANDED, [], "one", flexes)
+    offhands: list = []  # every GENERATE and GENERATE_ONE_HANDED build's left hand
+    opt, gen = expect_builds(data, corpus, EXPECT_BUILDS, EXPECT_NAKED, "two", flexes, offhands=offhands)
+    opt_one, gen_one = expect_builds(data, corpus, EXPECT_ONE_HANDED, [], "one", flexes, offhands=offhands)
     out.append("// weapon, infusion, sl, objective -> class, two-handed, stats, value.")
     out.append(f"pub const OPTIMIZE: OptimizeCases = {_rs(opt)};\n")
     out.append("// weapon, infusion, sl, objective, allow naked -> class, two-handed, stats, 1H rows, 2H-only")
@@ -6901,6 +7375,9 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append("// The same two questions with the grip forced one-handed (--grip one).")
     out.append(f"pub const OPTIMIZE_ONE_HANDED: OptimizeCases = {_rs(opt_one)};\n")
     out.append(f"pub const GENERATE_ONE_HANDED: GenerateCases = {_rs(gen_one)};\n")
+    out.append("// weapon, infusion, sl, objective, allow naked, grip -> the left hand choose_offhand put")
+    out.append("// beside it (expect_offhand), None for a launcher: GENERATE's and GENERATE_ONE_HANDED's.")
+    out.append(f"pub const OFFHAND: OffhandCases = {_rs(offhands)};\n")
     gen_class = []
     for cls, weapon, inf, sl, objective in EXPECT_AS_CLASS:
         _, got = expect_builds(data, corpus, [(weapon, inf, sl, objective)], [], "two", only_class=cls)
@@ -6950,11 +7427,28 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     return backend_expectations_rest(data, corpus, out, mins, flexes)
 
 
+def expect_offhand(o: dict | None):
+    """offhand_summary's answer as an OFFHAND fixture tuple: left hand and its infusion code ("" for
+    none), the stance rate, the primary's alone, the home stance, every stance's rate, per family
+    (family, stance, engagement, rate), power stance (owner, STR and DEX it needs, met), chain, and
+    the power stance partner the stats fall short of (name, STR and DEX)."""
+    if not o:
+        return None
+    ps, short = o["power_stance"], o["ps_short"]
+    need = lambda d: [int(d[s]) for s in POWER_STANCE_STATS]
+    return _Some((o["left"] or "", INFUSION_CODE[o["infusion"]] if o["infusion"] else "", float(o["stance"]),
+                  float(o["solo"]), o["home"], [(s, float(v)) for s, v in o["stances"].items()],
+                  [(f, r["stance"], r["engagement"], float(r["rate"])) for f, r in o["families"].items()],
+                  ps and _Some((ps["owner"], need(ps["need"]), ps["met"])), o["chain"],
+                  short and _Some((short[0], need(short[1])))))
+
+
 def expect_builds(data: Data, corpus: list[Build], cases: list, naked_cases: list, grip: str,
-                  flexes: list | None = None, only_class: str | None = None, defender=None):
+                  flexes: list | None = None, only_class: str | None = None, defender=None,
+                  offhands: list | None = None):
     """The script's --optimize and --generate answers for `cases` (plus `naked_cases` generated with
     --allow-naked) at `grip`, and for `only_class` alone when given, against `defender`
-    (defender_defense), as fixture tuples."""
+    (defender_defense), as fixture tuples. `offhands` gets each generated build's OFFHAND tuple."""
     arr = lambda d: [int(d[s]) for s in STATS]
     opt, gen = [], []
     for weapon, inf, sl, objective in cases:
@@ -6969,6 +7463,8 @@ def expect_builds(data: Data, corpus: list[Build], cases: list, naked_cases: lis
         if g is None:
             gen.append((weapon, INFUSION_CODE[inf], sl, objective, naked, None))
             continue
+        if offhands is not None:
+            offhands.append((weapon, INFUSION_CODE[inf], sl, objective, naked, grip, expect_offhand(g["offhand"])))
         rings, suggested = g["rings"], []
         while len(rings) >= 3 and rings[0] == rings[1] == rings[2]:
             suggested.append(rings[0])
@@ -7129,7 +7625,8 @@ def expect_best_weapons(data: Data, corpus: list[Build]) -> list:
                          (opt(m.get("hyperarmor")), opt(m.get("hyperarmor_rate")), opt(m.get("hyperarmor_holds")),
                           opt(m.get("poise_damage_per_hit")), opt_int(m.get("armor_break")),
                           opt_int(m.get("hits_to_stagger")), float(m.get("defender_poise", 0.0))),
-                         status, opt(m.get("damage_with_status")), stamina, moveset))
+                         status, opt(m.get("damage_with_status")), stamina, moveset,
+                         expect_offhand(m.get("offhand"))))
         out.append((INFUSION_CODE[inf], sl, objective, grip, cls, float(window), rank, with_status, defender or [],
                     buff, rows))
     return out
@@ -7402,7 +7899,7 @@ def stamina_selftest_cases() -> list[tuple]:
         ("bar 120: 19+21+19+21+19+21 = 120, six attacks", (m["bar_attacks"], m["bar_damage"], m["bar_seconds"]),
          (6, 500.0, 2.5)),
         ("every stamina --rank metric is in the row",
-         {k for k in RANKS.values() if k and k != "moveset"} <= set(m), True),
+         {k for k in RANKS.values() if k and k not in ("moveset", "stance")} <= set(m), True),
         ("shot: 60 a shot over 30 stamina, four from 120",
          shot_metrics(fake, "W", 60.0, st), {"stamina_per_attack": [30.0], "stamina_per_window": 30.0,
                                              "damage_per_stamina": 2.0, "max_stamina": 120.0, "bar_attacks": 4,
@@ -7836,7 +8333,9 @@ def main() -> int:
                          "landed in --window; per-stamina by those hits' damage per stamina point their attacks "
                          "cost; bar by the R1 chain damage a full bar of the build's max stamina (END, rings) "
                          "pays for; moveset by the whole moveset's PvP rate (moveset_metrics: R1/R2 chains, "
-                         "roll/run/backstep/jump attacks, reach, stagger, trades, punish, stamina). Every row "
+                         "roll/run/backstep/jump attacks, reach, stagger, trades, punish, stamina); stance by "
+                         "that rate with the best left hand and stance swapping (1H, 2H, the left weapon 2H, "
+                         "power stance, cross-hand chains; stance_metrics). Every row "
                          "prints the first three")
     ap.add_argument("--jobs", type=int, default=0,
                     help="with --best-weapons: worker processes (default: a quarter of the CPUs)")
@@ -7952,6 +8451,8 @@ def main() -> int:
         if defender is not None:
             print("  " + defender_line(data, corpus, a.sl, defender, *defender_defense(data, corpus, a.sl, defender)))
         print(f"  primary: {g['primary'][0]} ({g['primary'][1].replace('_', ' ')})")
+        for line in offhand_lines(g["offhand"]):
+            print("  " + line)
         for title, key in (("one-handed", "weapons_1h"), ("two-hand only", "weapons_2h_only")):
             print(f"  {title}:")
             for n, i, d in g[key]:

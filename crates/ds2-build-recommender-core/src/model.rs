@@ -299,6 +299,9 @@ pub enum Rank {
     /// The whole moveset's `PvP` rate: R1/R2 chains, roll/run/backstep/jump attacks, reach,
     /// stagger, trades, punish coverage and stamina.
     Moveset,
+    /// That rate with the left hand stance swapping pairs the weapon with: one-handed, two-handed,
+    /// the left weapon two-handed, power stance and cross-hand chains (docs/DS2-STANCES.md).
+    Stance,
 }
 
 /// Options for Best weapons, the script's `--best-weapons`: every weapon an infusion goes on, each
