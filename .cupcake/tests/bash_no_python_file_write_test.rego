@@ -36,6 +36,39 @@ test_shutil_copy_from_inline_python_is_denied if {
 	count(bash_no_python_file_write.deny) == 1 with input as bash(cmd)
 }
 
+# The command that got through on 2026-10-19: a `cd <repo> && python3 - <<'EOF'`
+# heredoc editing four Rust files, with `import re,pathlib` and triple-quoted
+# Rust bodies full of `{`, `}`, `//`, `"` and `\\`. The policy always denied it;
+# production allowed it because the hook deadlocked in the repo_paths signal
+# (see run_signal_stdin_drain_checks in scripts/test-cupcake-policies.py) and
+# Claude Code ran the call when the hook gave up. Pinned here so the RULE half of
+# that guarantee cannot regress either.
+test_cd_then_heredoc_rewriting_several_rust_files_is_denied if {
+	cmd := concat("\n", [
+		"cd /home/banon/projects/ds2-mods-rs && python3 - <<'EOF'",
+		"import re,pathlib",
+		"p=pathlib.Path('crates/ds2-loader/src/inventory_sort.rs'); s=p.read_text()",
+		"s=s.replace('''        Self { enabled }",
+		"    }''','''        // Defaults ON, so only a literal `false` turns it off.",
+		"        let up = match parsed.get(CONFIG_SECTION, KEY_UP) {",
+		"            None => Self::default().up,",
+		"            Some(raw) => !matches!(raw.trim().trim_matches('\"'), \"false\"),",
+		"        };",
+		"        Self { enabled, up }",
+		"    }''')",
+		"p.write_text(s)",
+		"",
+		"p=pathlib.Path('crates/ds2-inventory-sort/src/install.rs'); s=p.read_text()",
+		"s=s.replace('''\"{LOG_PREFIX} armed -- sort button off by config; \\\\",
+		"             UP-enters-list stays on\"''','''\"{LOG_PREFIX} armed; \\\\",
+		"             up={}\", request.up''')",
+		"p.write_text(s)",
+		"EOF",
+		"git diff --stat; grep -rn 'Request {' crates --include='*.rs'",
+	])
+	count(bash_no_python_file_write.deny) == 1 with input as bash(cmd)
+}
+
 # --- reading stays cheap, which is the point ------------------------------
 
 test_reading_a_file_is_allowed if {

@@ -20,6 +20,11 @@
 #   LAUNCHDEFER|kind=agent|phrase=<the instruction>  a subagent was told not to launch/attach
 #   LAUNCHDEFER|kind=unrun|phrase=<sha>              a game-code commit this session, never launched
 set -uo pipefail
+
+# Drain the event cupcake writes to stdin before printing anything: the engine reads output only
+# after the whole event is written, so a signal that skips this can deadlock the hook (see
+# repo_paths.sh, 2026-10-19). Enforced by run_signal_stdin_drain_checks.
+cat >/dev/null
 CUPCAKE_SIGNAL_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 export CUPCAKE_SIGNAL_REPO_ROOT
 python3 - <<'PY' 2>/dev/null || true

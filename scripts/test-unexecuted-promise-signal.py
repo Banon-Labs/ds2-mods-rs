@@ -180,6 +180,7 @@ def run_signal(events: list[dict]) -> str:
             cwd=REPO_ROOT,
             text=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,  # signals drain stdin first; never let one wait on a terminal
             timeout=25,
             env={**os.environ, "HOME": home, "CLAUDE_PROJECT_DIR": PROJECT_DIR},
         )
