@@ -240,7 +240,7 @@ impl CorpusBackend {
     /// The script's `choose_kit`: the quick items, launcher and ammunition of a generated build
     /// whose primary is `primary` in `infusion`, at levelled `stats` wearing `rings` (the first
     /// four of its suggested then common rings) and `armor` (names, head to legs), holding the
-    /// weapons named `held` (the primary, then its first one-handable other weapon), for an
+    /// weapons named `held` (the primary, then the offhand's left hand: what it equips), for an
     /// invader at `sl` scored against `against`.
     // DEBT: ds2-mods-rs-59p7 -- the script's own argument list; bundle the build's question.
     #[allow(clippy::too_many_arguments)]
@@ -429,7 +429,9 @@ impl CorpusBackend {
         }));
         items.truncate(QUICK_SLOTS);
 
-        let (launcher, ammo) = self.choose_launcher(&eff, rings, armor, held, &defending);
+        // The levelled stats set the cap, not `eff`: `max_load` adds the rings' VIT itself.
+        let cap = self.max_load(stats, rings) * EQUIP_CAP;
+        let (launcher, ammo) = self.choose_launcher(&eff, rings, armor, held, cap, &defending);
         Kit {
             items,
             launcher,
@@ -439,7 +441,8 @@ impl CorpusBackend {
     }
 
     /// `choose_kit`'s launcher and ammunition: the bow, greatbow or crossbow with the most damage
-    /// per stamina point these stats fire and the load carries beside everything worn and `held`,
+    /// per stamina point these stats fire and the load `cap` carries beside everything worn and
+    /// `held`,
     /// with its best two ammunitions, and every other ammunition slot filled from a stand-in.
     fn choose_launcher(
         &self,
@@ -447,6 +450,7 @@ impl CorpusBackend {
         rings: &[usize],
         armor: &[String],
         held: &[&str],
+        cap: f64,
         defending: &Defending<'_>,
     ) -> (Option<LauncherPick>, [Option<KitPick>; AMMO_SLOTS]) {
         let mut worn = py_sum(armor.iter().zip(&self.wearable).map(|(name, slot)| {
@@ -457,7 +461,6 @@ impl CorpusBackend {
         }));
         worn += py_sum(rings.iter().map(|&ring| self.rings[ring].2));
         worn += py_sum(held.iter().map(|name| self.weight_by_name(name)));
-        let cap = self.max_load(eff, rings) * EQUIP_CAP;
 
         let mut best: Option<(f64, &Weapon, Infusion, String, f64)> = None;
         for weapon in self.weapons.iter() {

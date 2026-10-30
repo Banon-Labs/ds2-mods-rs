@@ -6513,7 +6513,8 @@ def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, 
       an invader's kit has no other heal.
     * launcher: the bow, greatbow or crossbow (data.ranged) with the most damage per stamina point
       (ranged_pick's shot over shot_stamina) that the build can fire at its stats
-      (TWO_HANDED_LAUNCHERS) and carry -- its weight added to everything worn and held stays under
+      (TWO_HANDED_LAUNCHERS) and carry -- its weight added to everything worn and held (the primary
+      and the offhand's left hand, the weapons the build equips) stays under
       EQUIP_CAP of max_load. Per stamina, not per shot: the fire rate is not in the files read
       (ranged_value), and per shot a greatbow always wins. None when no launcher fits.
     * ammo: {slot: (name, why)} for the launcher's best ammunition and the best of another element
@@ -6575,9 +6576,15 @@ def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, 
     items += [(n, why) for n, why in ALWAYS_ITEMS if held_item(n)]
     worn =sum(item_weight(data, s, k) for s, k in zip(ARMOR_SLOTS, armor_keys(data, g["armor"])) if k)
     worn += sum(item_weight(data, "ring", r) for r in rings)
-    held = [data.key_by_name.get(g["primary"][0])] + [data.key_by_name.get(n) for n, _, _ in g["weapons_1h"][:1]]
+    # what the build equips beside the launcher: the primary (RH1) and the left hand choose_offhand
+    # picked (LH1), as ds2-bracket-builds.py's build_for equips them. Not weapons_1h[0], a list
+    # entry the build never equips (2026-10-30: the launcher was fit beside a 2.5 whip while the
+    # 6.0 offhand was held, and the applied build sat at 74% load)
+    held = [data.key_by_name.get(n) for n in (g["primary"][0], (g.get("offhand") or {}).get("left")) if n]
     worn += sum(item_weight(data, "weapon", k) for k in held if k)
-    cap = max_load(data, eff, rings) * EQUIP_CAP
+    # the levelled stats, not eff: max_load adds the rings' VIT itself, and eff already holds it
+    # (a Ring of the Embedded at VIT 6 read VIT 19, not 13: a 75.4 max load the game puts at 65.25)
+    cap = max_load(data, stats, rings) * EQUIP_CAP
     launcher, ammo = None, {}
     best = None
     for key, r in data.ranged.items():

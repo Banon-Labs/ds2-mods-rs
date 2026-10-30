@@ -4674,8 +4674,15 @@ impl RecommenderBackend for CorpusBackend {
                 kit_rings.push(ring);
             }
         }
+        // What the build equips beside the launcher: the primary (RH1) and the offhand's left hand
+        // (LH1), as `to_import` places them. Not `weapons_1h[0]`, which the build never equips.
         let held: Vec<&str> = std::iter::once(primary.name.as_str())
-            .chain(weapons_1h.first().map(|row| row.weapon.as_str()))
+            .chain(
+                offhand
+                    .as_ref()
+                    .and_then(|o| o.left.as_ref())
+                    .map(|(_, name, _)| name.as_str()),
+            )
             .collect();
         let kit = self.choose_kit(
             primary,
@@ -4934,6 +4941,70 @@ mod tests {
             before.stats[VIT]
         );
         assert!(poise > 23.0, "poise {poise}");
+    }
+
+    /// The applied SL 100 two-handed Dark Fume Ultra Greatsword (damage x EHP spend) read 74% load
+    /// in game (2026-10-30): its launcher was fit beside `weapons_1h[0]`, a whip it never equips,
+    /// not the heavier left hand it does. Everything Apply equips -- armour, rings, every weapon
+    /// slot, the launcher in RH3 among them -- stays under `EQUIP_CAP` of max load.
+    #[test]
+    fn the_applied_build_and_its_launcher_stay_under_the_load_cap() {
+        let (backend, _) = with_and_without_trades();
+        let limits = Limits {
+            spend: Spend::Ehp,
+            ..Limits::NONE
+        };
+        let build = backend
+            .generate_build(
+                "Fume_Ultra_Greatsword",
+                Infusion::Dark,
+                100,
+                Objective::Damage,
+                false,
+                Grip::TwoHanded,
+                &limits,
+            )
+            .expect("a SL 100 build");
+        assert!(
+            build.offhand.as_ref().is_some_and(|o| o.left.is_some()),
+            "the case needs a left hand: {:?}",
+            build.offhand
+        );
+        let (applied, _) = crate::backend::to_import(&build);
+        let rings: Vec<usize> = applied
+            .rings
+            .iter()
+            .filter_map(|name| backend.rings.iter().position(|ring| ring.1 == *name))
+            .collect();
+        let armor = py_sum(
+            applied
+                .armor
+                .iter()
+                .zip(&backend.wearable)
+                .map(|(name, slot)| {
+                    slot.iter()
+                        .find(|piece| piece.name == *name)
+                        .map_or(0.0, |piece| piece.weight)
+                }),
+        );
+        let weapons = py_sum(
+            applied
+                .weapons
+                .iter()
+                .step_by(2)
+                .filter_map(|key| backend.weapon_by_key(key))
+                .map(|weapon| weapon.weight),
+        );
+        let worn = armor + py_sum(rings.iter().map(|&ring| backend.rings[ring].2)) + weapons;
+        // `max_load` adds the rings' VIT to the levelled stats itself, as the game does.
+        let max = backend.max_load(&build.stats.map(i32::from), &rings);
+        assert!(
+            worn <= max * EQUIP_CAP,
+            "{worn:.2} of {max:.2} ({:.1}%) with {:?} in {:?}",
+            worn / max * 100.0,
+            build.kit.launcher.as_ref().map(|l| &l.name),
+            applied.weapons
+        );
     }
 
     /// A dagger hits first in nearly every trade, so load buys its trades nothing and its stats
