@@ -153,6 +153,8 @@ all_denials contains decision if { some decision in data.cupcake.policies.claude
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.require_scoped_cargo.deny }
 
+all_denials contains decision if { some decision in data.cupcake.policies.claude.no_unmarked_user_claim_relay.deny }
+
 # Block and ask decisions. No current project policy exports these, but keep the shape stable.
 
 # Modify decisions. No current project policy exports these, but keep the shape stable.
