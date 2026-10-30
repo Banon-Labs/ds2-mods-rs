@@ -290,6 +290,10 @@ pub struct Offhand {
     /// The best-ranked power stance partner the stats fall short of: its name and the STR and DEX
     /// it needs.
     pub ps_short: Option<(String, [u16; 2])>,
+    /// Why the left hand holds what it does, for the paperdoll's slot pane: the stance rate it
+    /// raises or the grip-swap rate it wins on, and its weight against the load left; for an
+    /// empty hand, that nothing fits.
+    pub why: String,
 }
 
 /// One family's engagement in a stance-swapping build.
@@ -518,8 +522,9 @@ pub struct GeneratedBuild {
     /// Why the armour is not four pieces, when it is not: the load cap left a slot, or every slot,
     /// bare. Never silent.
     pub armor_note: Option<String>,
-    /// What the armour does in R1 trades against the build's SL bracket, over every weapon it
-    /// lists: `None` for a build that wears none or has nothing to trade.
+    /// What the armour does in R1 trades against the build's SL bracket, over the weapons it
+    /// swings -- the primary, and the left hand when that is a weapon; never the ones it lists:
+    /// `None` for a build that wears none or has nothing to trade.
     pub trade: Option<ArmorTrade>,
     /// The same for the set picked on defense and load alone, which poise outbid when it differs.
     pub trade_previous: Option<ArmorTrade>,
@@ -740,12 +745,7 @@ impl Change {
     pub fn apply(&self, state: &mut PanelState) -> bool {
         match self {
             Change::RaiseSl(sl) => state.set_sl_override(Some(*sl)),
-            Change::RemoveSpell(key) => {
-                let Some(at) = state.spells.iter().position(|spell| spell == key) else {
-                    return false;
-                };
-                state.spells.remove(at);
-            }
+            Change::RemoveSpell(key) => return state.remove_spell(key),
             Change::IgnoreFloors => state.ignore_floors = true,
             Change::Class(_) => return false,
         }
@@ -862,6 +862,13 @@ pub trait RecommenderBackend: Sync {
     /// no spell data and offers none.
     fn spells(&self) -> Vec<SpellRow> {
         Vec::new()
+    }
+    /// The most attunement slots any build [`Self::generate_build`] makes can have: the most ATT
+    /// gives, plus the sub ring that adds the most (a Southern Ritual Band+2's three). The spells
+    /// the panel lets a build ask for, every copy counted, cost no more. The default offers no
+    /// spells and holds none.
+    fn spell_slots_max(&self) -> u16 {
+        0
     }
     /// How many weapons `stats` wield, where that sits among the builds nearest them at `sl`, and
     /// the load `armor` (head to legs) and `rings`, by name, leave for weapons. `None` when this

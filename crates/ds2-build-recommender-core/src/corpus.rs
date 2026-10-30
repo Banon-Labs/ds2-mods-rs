@@ -60,7 +60,7 @@ mod trade;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 24";
+pub const FORMAT: &str = "ds2-build-recommender-data 25";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -811,6 +811,8 @@ pub struct CorpusBackend {
     heals: Vec<kit::Heal>,
     item_buffs: Vec<kit::ItemBuff>,
     throwables: Vec<kit::Throwable>,
+    /// The script's `data.invader_refused`: the items whose use check refuses an invader.
+    invader_refused: Vec<String>,
     /// The script's `counter_rings`, as indices into `rings`: what an adaptive defender swaps in.
     counters: Vec<usize>,
     /// Per SL bracket, the adaptive average defender over its `bracket_builds`.
@@ -1053,7 +1055,7 @@ impl CorpusBackend {
                 });
             }
             "SC" => self.parse_stamina(line, &mut fields)?,
-            "EL" | "HL" | "IB" | "TH" => self.parse_kit(tag, line, &mut fields)?,
+            "EL" | "HL" | "IB" | "TH" | "IR" => self.parse_kit(tag, line, &mut fields)?,
             "CH" => self.parse_chain(line, &mut fields)?,
             "PO" => self.parse_poise(line, &mut fields)?,
             "FS" | "XT" => self.parse_trade(tag, line, &mut fields)?,
@@ -2322,6 +2324,30 @@ impl CorpusBackend {
         by_group.into_iter().map(|(_, ring)| ring).collect()
     }
 
+    /// The sub ring with the most attunement slots (the first of a tie), which the optimizer wears
+    /// when no ATT alone holds the spells, and its slots: a Southern Ritual Band+2's three. `None`
+    /// and 0 when no sub ring adds any.
+    fn slot_band(&self) -> (Option<usize>, i32) {
+        let band =
+            self.sub_rings()
+                .into_iter()
+                .fold(None, |most: Option<usize>, ring| match most {
+                    Some(top) if self.ring_slots(&[ring]) <= self.ring_slots(&[top]) => Some(top),
+                    _ => Some(ring),
+                });
+        (band, band.map_or(0, |ring| self.ring_slots(&[ring])))
+    }
+
+    /// The most attunement slots ATT gives, at whatever ATT gives them: ATT 99's ten.
+    fn most_att_slots(&self) -> f64 {
+        self.tables
+            .attunement_slots
+            .0
+            .iter()
+            .copied()
+            .fold(0.0, f64::max)
+    }
+
     /// Hold a build to the rings `keys` names (ring keys), as the script's `HELD_RINGS` does: a
     /// ring outside them is swapped for the strongest held ring of its upgrade group, or dropped
     /// when the group has none. `None` allows every ring again.
@@ -2730,14 +2756,7 @@ impl CorpusBackend {
         let mut need = self.spell_floors(spells, 0);
         // No ATT alone holds the spells but the sub ring with the most slots makes one that does:
         // the arithmetic is then the one with it worn, as the optimizer wears it.
-        let band =
-            self.sub_rings()
-                .into_iter()
-                .fold(None, |most: Option<usize>, ring| match most {
-                    Some(top) if self.ring_slots(&[ring]) <= self.ring_slots(&[top]) => Some(top),
-                    _ => Some(ring),
-                });
-        let band_slots = band.map_or(0, |ring| self.ring_slots(&[ring]));
+        let (band, band_slots) = self.slot_band();
         let mut band_note = None;
         if need.is_none()
             && band_slots != 0
@@ -2809,13 +2828,7 @@ impl CorpusBackend {
         let (kind, closest, short) = match need {
             None => {
                 let total: i32 = spells.iter().map(|&spell| self.spells[spell].slots).sum();
-                let most = self
-                    .tables
-                    .attunement_slots
-                    .0
-                    .iter()
-                    .copied()
-                    .fold(0.0, f64::max);
+                let most = self.most_att_slots();
                 let with_band = band
                     .filter(|_| band_slots != 0)
                     .map_or(String::new(), |ring| {
@@ -3314,6 +3327,14 @@ impl CorpusBackend {
             next
         };
         let level = i32::try_from(sl).unwrap_or(i32::MAX - 53);
+        // What the build's poise wins in its own R1 trades (`poise_trade_value`): VIT buys it
+        // through the armour its load carries, END and ADP through the stat poise at min(END,
+        // ADP). It is in damage per trade, the objective's unit, so a point there is weighed
+        // against a point of damage: a slow weapon most counters hit first buys load, a dagger
+        // that hits first does not.
+        let trades = (objective == Objective::Damage && !ehp)
+            .then(|| self.poise_trades(weapon, grip.two_handed(), sl, rings))
+            .flatten();
         let mut best: Option<Best> = None;
         let mut best_score: Option<f64> = None;
         for &class_index in classes {
@@ -3372,6 +3393,17 @@ impl CorpusBackend {
                 while free > 0 {
                     let mut pick: Option<(usize, i32)> = None;
                     let mut best_w = 0.0;
+                    // One hit at these stats: the damage each trade the poise wins is read at.
+                    let hit = trades.as_ref().map_or(0.0, |_| {
+                        self.objective_value(
+                            weapon,
+                            infusion,
+                            &worn(&st),
+                            objective,
+                            &defending,
+                            rings,
+                        )
+                    });
                     for (index, &(stat, curve)) in curves.iter().enumerate() {
                         let current = value(curve, &st);
                         // The ehp curve's gain is relative to the product where it is taken.
@@ -3380,6 +3412,12 @@ impl CorpusBackend {
                         // off the rest rather than added as a zero, as the script leaves it.
                         let flex_now = (FLEX_WEIGHT != 0.0 && REQ_STATS.contains(&stat))
                             .then(|| self.flex_score(&st));
+                        let traded = trades
+                            .as_ref()
+                            .filter(|_| trade::POISE_STATS.contains(&stat))
+                            .map(|trades| {
+                                (trades, self.poise_trade_value(trades, hit, &st, rings))
+                            });
                         for n in 1..=free.min(99 - st[stat]).min(8) {
                             let next = with(&st, stat, st[stat] + n);
                             let mut w =
@@ -3387,6 +3425,11 @@ impl CorpusBackend {
                             if let Some(now) = flex_now {
                                 w += FLEX_WEIGHT * f64::from(self.flex_score(&next) - now)
                                     / f64::from(n);
+                            }
+                            if let Some((trades, now)) = traded {
+                                w += (self.poise_trade_value(trades, hit, &next, rings) - now)
+                                    / f64::from(n)
+                                    / shared;
                             }
                             if w > best_w + 1e-12 {
                                 pick = Some((stat, n));
@@ -3507,8 +3550,14 @@ impl CorpusBackend {
         let stats = to_stats(stats);
         let weapon = self.weapon_by_key(weapon)?;
         let scarcity = scarcity.unwrap_or_else(|| self.load_scarcity(&stats));
-        let (_, _, set) =
-            self.best_armor(&stats, &[weapon.weight], &[], scarcity, &self.threat_mix);
+        let (_, _, set) = self.best_armor(
+            &stats,
+            &[weapon.weight],
+            &[],
+            scarcity,
+            &self.threat_mix,
+            true,
+        );
         set.map(|set| set.map(|piece| piece.key.clone()))
     }
 
@@ -3836,9 +3885,13 @@ impl CorpusBackend {
     /// The script's `best_armor` with `top=1`: the equip-load cap, what the `held` weapons (their
     /// weights) and rings carry, and the set, head to legs, whose defense weighted by the corpus threat mix is
     /// highest among those these stats can wear under the cap. `None` when nothing fits, which
-    /// only happens when the weapons and rings alone are over it: `Naked` is a piece in every slot.
+    /// only happens when the weapons and rings alone are over it, or, when `full`, when no set
+    /// with a piece in every slot fits: `full` leaves `Naked` out of every slot, as the script's
+    /// `FULL_ARMOR` (on by default) does, and without it `Naked` is a piece in every slot.
     /// `scarcity` is the script's: above 0, a set scores its defense less `scarcity` x
     /// [`LOAD_PRICE`] x the best set's defense per weight x its weight.
+    // DEBT: ds2-mods-rs-59p7 -- the script's own argument list; bundle the row's question.
+    #[allow(clippy::too_many_arguments)]
     fn best_armor(
         &self,
         stats: &Stats,
@@ -3846,6 +3899,7 @@ impl CorpusBackend {
         rings: &[usize],
         scarcity: f64,
         mix: &[f64; 5],
+        full: bool,
     ) -> (f64, f64, Option<[&Wearable; 4]>) {
         // The rings count: their load factor and VIT bonus in the cap, their stat bonuses toward
         // the armour's requirements.
@@ -3873,10 +3927,11 @@ impl CorpusBackend {
                 let mut candidates: Vec<(f64, f64, &Wearable)> = slot
                     .iter()
                     .filter(|piece| {
-                        piece
-                            .require
-                            .iter()
-                            .all(|&(stat, need)| need <= stats[stat])
+                        !(full && piece.key == "Naked")
+                            && piece
+                                .require
+                                .iter()
+                                .all(|&(stat, need)| need <= stats[stat])
                     })
                     .map(|piece| (piece.weight, value(piece), piece))
                     .collect();
@@ -3996,6 +4051,29 @@ impl CorpusBackend {
             .map_or(0.0, |weapon| weapon.weight)
     }
 
+    /// The script's `swung_weapons`: what the armour's poise pick scores, as (weapon index,
+    /// infusion, two-handed) -- `primary` in the build's grip, and the `left` hand (key, name,
+    /// infusion) one-handed when the build swings it: a weapon, not a shield, whose attacks out
+    /// of a raised guard are the primary's. The weapons the build lists never count: armour is
+    /// chosen for the weapon the build is made for (user, 2026-10-30).
+    fn swung_weapons(
+        &self,
+        primary: &Weapon,
+        infusion: Infusion,
+        two_handed: bool,
+        left: Option<&(String, String, Infusion)>,
+    ) -> Vec<(usize, Infusion, bool)> {
+        let index = |key: &str| self.weapons.iter().position(|weapon| weapon.key == key);
+        let mut out = vec![(index(&primary.key).unwrap_or(0), infusion, two_handed)];
+        if let Some((key, _, left_infusion)) = left
+            && let Some(left) = index(key)
+            && !self.weapons[left].shield
+        {
+            out.push((left, *left_infusion, false));
+        }
+        out
+    }
+
     /// The script's `generate_armor`: the pieces' names head to legs, `Naked` for a slot left
     /// bare, the note that says why a slot or the whole set is bare or that poise drove the pick,
     /// and the trade numbers of the set and of `best_armor`'s.
@@ -4005,9 +4083,10 @@ impl CorpusBackend {
     /// `catalysts`, which a build that casts holds beside it. A set chosen for the primary alone
     /// left a Havel's-clad dagger build with 7.3 of load for every other weapon it listed.
     ///
-    /// `best_armor`'s set is kept unless a poise step trades better over `granted` (weapon index,
-    /// infusion, two-handed: every weapon the build lists, primary first) against `sl`'s bracket.
-    /// The `offhand`'s weight, the left hand stance swapping holds, is carried beside them.
+    /// `best_armor`'s set is kept unless a poise step trades better over `swung` (weapon index,
+    /// infusion, two-handed: [`Self::swung_weapons`], never the weapons the build lists) against
+    /// `sl`'s bracket. The `offhand`'s weight, the left hand stance swapping holds, is carried
+    /// beside them.
     // DEBT: ds2-mods-rs-59p7 -- the script's own argument list; bundle the row's question.
     #[allow(clippy::too_many_arguments)]
     fn generate_armor(
@@ -4018,7 +4097,7 @@ impl CorpusBackend {
         offhand: Option<f64>,
         rings: &[usize],
         sl: u32,
-        granted: &[(usize, Infusion, bool)],
+        swung: &[(usize, Infusion, bool)],
     ) -> (
         Vec<String>,
         Option<String>,
@@ -4041,7 +4120,15 @@ impl CorpusBackend {
         held.extend(offhand);
         let scarcity = self.load_scarcity(stats);
         let mix = self.bracket_mix(sl);
-        let (cap, carried, set) = self.best_armor(stats, &held, rings, scarcity, &mix);
+        // A piece in every slot, unless no set with all four fits the load: then one may go bare,
+        // and the note says so.
+        let mut full = true;
+        let (mut cap, mut carried, mut set) =
+            self.best_armor(stats, &held, rings, scarcity, &mix, full);
+        if set.is_none() {
+            full = false;
+            (cap, carried, set) = self.best_armor(stats, &held, rings, scarcity, &mix, full);
+        }
         let percent = EQUIP_CAP * 100.0;
         let Some(set) = set else {
             let what = if catalysts.is_empty() {
@@ -4065,8 +4152,9 @@ impl CorpusBackend {
             rings,
             scarcity,
             mix,
+            full,
         };
-        let traded = self.trade_armor(set, &wearer, sl, granted);
+        let traded = self.trade_armor(set, &wearer, sl, swung);
         let set = traded.pieces;
         let bare: Vec<&str> = ARMOR_SLOTS
             .iter()
@@ -4497,43 +4585,20 @@ impl RecommenderBackend for CorpusBackend {
         let ranked = self.rank(&eff, u32::from(sl), &query);
         let mut seen: Vec<&str> = vec![primary.name.as_str()];
         let (mut weapons_1h, mut weapons_2h_only) = (Vec::new(), Vec::new());
-        // Beside each list: the weapon the script's `by_name` finds for the row's name, its
-        // infusion, and the grip its listed damage is swung in -- what `generate_armor` trades.
-        let (mut grants_1h, mut grants_2h_only) = (Vec::new(), Vec::new());
         for row in &ranked {
             let name = self.weapons[row.weapon].name.as_str();
             if seen.contains(&name) {
                 continue;
             }
             seen.push(name);
-            let by_name = self
-                .weapons
-                .iter()
-                .position(|weapon| weapon.name == name)
-                .unwrap_or(row.weapon);
-            let grant = (by_name, row.infusion, row.label.starts_with("2H"));
             if row.label.contains("2H only") {
                 weapons_2h_only.push(self.result_row(row));
-                grants_2h_only.push(grant);
             } else {
                 weapons_1h.push(self.result_row(row));
-                grants_1h.push(grant);
             }
         }
         weapons_1h.truncate(WEAPONS_1H_TOP);
         weapons_2h_only.truncate(WEAPONS_2H_ONLY_TOP);
-        grants_1h.truncate(WEAPONS_1H_TOP);
-        grants_2h_only.truncate(WEAPONS_2H_ONLY_TOP);
-        let primary_index = self
-            .weapons
-            .iter()
-            .position(|weapon| weapon.key == primary.key)
-            .unwrap_or(0);
-        let granted: Vec<(usize, Infusion, bool)> =
-            std::iter::once((primary_index, infusion, two_handed))
-                .chain(grants_1h)
-                .chain(grants_2h_only)
-                .collect();
 
         let mut suggested = worn.clone();
         suggested.extend(self.suggest_rings(
@@ -4577,6 +4642,12 @@ impl RecommenderBackend for CorpusBackend {
             .and_then(|o| o.left.as_ref())
             .and_then(|(key, ..)| self.weapon_by_key(key))
             .map(|weapon| weapon.weight);
+        let swung = self.swung_weapons(
+            primary,
+            infusion,
+            two_handed,
+            offhand.as_ref().and_then(|o| o.left.as_ref()),
+        );
         let (armor, armor_note, trades) = if allow_naked {
             (Vec::new(), None, None)
         } else {
@@ -4587,7 +4658,7 @@ impl RecommenderBackend for CorpusBackend {
                 offhand_weight,
                 &suggested,
                 u32::from(sl),
-                &granted,
+                &swung,
             )
         };
         let common: Vec<usize> = self
@@ -4667,6 +4738,13 @@ impl RecommenderBackend for CorpusBackend {
                 faith: requirement(spell, FTH),
             })
             .collect()
+    }
+
+    fn spell_slots_max(&self) -> u16 {
+        // What `refusal` says no build exceeds: "ATT 99 gives 10, 13 with a Southern Ritual
+        // Band+2".
+        let most = self.most_att_slots() as i64 + i64::from(self.slot_band().1);
+        u16::try_from(most).unwrap_or(0)
     }
 
     fn flexibility(
@@ -4805,5 +4883,67 @@ mod tests {
     fn a_foreign_file_is_refused() {
         assert!(CorpusBackend::parse("something else\n").is_err());
         assert!(CorpusBackend::parse(FORMAT).is_err(), "no tables");
+    }
+
+    /// The parity fixture, and the same file with no bracket counter-hits: there no poise wins a
+    /// trade, so the optimizer spends as it did before poise was weighed against damage.
+    fn with_and_without_trades() -> &'static (CorpusBackend, CorpusBackend) {
+        static BOTH: std::sync::OnceLock<(CorpusBackend, CorpusBackend)> =
+            std::sync::OnceLock::new();
+        BOTH.get_or_init(|| {
+            let with = CorpusBackend::parse(include_str!("../tests/fixtures/corpus-sample.dat"))
+                .expect("the fixture parses");
+            let mut without = with.clone();
+            for build in &mut without.corpus {
+                build.trade = None;
+            }
+            (with, without)
+        })
+    }
+
+    /// `weapon` (Dark) generated at SL 100 two-handed with no class asked for.
+    fn generated(backend: &CorpusBackend, weapon: &str) -> GeneratedBuild {
+        backend
+            .generate_build(
+                weapon,
+                Infusion::Dark,
+                100,
+                Objective::Damage,
+                false,
+                Grip::TwoHanded,
+                &Limits::NONE,
+            )
+            .unwrap_or_else(|| panic!("{weapon}: no build"))
+    }
+
+    /// The report: a Dark Fume Ultra Greatsword at SL 100 came out VIT 6, its load leaving about
+    /// 10 for armour, so its poise could not hold through the counters that hit its slow R1 first.
+    /// Weighed in damage per trade against damage per hit, the load wins points.
+    #[test]
+    fn a_slow_weapon_buys_the_load_its_trades_need() {
+        let (with, without) = with_and_without_trades();
+        let (got, before) = (
+            generated(with, "Fume_Ultra_Greatsword"),
+            generated(without, "Fume_Ultra_Greatsword"),
+        );
+        let poise = got.trade.map_or(0.0, |trade| trade.poise);
+        assert!(
+            got.stats[VIT] > before.stats[VIT] && got.stats[VIT] > 6,
+            "VIT {} against {} without the trades",
+            got.stats[VIT],
+            before.stats[VIT]
+        );
+        assert!(poise > 23.0, "poise {poise}");
+    }
+
+    /// A dagger hits first in nearly every trade, so load buys its trades nothing and its stats
+    /// are what they were.
+    #[test]
+    fn a_dagger_buys_no_load_for_trades() {
+        let (with, without) = with_and_without_trades();
+        assert_eq!(
+            generated(with, "Dagger").stats,
+            generated(without, "Dagger").stats
+        );
     }
 }

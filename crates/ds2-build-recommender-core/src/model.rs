@@ -1,6 +1,9 @@
 //! The panel's state: what the player has typed and chosen, and the soul level it makes.
 
 use ds2_build_import_core::Infusion;
+use ds2_build_import_core::equip::SlotKind;
+
+use crate::backend::SpellRow;
 
 /// Nine levelled stats.
 pub const STAT_COUNT: usize = 9;
@@ -337,10 +340,14 @@ impl StatusFilter {
     }
 }
 
-/// The most spells the panel lets Generate Build ask for. Every spell costs at least one slot and
-/// ATT gives at most ten (`PhysicalStatsPerLevelStatValuesParam.spellSlot`), so an eleventh could
-/// never fit.
-pub const MAX_SPELLS: usize = 10;
+/// The most spells, copies counted, the panel lets Generate Build ask for.
+///
+/// The game's fourteen attunement positions (`ds2_rva::ITEM_SLOT_SPELL_COUNT`), one per copy. The
+/// slots they cost are the tighter limit -- every spell in the data costs at least one, and no
+/// build has more than
+/// [`spell_slots_max`](crate::backend::RecommenderBackend::spell_slots_max)'s thirteen -- so this
+/// only binds should a spell ever cost none.
+pub const MAX_SPELLS: usize = SlotKind::Spell.positions();
 
 /// The default neighbourhood for [`Mode::SimilarBuilds`], as the script's `k`.
 pub const SIMILAR_K_DEFAULT: u16 = 50;
@@ -378,7 +385,8 @@ pub struct PanelState {
     /// Which statuses [`Mode::SimilarBuilds`] insists on.
     pub status: StatusFilter,
     /// The spells Generate Build must be able to attune and cast, by soulsplanner key, in the
-    /// order they were chosen. Empty by default: a build with no spells.
+    /// order they were chosen; a repeat is another copy, attuned in a position of its own. Empty
+    /// by default: a build with no spells.
     pub spells: Vec<String>,
     /// Whether Optimize for weapon and Generate Build drop the soul level's floors: they are the
     /// medians of real builds, not a game rule. Off by default; a refusal's "ignore typical-build
@@ -465,18 +473,46 @@ impl PanelState {
         allowed
     }
 
-    /// Add `key` to the spells Generate Build casts, or take it out when it is already there.
-    /// Returns whether it is chosen now. Once [`MAX_SPELLS`] are chosen, adding is refused.
-    pub fn toggle_spell(&mut self, key: &str) -> bool {
-        if let Some(at) = self.spells.iter().position(|chosen| chosen == key) {
-            self.spells.remove(at);
-            false
-        } else if self.spells.len() < MAX_SPELLS {
-            self.spells.push(key.to_owned());
+    /// How many copies of `key` are chosen.
+    pub fn spell_copies(&self, key: &str) -> usize {
+        self.spells.iter().filter(|chosen| *chosen == key).count()
+    }
+
+    /// The attunement slots the chosen spells cost together, every copy its own, at the costs
+    /// `table` (the backend's [`SpellRow`]s) gives. A key it does not have costs nothing.
+    pub fn spell_slots(&self, table: &[SpellRow]) -> u16 {
+        self.spells
+            .iter()
+            .filter_map(|key| table.iter().find(|row| row.key == *key))
+            .map(|row| row.slots)
+            .sum()
+    }
+
+    /// Add one more copy of `key` to the spells Generate Build casts. Returns whether it was
+    /// added: refused when `table` does not have it, when its slots would take the chosen spells
+    /// past `slots_max` (the backend's
+    /// [`spell_slots_max`](crate::backend::RecommenderBackend::spell_slots_max)), or once
+    /// [`MAX_SPELLS`] are chosen.
+    pub fn add_spell(&mut self, key: &str, table: &[SpellRow], slots_max: u16) -> bool {
+        let Some(row) = table.iter().find(|row| row.key == key) else {
+            return false;
+        };
+        let fits = self.spell_slots(table) + row.slots <= slots_max;
+        if fits && self.spells.len() < MAX_SPELLS {
+            self.spells.push(row.key.clone());
             true
         } else {
             false
         }
+    }
+
+    /// Take out one copy of `key`, the first chosen. Returns whether there was one.
+    pub fn remove_spell(&mut self, key: &str) -> bool {
+        let Some(at) = self.spells.iter().position(|chosen| chosen == key) else {
+            return false;
+        };
+        self.spells.remove(at);
+        true
     }
 
     /// Put the piece `key` (a soulsplanner key, `Naked` for none) on the defender's `slot`, an
@@ -658,21 +694,75 @@ mod tests {
         assert_eq!(state.weapon, None);
     }
 
+    /// A spell table: each key and the slots it costs.
+    fn spell_table(rows: &[(&str, u16)]) -> Vec<SpellRow> {
+        rows.iter()
+            .map(|&(key, slots)| SpellRow {
+                key: key.to_owned(),
+                name: key.replace('_', " "),
+                slots,
+                intelligence: 0,
+                faith: 0,
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_spell_toggles_in_and_out_and_stops_at_ten() {
+    fn a_spell_chosen_again_is_a_second_copy() {
+        let table = spell_table(&[("Soul_Spear", 1), ("Heal", 1)]);
         let mut state = PanelState::default();
-        assert!(state.toggle_spell("Soul_Spear"));
-        assert!(state.toggle_spell("Heal"));
-        assert_eq!(state.spells, ["Soul_Spear", "Heal"]);
+        assert!(state.add_spell("Soul_Spear", &table, 13));
+        assert!(state.add_spell("Heal", &table, 13));
         assert!(
-            !state.toggle_spell("Soul_Spear"),
-            "chosen again is taken out"
+            state.add_spell("Soul_Spear", &table, 13),
+            "chosen again is another copy, not taken out"
         );
-        assert_eq!(state.spells, ["Heal"]);
-        for n in 0..20 {
-            state.toggle_spell(&format!("Spell_{n}"));
+        assert_eq!(state.spells, ["Soul_Spear", "Heal", "Soul_Spear"]);
+        assert_eq!(state.spell_copies("Soul_Spear"), 2);
+        assert_eq!(state.spell_slots(&table), 3);
+        assert!(!state.add_spell("Not_A_Spell", &table, 13));
+    }
+
+    #[test]
+    fn copies_stop_where_their_slots_would_not_fit() {
+        // Climax costs 4: three copies are 12 of 13 slots, a fourth would be 16. A one-slot spell
+        // still takes the last one.
+        let table = spell_table(&[("Climax", 4), ("Heal", 1)]);
+        let mut state = PanelState::default();
+        for _ in 0..3 {
+            assert!(state.add_spell("Climax", &table, 13));
+        }
+        assert!(!state.add_spell("Climax", &table, 13), "16 slots of 13");
+        assert_eq!(state.spell_copies("Climax"), 3);
+        assert!(state.add_spell("Heal", &table, 13), "13 slots of 13");
+        assert!(!state.add_spell("Heal", &table, 13), "14 slots of 13");
+        assert_eq!(state.spell_slots(&table), 13);
+    }
+
+    #[test]
+    fn copies_stop_at_the_games_attunement_positions() {
+        // Only a spell that cost nothing would reach them before the slots ran out.
+        let table = spell_table(&[("Free", 0)]);
+        let mut state = PanelState::default();
+        for _ in 0..20 {
+            state.add_spell("Free", &table, 13);
         }
         assert_eq!(state.spells.len(), MAX_SPELLS);
+        assert_eq!(MAX_SPELLS, 14);
+    }
+
+    #[test]
+    fn removing_a_spell_takes_out_one_copy() {
+        let table = spell_table(&[("Soul_Spear", 1), ("Heal", 1)]);
+        let mut state = PanelState::default();
+        for key in ["Soul_Spear", "Heal", "Soul_Spear"] {
+            assert!(state.add_spell(key, &table, 13));
+        }
+        assert!(state.remove_spell("Soul_Spear"));
+        assert_eq!(state.spells, ["Heal", "Soul_Spear"], "one copy, the first");
+        assert!(state.remove_spell("Soul_Spear"));
+        assert!(!state.remove_spell("Soul_Spear"), "none left");
+        assert_eq!(state.spells, ["Heal"]);
     }
 
     #[test]

@@ -53,8 +53,9 @@ def load_recommender():
 
 def armor_steps(R, data, corpus, sl: int, g: dict) -> None:
     """Every armour set generate_armor weighed for the generated build `g` (best_armor's first, then
-    best_armor's pick per poise step), with its exchange value and trade rate over every granted
-    weapon -- what chose it -- and over the primary alone."""
+    best_armor's pick per poise step), with its exchange value and trade rate over the weapons the
+    build swings (swung_weapons: the primary and a left-hand weapon) -- what chose it -- and over
+    the primary alone."""
     if not g.get("trade_candidates"):
         print("\nno armour trade: no armour, or no attack timing on either side")
         return
@@ -62,7 +63,7 @@ def armor_steps(R, data, corpus, sl: int, g: dict) -> None:
     while len(names) >= 3 and names[0] == names[1] == names[2]:
         rings.append(data.sp_key[R.norm(names[0])])
         names = names[3:]
-    alone = R.granted_trades(data, corpus, sl, g["stats"], rings, g["granted"][:1])
+    alone = R.granted_trades(data, corpus, sl, g["stats"], rings, g["swung"][:1])
     print(f"\narmour weighed over {g['trade_basis']}; 'alone' over the primary's own trades; "
           f"* the chosen set, first row best_armor's")
     print(f"{'poise':>6} {'weight':>6} {'exchange':>9} {'lands':>6} {'alone':>8} {'lands':>6}  set")

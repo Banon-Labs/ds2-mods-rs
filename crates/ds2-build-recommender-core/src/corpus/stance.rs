@@ -422,9 +422,12 @@ impl CorpusBackend {
             chain,
         })
     }
-    /// The script's `choose_offhand`: of nothing, the primary's twin, the lightest shield when it
-    /// attacks out of a raised guard, and `ranked`'s first [`OFFHAND_TRIES`] melee weapons and the
-    /// next [`OFFHAND_PS_TRIES`] that power stance with it, the left hand that rates highest.
+    /// The script's `choose_offhand`: of what fits -- wieldable at `eff` (two-handed at least) and
+    /// no heavier than `room` -- the primary's twin, the lightest shield when it attacks out of a raised guard,
+    /// and `ranked`'s first [`OFFHAND_TRIES`] melee weapons and the next [`OFFHAND_PS_TRIES`] that
+    /// power stance with it, the left hand that rates highest, a tie broken by its 1H and then its
+    /// L2H stance rate. The hand is empty only when nothing fits or scores: a two-handed build
+    /// one-hands its weapon to use what the left holds (user report 2026-10-30).
     // DEBT: ds2-mods-rs-59p7 -- the script's own argument list; bundle the row's question.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn choose_offhand(
@@ -442,6 +445,11 @@ impl CorpusBackend {
         if primary.ranged.is_some() {
             return None;
         }
+        // Wieldable in some grip (two-handed at least: one only two-handable still swaps to L2H),
+        // and light enough to leave a full set of armour (offhand_room).
+        let fits = |weapon: &Weapon| {
+            weapon.wieldable(eff, true) && room.is_none_or(|room| weapon.weight <= room)
+        };
         let mut melee: Vec<(&Weapon, Infusion)> = Vec::new();
         for row in ranked {
             // generate_build's: a name's first weapon.
@@ -453,6 +461,7 @@ impl CorpusBackend {
                 || weapon.ranged.is_some()
                 || weapon.catalyst
                 || weapon.shield
+                || !fits(weapon)
             {
                 continue;
             }
@@ -468,14 +477,14 @@ impl CorpusBackend {
                 .take(OFFHAND_PS_TRIES)
                 .copied(),
         );
-        if !melee.iter().any(|(w, _)| w.key == primary.key) {
+        if !melee.iter().any(|(w, _)| w.key == primary.key) && fits(primary) {
             picks.push((primary, infusion));
         }
         if attack(primary, "GuardNormal1st").is_some() {
             let lightest = self
                 .weapons
                 .iter()
-                .filter(|w| w.shield && w.wieldable(eff, false))
+                .filter(|w| w.shield && w.wieldable(eff, false) && fits(w)) // guarded one-handed
                 .min_by(|a, b| {
                     a.weight
                         .total_cmp(&b.weight)
@@ -487,12 +496,10 @@ impl CorpusBackend {
         }
         let base = self.stance_metrics(primary, infusion, None, eff, rings, sl, defense, worn);
         let solo = base.as_ref().map_or(0.0, |b| b.stance);
-        let mut best: (Option<(&Weapon, Infusion)>, Option<Stances>) = (None, base);
+        let mut best: Option<((&Weapon, Infusion), Stances, [f64; 3])> = None;
         let mut short = None;
+        let mut tried = 0_usize;
         for (weapon, linf) in picks {
-            if room.is_some_and(|room| weapon.weight > room) {
-                continue; // it would leave no armour under the load cap (offhand_room)
-            }
             let m = self.stance_metrics(
                 primary,
                 infusion,
@@ -510,12 +517,18 @@ impl CorpusBackend {
             {
                 short = Some((weapon.name.clone(), ps.need.map(to_u16)));
             }
-            if m.stance > best.1.as_ref().map_or(0.0, |b| b.stance) {
-                best = (Some((weapon, linf)), Some(m));
+            tried += 1;
+            let rank = [m.stance, m.rate("1H"), m.rate("L2H")];
+            if best.as_ref().is_none_or(|(.., top)| beats(rank, *top)) {
+                best = Some(((weapon, linf), m, rank));
             }
         }
-        let (left, stances) = best;
-        let stances = stances?;
+        let (left, stances) = match best {
+            Some((left, stances, _)) => (Some(left), stances),
+            // No left hand fits: the empty one, `None` when nothing the primary throws scores.
+            None => (None, base?),
+        };
+        let why = offhand_why(&stances, solo, left.map(|(w, _)| w.weight), tried, room);
         Some(Offhand {
             left: left.map(|(w, inf)| (w.key.clone(), w.name.clone(), inf)),
             stance: stances.stance,
@@ -543,7 +556,72 @@ impl CorpusBackend {
             }),
             chain: stances.chain,
             ps_short: short,
+            why,
         })
+    }
+}
+
+impl Stances {
+    /// One stance's own rate, `0` when the pair has no such stance: the script's
+    /// `stances.get(name, 0.0)`.
+    fn rate(&self, name: &str) -> f64 {
+        self.stances
+            .iter()
+            .find(|(stance, _)| *stance == name)
+            .map_or(0.0, |&(_, rate)| rate)
+    }
+}
+
+/// Python's `a > b` on two tuples of floats: the first unequal place decides.
+fn beats(a: [f64; 3], b: [f64; 3]) -> bool {
+    a.iter()
+        .zip(&b)
+        .find(|(x, y)| x != y)
+        .is_some_and(|(x, y)| x > y)
+}
+
+/// The script's `offhand_why`: why the left hand holds what it does, as the slot pane says it.
+/// `weight` is the left hand's, `None` for an empty one; `tried` the candidates that scored.
+fn offhand_why(
+    stances: &Stances,
+    solo: f64,
+    weight: Option<f64>,
+    tried: usize,
+    room: Option<f64>,
+) -> String {
+    let Some(weight) = weight else {
+        return room.map_or_else(
+            || "empty: nothing wieldable at these stats scores".to_owned(),
+            |room| {
+                format!(
+                    "empty: nothing wieldable at these stats weighs at most the {room:.1} of \
+                     load a full armour set leaves"
+                )
+            },
+        );
+    };
+    let out = if stances.stance > solo {
+        format!(
+            "best of {tried} left hands that fit: stance rate {:.0} against {solo:.0} for the \
+             primary alone",
+            stances.stance
+        )
+    } else {
+        let grip = if stances.stances.iter().any(|(name, _)| *name == "1H") {
+            "1H"
+        } else {
+            "L2H"
+        };
+        format!(
+            "best of {tried} left hands that fit for grip swaps: {grip} rate {:.0}; none raises \
+             the stance rate {:.0}",
+            stances.rate(grip),
+            stances.stance
+        )
+    };
+    match room {
+        Some(room) => format!("{out}; weighs {weight:.1} of {room:.1} load left"),
+        None => out,
     }
 }
 
@@ -604,5 +682,56 @@ impl CorpusBackend {
             })
             .fold(0.0, |total, w| total + w);
         cap - (carried + ring_weight) - lightest
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stances(stance: f64, rates: &[(&'static str, f64)]) -> Stances {
+        Stances {
+            stance,
+            home: "2H",
+            stances: rates.to_vec(),
+            families: Vec::new(),
+            power_stance: None,
+            chain: false,
+        }
+    }
+
+    /// A left hand that ties on the stance rate wins on its one-handed rate, as Python's tuple
+    /// comparison does: the first unequal place decides, and a full tie keeps the first.
+    #[test]
+    fn a_tie_on_the_stance_rate_goes_to_the_better_one_handed_rate() {
+        assert!(beats([940.0, 960.0, 0.0], [940.0, 950.0, 2000.0]));
+        assert!(!beats([940.0, 950.0, 2000.0], [940.0, 960.0, 0.0]));
+        assert!(beats([941.0, 0.0, 0.0], [940.0, 999.0, 999.0]));
+        assert!(!beats([940.0, 950.0, 10.0], [940.0, 950.0, 10.0]));
+    }
+
+    /// The slot pane says why: the stance rate a left hand raises, else the grip-swap rate it won
+    /// on, its weight against the load left, and for an empty hand that nothing fit.
+    #[test]
+    fn the_reason_names_what_the_left_hand_won_on() {
+        let raised = stances(1000.0, &[("1H", 1000.0), ("2H", 935.0), ("L2H", 800.0)]);
+        assert_eq!(
+            offhand_why(&raised, 940.4, Some(1.5), 7, Some(6.775)),
+            "best of 7 left hands that fit: stance rate 1000 against 940 for the primary alone; \
+             weighs 1.5 of 6.8 load left"
+        );
+        let tied = stances(940.0, &[("1H", 940.0), ("2H", 935.0), ("L2H", 700.0)]);
+        assert_eq!(
+            offhand_why(&tied, 940.0, Some(1.5), 3, None),
+            "best of 3 left hands that fit for grip swaps: 1H rate 940; none raises the stance \
+             rate 940"
+        );
+        let two_only = stances(900.0, &[("2H", 900.0), ("L2H", 650.0)]);
+        assert!(offhand_why(&two_only, 900.0, Some(2.0), 1, None).contains("L2H rate 650"));
+        assert_eq!(
+            offhand_why(&tied, 940.0, None, 0, Some(-2.31)),
+            "empty: nothing wieldable at these stats weighs at most the -2.3 of load a full \
+             armour set leaves"
+        );
     }
 }

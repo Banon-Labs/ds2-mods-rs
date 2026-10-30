@@ -5,7 +5,10 @@
 //! The quick items are the Estus Flask, the fastest heal (its HP capped at the build's max HP), the
 //! resin that adds the most to one hit of the primary, the best knife and the best urn by flat
 //! damage on the defender, and the defensive item worth most under the bracket's damage mix; short
-//! of [`QUICK_MIN`], the runners-up fill the rest. The launcher is the bow, greatbow or crossbow
+//! of [`QUICK_MIN`], the runners-up fill the rest; then a Green Blossom and Repair Powder
+//! ([`ALWAYS_ITEMS`]). None is an item the game refuses an invader
+//! ([`CorpusBackend::invader_refuses`]), which today leaves every heal but the Estus Flask out.
+//! The launcher is the bow, greatbow or crossbow
 //! with the most damage per stamina point the build can fire and carry, and every ammunition slot
 //! is filled.
 
@@ -29,6 +32,16 @@ const DAMAGE_NAMES: [&str; 5] = ["physical", "magic", "fire", "lightning", "dark
 
 /// What every quick item filling [`QUICK_MIN`] adds to the reason it was picked on.
 const FILLS: &str = "; fills the quick slots";
+
+/// The script's `ALWAYS_ITEMS`: quick items every kit carries after its picks and the
+/// [`QUICK_MIN`] fill, as (name, why). Green Blossom (60310000) is the only consumable whose text
+/// names stamina, and its `SpEffectActiveItem.emevd` event carries `100090[1] [60 s, 1.15]`, the
+/// Chloranthy Ring's instruction; Repair Powder (60410000) restores equipment durability. The
+/// script's comment holds the evidence.
+const ALWAYS_ITEMS: [(&str, &str); 2] = [
+    ("Green Blossom", "always: stamina recovery x1.15 for 60 s"),
+    ("Repair Powder", "always: restores equipment durability"),
+];
 
 /// A heal: the script's `data.heals` row.
 #[derive(Clone, Debug)]
@@ -88,7 +101,15 @@ fn py_g(x: f64) -> String {
 }
 
 impl CorpusBackend {
-    /// Read an `EL`, `HL`, `IB` or `TH` record.
+    /// Whether the game refuses an invader the use of `item`: the script's `data.invader_refused`,
+    /// every item whose `ItemUsageParam` check is the one that turns an invader away, but the ones
+    /// the script exempts. A generated kit carries none of them.
+    #[must_use]
+    pub fn invader_refuses(&self, item: &str) -> bool {
+        self.invader_refused.iter().any(|name| name == item)
+    }
+
+    /// Read an `EL`, `HL`, `IB`, `TH` or `IR` record.
     pub(super) fn parse_kit<'a>(
         &mut self,
         tag: &str,
@@ -124,6 +145,10 @@ impl CorpusBackend {
                     .ok_or_else(|| bad(line, "a heal's hit points"))?;
                 let seconds = float(fields.next(), line)?;
                 self.heals.push(Heal { name, hp, seconds });
+            }
+            "IR" => {
+                let name = name()?;
+                self.invader_refused.push(name);
             }
             "IB" => {
                 let name = name()?;
@@ -238,14 +263,21 @@ impl CorpusBackend {
         #[allow(clippy::cast_possible_truncation)]
         let hp = (self.hit_points(&eff) * self.ring_factor(rings, Factor::Hp)) as i64;
 
-        let mut items = vec![KitPick {
-            name: "Estus Flask".to_owned(),
-            why: "always".to_owned(),
-        }];
+        let mut items = Vec::new();
+        if !self.invader_refuses("Estus Flask") {
+            items.push(KitPick {
+                name: "Estus Flask".to_owned(),
+                why: "always".to_owned(),
+            });
+        }
         let mut heals: Vec<Ranked> = self
             .heals
             .iter()
-            .filter(|heal| heal.name != "Estus Flask" && heal.seconds > 0.0)
+            .filter(|heal| {
+                heal.name != "Estus Flask"
+                    && heal.seconds > 0.0
+                    && !self.invader_refuses(&heal.name)
+            })
             .map(|heal| {
                 let got = heal.hp.min(hp);
                 // DEBT: ds2-mods-rs-59p7 -- hit points, far inside f64's exact integers.
@@ -279,6 +311,9 @@ impl CorpusBackend {
                 let Some(element) = buff.element.filter(|&element| element > 0) else {
                     continue;
                 };
+                if self.invader_refuses(&buff.name) {
+                    continue;
+                }
                 let mut add = ar;
                 add[element] = Some(
                     add[element].unwrap_or(0.0) + self.buff_attack(buff, element, primary, &eff),
@@ -306,7 +341,10 @@ impl CorpusBackend {
                 let mut pool: Vec<Ranked> = self
                     .throwables
                     .iter()
-                    .filter(|throw| words.iter().any(|word| throw.name.contains(word)))
+                    .filter(|throw| {
+                        words.iter().any(|word| throw.name.contains(word))
+                            && !self.invader_refuses(&throw.name)
+                    })
                     .map(|throw| (Self::thrown_value(throw, &defending), throw))
                     .filter(|(value, _)| *value > 0.0)
                     .map(|(value, throw)| {
@@ -326,7 +364,7 @@ impl CorpusBackend {
         let mut guards: Vec<Ranked> = self
             .buffs
             .iter()
-            .filter(|buff| buff.item)
+            .filter(|buff| buff.item && !self.invader_refuses(&buff.name))
             .map(|buff| {
                 let value = py_sum(buff.change.iter().map(|&(kind, x)| mix[kind] * x));
                 (value, buff)
@@ -385,6 +423,10 @@ impl CorpusBackend {
                 }
             }
         }
+        items.extend(ALWAYS_ITEMS.iter().map(|&(name, why)| KitPick {
+            name: name.to_owned(),
+            why: why.to_owned(),
+        }));
         items.truncate(QUICK_SLOTS);
 
         let (launcher, ammo) = self.choose_launcher(&eff, rings, armor, held, &defending);

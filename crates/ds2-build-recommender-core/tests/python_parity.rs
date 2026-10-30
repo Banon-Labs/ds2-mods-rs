@@ -270,7 +270,8 @@ type ArsenalRow = Option<(
 /// The left hand stance swapping pairs a weapon with (the script's `expect_offhand`): its name
 /// and infusion code ("" for none), the stance rate, the primary's alone, the home stance, every
 /// stance's rate, per family (family, stance, engagement, rate), power stance (owner, STR and DEX
-/// it needs, met), whether the follow-ups chain, and the partner the stats fall short of.
+/// it needs, met), whether the follow-ups chain, the partner the stats fall short of, and why it
+/// was picked.
 type OffhandRow = Option<(
     &'static str,
     &'static str,
@@ -282,6 +283,7 @@ type OffhandRow = Option<(
     Option<(&'static str, &'static [u16], bool)>,
     bool,
     Option<(&'static str, &'static [u16])>,
+    &'static str,
 )>;
 /// weapon, infusion code, sl, objective, allow naked, grip ("two"/"one"), then the left hand.
 type OffhandCase = (
@@ -343,6 +345,7 @@ fn offhand_row(got: Option<&backend::Offhand>) -> Option<OffhandView> {
             o.ps_short
                 .as_ref()
                 .map(|(name, need)| (name.clone(), need.to_vec())),
+            o.why.clone(),
         )
     })
 }
@@ -359,12 +362,13 @@ type OffhandView = (
     Option<(String, Vec<u16>, bool)>,
     bool,
     Option<(String, Vec<u16>)>,
+    String,
 );
 
 /// A fixture's [`OffhandRow`] owned, to compare with [`offhand_row`]'s.
 fn offhand_want(want: OffhandRow) -> Option<OffhandView> {
     want.map(
-        |(left, code, stance, solo, home, stances, families, ps, chain, short)| {
+        |(left, code, stance, solo, home, stances, families, ps, chain, short, why)| {
             (
                 left.to_owned(),
                 code.to_owned(),
@@ -379,6 +383,7 @@ fn offhand_want(want: OffhandRow) -> Option<OffhandView> {
                 ps.map(|(owner, need, met)| (owner.to_owned(), need.to_vec(), met)),
                 chain,
                 short.map(|(name, need)| (name.to_owned(), need.to_vec())),
+                why.to_owned(),
             )
         },
     )
@@ -435,6 +440,8 @@ fn reply(buff: &str) -> Reply {
     }
 }
 
+// DEBT: ds2-mods-rs-p5z4.79 -- the script's measured outputs, which can land near pi or tau.
+#[allow(clippy::approx_constant)]
 mod expected {
     use super::*;
     include!("fixtures/python_expected.rs");
@@ -1179,6 +1186,61 @@ fn generate_build_with_spells_is_the_scripts() {
     }
 }
 
+/// The spell picker takes copies of one spell up to the most attunement slots a build can have,
+/// which is the number the script's refusal names -- "ATT 99 gives 10, 13 with a Southern Ritual
+/// Band + 2" -- and every copy it took reaches the generated build and what Apply attunes.
+#[test]
+fn the_spell_picker_takes_copies_up_to_the_slots_a_build_can_have() {
+    let most = backend().spell_slots_max();
+    let table = backend().spells();
+    let refused = expected::REFUSALS
+        .iter()
+        .find(|case| case.5 == ["Climax"; 4])
+        .expect("the 16-slot refusal case");
+    let lines = refused.8.expect("refused").3;
+    assert!(
+        lines[0].ends_with(&format!(", {most} with a Southern Ritual Band + 2")),
+        "{most} against {lines:?}"
+    );
+
+    // Climax and Sacred Oath cost 4 each: the script's 12-slot case, chosen in the picker.
+    let mut state = PanelState::default();
+    for key in ["Climax", "Climax", "Sacred_Oath"] {
+        assert!(state.add_spell(key, &table, most), "{key}");
+    }
+    assert!(
+        !state.add_spell("Climax", &table, most),
+        "a third Climax is 16 slots"
+    );
+    let one_slot = table
+        .iter()
+        .find(|row| row.slots == 1)
+        .expect("a 1-slot spell");
+    assert!(state.add_spell(&one_slot.key, &table, most), "13 slots");
+    assert!(!state.add_spell(&one_slot.key, &table, most), "14 slots");
+    assert!(state.remove_spell(&one_slot.key));
+    assert_eq!(state.spells, ["Climax", "Climax", "Sacred_Oath"]);
+
+    let got = backend()
+        .generate_build(
+            "Demons_Great_Hammer",
+            Infusion::Raw,
+            200,
+            Objective::Damage,
+            false,
+            Grip::TwoHanded,
+            &Limits {
+                spells: &state.spells,
+                ..STATIC
+            },
+        )
+        .expect("the script builds it");
+    assert_eq!(got.spells, state.spells);
+    assert_eq!(got.slots_used, state.spell_slots(&table));
+    let (import, _) = backend::to_import(&got);
+    assert_eq!(import.spells, state.spells, "Apply attunes both copies");
+}
+
 /// An unknown spell key gets no build rather than one that ignores it.
 #[test]
 fn an_unknown_spell_gets_no_build() {
@@ -1472,17 +1534,12 @@ fn the_panel_generates_at_its_override_for_its_weapon() {
     assert_eq!(build.armor.len(), 4);
     let (import, _) = backend::to_import(&build);
     assert_eq!(import.armor, build.armor);
-    // A slot is bare only with a note saying so: the poise trade may buy a heavy helm over a
-    // chest, as the script's own SL 100 Demon's Great Hammer does.
+    // Every slot holds a piece: the poise trade once bought a heavy helm over a chest here.
     assert!(
         import
             .armor
             .iter()
-            .all(|piece| !ds2_build_import_core::is_empty_slot(piece))
-            || build
-                .armor_note
-                .as_deref()
-                .is_some_and(|note| note.contains("left bare")),
+            .all(|piece| !ds2_build_import_core::is_empty_slot(piece)),
         "{:?} {:?}",
         import.armor,
         build.armor_note
@@ -1490,6 +1547,35 @@ fn the_panel_generates_at_its_override_for_its_weapon() {
     state.allow_naked = true;
     let naked = backend::generate(backend(), &state, None).expect("a SL 100 build");
     assert!(naked.armor.is_empty() && naked.armor_note.is_none());
+}
+
+/// A generated build wears a piece in every armour slot unless the panel allows naked. The user's
+/// SL 100 two-handed Dark Fume Ultra Greatsword (2026-10-30) came back in a Minotaur Helm alone,
+/// the poise trade having bought the helm with the chest, hands and legs.
+#[test]
+fn a_generated_build_leaves_no_armour_slot_bare() {
+    let mut state = PanelState {
+        mode: Mode::WeaponsForStats,
+        ..PanelState::default()
+    };
+    state.choose_weapon("Fume_Ultra_Greatsword");
+    assert!(state.choose_infusion(Infusion::Dark));
+    state.grip = Grip::TwoHanded;
+    state.set_sl_override(Some(100));
+    let build = backend::generate(backend(), &state, None).expect("a SL 100 build");
+    assert_eq!(build.armor.len(), 4);
+    let bare: Vec<&str> = ["head", "chest", "hands", "legs"]
+        .into_iter()
+        .zip(&build.armor)
+        .filter(|(_, piece)| ds2_build_import_core::is_empty_slot(piece))
+        .map(|(slot, _)| slot)
+        .collect();
+    assert!(
+        bare.is_empty(),
+        "bare: {bare:?} in {:?} ({:?})",
+        build.armor,
+        build.armor_note
+    );
 }
 
 /// Everything Apply would grant from a real build resolves in the item catalogue.
@@ -2098,6 +2184,181 @@ fn the_kit_is_the_scripts() {
     assert_eq!(filled, expected::KIT.len(), "every case fills QUICK_MIN");
 }
 
+/// Every kit carries a Green Blossom and Repair Powder, in the script's answers and the port's,
+/// and Apply grants each as the item the game's text names: 60310000 "Temporarily boost stamina
+/// recovery speed" and 60410000 "Restore equipment durability" (`simpleexplanation.fmg`).
+#[test]
+fn every_kit_carries_a_green_blossom_and_repair_powder() {
+    use ds2_build_import_core::id_for;
+    const ALWAYS: [(&str, &str, i32); 2] = [
+        (
+            "Green Blossom",
+            "always: stamina recovery x1.15 for 60 s",
+            60_310_000,
+        ),
+        (
+            "Repair Powder",
+            "always: restores equipment durability",
+            60_410_000,
+        ),
+    ];
+    for (name, _, id) in ALWAYS {
+        assert_eq!(id_for(name), Ok(id), "{name}");
+    }
+    for &(weapon, code, sl, _, _, _, (items, ..)) in expected::KIT {
+        for (name, why, _) in ALWAYS {
+            assert!(
+                items.contains(&(name, why)),
+                "{weapon} {code} SL {sl}: the script's kit has no {name}"
+            );
+        }
+    }
+    let mut built = 0;
+    for &(weapon, code, sl, goal, naked, _) in expected::GENERATE {
+        let Some(build) = backend().generate_build(
+            weapon,
+            infusion(code),
+            sl,
+            objective(goal),
+            naked,
+            Grip::TwoHanded,
+            &STATIC,
+        ) else {
+            continue;
+        };
+        let (import, _) = backend::to_import(&build);
+        for (name, why, _) in ALWAYS {
+            assert!(
+                build
+                    .kit
+                    .items
+                    .iter()
+                    .any(|pick| pick.name == name && pick.why == why),
+                "{weapon} {code} SL {sl}: the kit has no {name}"
+            );
+            assert!(
+                import.items.iter().any(|item| item == name),
+                "{weapon} {code} SL {sl}: Apply would not grant {name}"
+            );
+        }
+        assert!(build.kit.items.len() <= backend::QUICK_SLOTS);
+        built += 1;
+    }
+    assert!(built >= 1, "no GENERATE case built");
+}
+
+/// Holy Water Urn's burst only hurts a hollow (its `DamageCtrlParam` row is `isHollowOnlyDamage`,
+/// the script's `hurts_host`), and an invaded host is human, so no kit carries it: not the
+/// reported build (Dark Fume Ultra Greatsword, SL 100, two-handed) and not any `KIT` case.
+#[test]
+fn no_kit_carries_a_throw_that_only_hurts_a_hollow() {
+    let reported = (
+        "Fume_Ultra_Greatsword",
+        "D",
+        100,
+        "damage",
+        false,
+        Grip::TwoHanded,
+    );
+    let cases = expected::KIT
+        .iter()
+        .map(|&(weapon, code, sl, goal, naked, grip, _)| {
+            let grip = if grip == "one" {
+                Grip::OneHanded
+            } else {
+                Grip::TwoHanded
+            };
+            (weapon, code, sl, goal, naked, grip)
+        });
+    for (weapon, code, sl, goal, naked, grip) in std::iter::once(reported).chain(cases) {
+        let kit = backend()
+            .generate_build(
+                weapon,
+                infusion(code),
+                sl,
+                objective(goal),
+                naked,
+                grip,
+                &STATIC,
+            )
+            .unwrap_or_else(|| panic!("{weapon} SL {sl}: the script built it"))
+            .kit;
+        assert!(
+            kit.items.iter().all(|item| item.name != "Holy Water Urn"),
+            "{weapon} {code} SL {sl}: {:?}",
+            kit.items
+        );
+    }
+}
+
+/// A generated build is an invader's, so its kit carries nothing whose `ItemUsageParam` check
+/// turns an invader away: no Lifegem, herb, charm or water, while the stamina and repair
+/// consumables, the burrs, resins, knives and urns pass. The Monastery Charm was the heal pick
+/// in a Seamless invasion that refused it. The Estus Flask follows the script's exemption,
+/// whichever way it is set.
+#[test]
+fn the_kit_carries_nothing_an_invader_is_refused() {
+    let backend = backend();
+    for refused in [
+        "Lifegem",
+        "Old Radiant Lifegem",
+        "Elizabeth Mushroom",
+        "Monastery Charm",
+        "Dragon Charm",
+        "Divine Blessing",
+        "Rouge Water",
+        "Crimson Water",
+        "Smooth & Silky Stone",
+    ] {
+        assert!(backend.invader_refuses(refused), "{refused}");
+    }
+    for usable in [
+        "Green Blossom",
+        "Repair Powder",
+        "Small Orange Burr",
+        "Dark Pine Resin",
+        "Throwing Knife",
+        "Firebomb",
+    ] {
+        assert!(!backend.invader_refuses(usable), "{usable}");
+    }
+    let estus = !backend.invader_refuses("Estus Flask");
+    let mut cases = 0;
+    for &(weapon, code, sl, goal, naked, grip, (items, ..)) in expected::KIT {
+        let grip = if grip == "one" {
+            Grip::OneHanded
+        } else {
+            Grip::TwoHanded
+        };
+        let kit = backend
+            .generate_build(
+                weapon,
+                infusion(code),
+                sl,
+                objective(goal),
+                naked,
+                grip,
+                &STATIC,
+            )
+            .unwrap_or_else(|| panic!("{weapon} SL {sl}: the script built it"))
+            .kit;
+        let names: Vec<&str> = kit.items.iter().map(|item| item.name.as_str()).collect();
+        assert!(
+            names.iter().all(|name| !backend.invader_refuses(name)),
+            "{weapon} SL {sl}: {names:?}"
+        );
+        assert!(
+            items
+                .iter()
+                .all(|&(name, _)| !backend.invader_refuses(name)),
+            "{weapon} SL {sl}: the script's {items:?}"
+        );
+        assert_eq!(names.contains(&"Estus Flask"), estus, "{weapon} SL {sl}");
+        cases += 1;
+    }
+    assert!(cases > 0, "no KIT case");
+}
+
 #[test]
 fn the_left_hand_is_the_scripts() {
     let (mut paired, mut power_stanced, mut swapped) = (0, 0, 0);
@@ -2123,6 +2384,17 @@ fn the_left_hand_is_the_scripts() {
             offhand_want(want),
             "{weapon} {code} SL {sl} {goal}: the left hand"
         );
+        // A melee build always holds something in its left hand: tapping Y one-hands the primary
+        // to use it, and holding Y two-hands it (2026-10-30: a Fume Ultra Greatsword build had
+        // none). Every case here fits one.
+        if let Some(offhand) = &got.offhand {
+            assert!(
+                offhand.left.is_some(),
+                "{weapon} {code} SL {sl} {goal} naked {naked}: no left hand, {}",
+                offhand.why
+            );
+            assert!(!offhand.why.is_empty(), "{weapon} SL {sl}: no reason");
+        }
         if let Some((left, _, stance, solo, home, _, families, ps, ..)) = want {
             paired += usize::from(!left.is_empty());
             power_stanced += usize::from(home == "PS" || ps.is_some_and(|(_, _, met)| met));
@@ -2136,5 +2408,11 @@ fn the_left_hand_is_the_scripts() {
     assert!(
         paired >= 3,
         "{paired} builds with a left hand, {power_stanced} power stancing, {swapped} swapping"
+    );
+    assert!(
+        expected::OFFHAND
+            .iter()
+            .any(|case| case.0 == "Fume_Ultra_Greatsword" && case.6.is_some()),
+        "the 2026-10-30 report's build is a case"
     );
 }
