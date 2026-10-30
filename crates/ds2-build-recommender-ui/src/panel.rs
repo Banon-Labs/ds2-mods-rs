@@ -383,8 +383,8 @@ impl Panel {
                     .item
                     .map_or_else(|| "no item id".to_owned(), |id| format!("item {id}"))
             ),
-            Some(Held::Bare) => "bare in the build; Apply leaves what is worn there".to_owned(),
-            Some(Held::Kept) => "not in the build; Apply leaves it as it is".to_owned(),
+            Some(Held::Bare) => "bare in the build; Apply takes off what is worn there".to_owned(),
+            Some(Held::Empty) => "not in the build; Apply empties it".to_owned(),
             None => "no build generated".to_owned(),
         }
     }
@@ -3417,11 +3417,11 @@ fn piece_name(piece: &Piece) -> String {
 }
 
 /// The paperdoll for the log, written once per build: every slot it fills, with what and under
-/// which item id, the armour it leaves bare, and how many slots Apply leaves alone.
+/// which item id, the armour it leaves bare, and how many other slots Apply empties.
 fn doll_line(doll: &Paperdoll) -> String {
     let mut filled = Vec::new();
     let mut bare = Vec::new();
-    let mut kept = 0usize;
+    let mut empty = 0usize;
     for (slot, held) in doll.slots() {
         match held {
             Held::Item(piece) => filled.push(format!(
@@ -3433,11 +3433,11 @@ fn doll_line(doll: &Paperdoll) -> String {
                     .map_or_else(|| "no item id".to_owned(), |id| format!("item {id}"))
             )),
             Held::Bare => bare.push(slot.label()),
-            Held::Kept => kept += 1,
+            Held::Empty => empty += 1,
         }
     }
     format!(
-        "{} | bare: {} | {kept} slots Apply leaves as they are",
+        "{} | bare: {} | {empty} more slots Apply empties",
         filled.join(", "),
         if bare.is_empty() {
             "none".to_owned()
@@ -3555,7 +3555,7 @@ fn draw_paperdoll(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32;
                     }
                 }
             }
-            Held::Bare | Held::Kept => {
+            Held::Bare | Held::Empty => {
                 art &= ds2_overlay::panels::empty_slot(
                     &canvas.list,
                     empty_art(slot),
@@ -3614,8 +3614,8 @@ fn draw_paperdoll(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32;
 type Note = Vec<([f32; 4], String)>;
 
 /// What the pane says under a slot's item: how a weapon is held, why a ring is worn and what else
-/// is granted beside it, why armour is missing, and what Apply does with a slot the build leaves
-/// alone.
+/// is granted beside it, why armour is missing, and that Apply empties a slot the build leaves
+/// out.
 fn slot_notes(build: &GeneratedBuild, slot: Slot, held: &Held) -> Vec<Note> {
     let kit = &build.kit;
     let picked = match slot {
@@ -3734,9 +3734,9 @@ fn slot_notes(build: &GeneratedBuild, slot: Slot, held: &Held) -> Vec<Note> {
                     .clone()
                     .unwrap_or_else(|| "The build wears nothing here".to_owned()),
             )],
-            vec![(WARN, "Apply leaves what you wear here".to_owned())],
+            vec![(DIM, "Apply takes off what you wear here".to_owned())],
         ],
-        (_, Held::Kept) => vec![vec![(DIM, "Apply leaves what you have here".to_owned())]],
+        (_, Held::Empty) => vec![vec![(DIM, "Apply empties this slot".to_owned())]],
     }
 }
 
@@ -3761,7 +3761,7 @@ fn left_hand_notes(offhand: &backend::Offhand, held: &Held) -> Vec<Note> {
         ]);
     }
     if !matches!(held, Held::Item(_)) {
-        notes.push(vec![(DIM, "Apply leaves what you have here".to_owned())]);
+        notes.push(vec![(DIM, "Apply empties this slot".to_owned())]);
     }
     notes
 }
@@ -3800,7 +3800,7 @@ fn draw_doll_detail(
             }
         }
         Held::Bare => canvas.big_text([x, y], DIM, "Bare", width),
-        Held::Kept => canvas.big_text([x, y], DIM, "Not in this build", width),
+        Held::Empty => canvas.big_text([x, y], DIM, "Not in this build", width),
     }
     y += title_h + 4.0;
     let notes = slot_notes(build, slot, held);
@@ -3947,7 +3947,10 @@ fn draw_confirm(
         ),
         (
             TEXT,
-            format!("Grants up to {grants} items you lack, and equips the gear."),
+            format!(
+                "Grants up to {grants} items you lack, equips the gear, and empties every other \
+                 slot."
+            ),
         ),
     ];
     let width = lines

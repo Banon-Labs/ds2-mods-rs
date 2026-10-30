@@ -1,5 +1,5 @@
 //! A generated build laid out as the game's Equipment page lays out a character: every slot, what
-//! the build puts in it, and which slots Apply leaves alone.
+//! the build puts in it, and which slots Apply empties.
 //!
 //! The slots are the page's own: three right-hand, three left-hand, four rings, head, chest, hands
 //! and legs, ten belt slots, two of arrows and two of bolts (`ds2_rva::FE_EQUIP_EMPTY_ART` says how
@@ -8,9 +8,10 @@
 //! beside them, the armour under both, and the belt beside the ammunition at the bottom.
 //!
 //! What a slot holds is read off [`to_import`], the build Apply hands to `ds2-build-import`, so the
-//! paperdoll cannot show a slot filled that Apply leaves alone, or the other way round. Apply equips
-//! only what a build names -- `ds2_build_import_core::equip::plan` skips every empty-slot name,
-//! `Naked` among them -- so a slot the build leaves empty keeps whatever the character has there.
+//! paperdoll cannot show a slot filled that Apply empties, or the other way round. Apply equips
+//! what a build names -- `ds2_build_import_core::equip::plan` skips every empty-slot name, `Naked`
+//! among them -- and empties every slot `ds2_build_import_core::equip::unfilled` lists, so a slot
+//! the build leaves empty is empty on the character too.
 
 use ds2_build_import_core::{Build, Infusion, is_empty_slot};
 
@@ -169,11 +170,11 @@ pub const ROWS: [&[Slot]; 5] = [
 pub enum Held {
     /// An item the build puts here, which Apply grants if the character lacks it and equips.
     Item(Piece),
-    /// An armour slot the build leaves bare to stay under its load. Apply equips nothing there, so
-    /// whatever the character wears in it stays on -- with a weight the build's numbers leave out.
+    /// An armour slot the build leaves bare to stay under its load. Apply takes off whatever the
+    /// character wears there, so the load is the build's.
     Bare,
-    /// A slot the build says nothing about. Apply leaves it as it is.
-    Kept,
+    /// A slot the build says nothing about. Apply empties it.
+    Empty,
 }
 
 /// An item in a slot.
@@ -211,7 +212,7 @@ impl Paperdoll {
         self.held
             .iter()
             .find(|(at, _)| *at == slot)
-            .map_or(&Held::Kept, |(_, held)| held)
+            .map_or(&Held::Empty, |(_, held)| held)
     }
 
     /// Every slot with what it holds, row by row.
@@ -231,21 +232,21 @@ fn read(import: &Build, slot: Slot) -> Held {
         // `LH1, RH1, LH2, RH2, LH3, RH3`, each name followed by its infusion.
         Slot::RightHand(i) => weapon(&import.weapons, 2 * usize::from(i) + 1),
         Slot::LeftHand(i) => weapon(&import.weapons, 2 * usize::from(i)),
-        Slot::Ring(i) => worn(import.rings.get(usize::from(i)), Held::Kept),
+        Slot::Ring(i) => worn(import.rings.get(usize::from(i)), Held::Empty),
         Slot::Head => worn(import.armor.first(), Held::Bare),
         Slot::Chest => worn(import.armor.get(1), Held::Bare),
         Slot::Hands => worn(import.armor.get(2), Held::Bare),
         Slot::Legs => worn(import.armor.get(3), Held::Bare),
-        Slot::Item(i) => worn(import.items.get(usize::from(i)), Held::Kept),
-        Slot::Arrows(i) => worn(import.ammo.get(usize::from(i)), Held::Kept),
-        Slot::Bolts(i) => worn(import.ammo.get(2 + usize::from(i)), Held::Kept),
+        Slot::Item(i) => worn(import.items.get(usize::from(i)), Held::Empty),
+        Slot::Arrows(i) => worn(import.ammo.get(usize::from(i)), Held::Empty),
+        Slot::Bolts(i) => worn(import.ammo.get(2 + usize::from(i)), Held::Empty),
     }
 }
 
 /// The weapon at `position` of a build's `name, infusion` list.
 fn weapon(list: &[String], position: usize) -> Held {
     let Some(key) = list.get(2 * position).filter(|key| !is_empty_slot(key)) else {
-        return Held::Kept;
+        return Held::Empty;
     };
     let infusion = list
         .get(2 * position + 1)
@@ -345,9 +346,9 @@ mod tests {
 
     /// The stub build as Apply leaves it: its weapon in right hand 1, its three rings, its one
     /// piece of armour with the rest bare, its kit in the belt and quivers, and every other slot
-    /// as the character has it.
+    /// empty.
     #[test]
-    fn the_stub_build_fills_what_apply_equips_and_keeps_the_rest() {
+    fn the_stub_build_fills_what_apply_equips_and_empties_the_rest() {
         let doll = Paperdoll::of(&stub(false));
         let Held::Item(weapon) = doll.held(Slot::PRIMARY) else {
             panic!("right hand 1 holds {:?}", doll.held(Slot::PRIMARY));
@@ -368,7 +369,7 @@ mod tests {
             Slot::Item(5),
             Slot::Item(9),
         ] {
-            assert_eq!(doll.held(slot), &Held::Kept, "{slot:?}");
+            assert_eq!(doll.held(slot), &Held::Empty, "{slot:?}");
         }
         let name = |slot: Slot| match doll.held(slot) {
             Held::Item(piece) => piece.name.clone(),
@@ -400,7 +401,8 @@ mod tests {
         }
     }
 
-    /// A build asked to wear no armour leaves all four slots bare, not kept: the build means bare.
+    /// A build asked to wear no armour leaves all four slots bare, not merely empty: the build
+    /// means bare.
     #[test]
     fn a_build_without_armour_is_bare_in_all_four_slots() {
         let doll = Paperdoll::of(&stub(true));

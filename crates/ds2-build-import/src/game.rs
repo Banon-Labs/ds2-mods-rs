@@ -1008,6 +1008,67 @@ pub(crate) unsafe fn equip(request: EquipRequest<'_>) -> Result<EquipOutcome, Ga
     })
 }
 
+/// What one unequip did, read back on both sides.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct Unequipped {
+    /// The item id the slot held before, or `None` if it was empty and nothing was called.
+    pub(crate) before: Option<i32>,
+    /// The item id the slot holds afterwards, or `None` if it is empty.
+    pub(crate) after: Option<i32>,
+}
+
+/// **Empty one slot, through the same equip function, with a null entry.**
+///
+/// The game's own empty-slot request is a null entry pointer, not an item id. The thunk's body
+/// tests the entry and jumps to the slot's unequip when it is null:
+///
+/// ```text
+/// 0x1401a7b89  test r8,r8
+/// 0x1401a7b8c  je   0x1401a7b9c        ; -> jmp 0x1401b4330, unequip(bag, slot)
+/// ```
+///
+/// and the character creator empties every slot that way before it equips the class's gear: a
+/// loop at `0x1400de7d0` calling [`ds2_rva::ITEM_SET_EQUIP`] with `r8d = 0` for slots `0..0x29`.
+/// `0x1401b4330` clears the equipped bit on the entry, nulls `bag+0x25830+slot*8` and notifies the
+/// character with item id 0.
+///
+/// A slot that is already empty is left alone rather than called on: the unequip's empty path
+/// still re-notifies the slot, and there is nothing to gain from it.
+///
+/// # Safety
+///
+/// Calls into the game. **Game thread only.** The prologue is byte-checked first.
+pub(crate) unsafe fn unequip(internal_slot: u32) -> Result<Unequipped, GameError> {
+    let inventory = item_inventory()?;
+    let flat = flat_slot_for(internal_slot).ok_or(GameError::Unresolved)?;
+    // SAFETY: game thread, per this function's contract.
+    let before = unsafe { equipped_in_flat_slot(inventory, flat) }?;
+    if before.is_none() {
+        return Ok(Unequipped {
+            before,
+            after: None,
+        });
+    }
+    let site = game_rva(ds2_rva::ITEM_SET_EQUIP).map_err(|_| GameError::Unresolved)?;
+    let mut prologue = [0u8; ds2_rva::ITEM_SET_EQUIP_PROLOGUE.len()];
+    // SAFETY: a resolved RVA in the loaded image; the read is fault-safe.
+    if !unsafe { ds2_game_base::mem::read_bytes(site, &mut prologue) }
+        || prologue != ds2_rva::ITEM_SET_EQUIP_PROLOGUE
+    {
+        return Err(GameError::PrologueMismatch);
+    }
+    // SAFETY: the prologue matched, and the signature is the one the disassembled thunk implements
+    // -- the inventory in RCX, an internal slot in EDX, an entry pointer in R8, no return. A null
+    // entry is the game's own way to empty a slot (see above).
+    unsafe {
+        let set: unsafe extern "system" fn(usize, u32, usize) = core::mem::transmute(site);
+        set(inventory, internal_slot, 0);
+    }
+    // SAFETY: game thread, per this function's contract.
+    let after = unsafe { equipped_in_flat_slot(inventory, flat) }?;
+    Ok(Unequipped { before, after })
+}
+
 /// The covenant id a build's name means, or `None` if nothing is named.
 ///
 /// Compared with [`ds2_build_import_core::normalise`], because the planner writes
