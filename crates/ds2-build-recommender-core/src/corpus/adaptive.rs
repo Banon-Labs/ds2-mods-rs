@@ -20,10 +20,14 @@ pub(super) type Change = Vec<(usize, f64)>;
 /// A defense buff the defender may take: the script's `data.defense_buffs` row.
 #[derive(Clone, Debug)]
 pub(super) struct Buff {
-    name: String,
+    pub(super) name: String,
     /// A consumable anyone can use, rather than a spell.
-    item: bool,
-    add: [f64; 5],
+    pub(super) item: bool,
+    pub(super) add: [f64; 5],
+    /// Its changes in the script's key order, what `choose_kit` weighs and names.
+    pub(super) change: Change,
+    /// How long it lasts.
+    pub(super) seconds: f64,
 }
 
 /// What an adaptive defender is over one set of builds, before any attack: the script's
@@ -49,7 +53,7 @@ fn get(change: &[(usize, f64)], kind: usize) -> f64 {
 
 /// The script's `with_defense`: `defense` plus a change by damage type, a physical one on every
 /// physical type as well.
-fn with_defense(defense: &Defense, add: &[f64; 5]) -> Defense {
+pub(super) fn with_defense(defense: &Defense, add: &[f64; 5]) -> Defense {
     let mut out = *defense;
     for (kind, &value) in add.iter().enumerate() {
         if value == 0.0 {
@@ -112,12 +116,19 @@ impl CorpusBackend {
                 Some("spell") => false,
                 _ => return Err(bad(line, "a buff is a spell or an item")),
             };
-            float(fields.next(), line)?;
+            let seconds = float(fields.next(), line)?;
+            let change = change(fields.next(), line)?;
             let mut add = [0.0; 5];
-            for (kind, value) in change(fields.next(), line)? {
+            for &(kind, value) in &change {
                 add[kind] += value;
             }
-            self.buffs.push(Buff { name, item, add });
+            self.buffs.push(Buff {
+                name,
+                item,
+                add,
+                change,
+                seconds,
+            });
         }
         Ok(())
     }

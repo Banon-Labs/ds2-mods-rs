@@ -8,6 +8,7 @@
 
 use ds2_build_import_core::Infusion;
 
+use super::arsenal::Scored;
 use super::{
     Against, CorpusBackend, Defense, EMPTY, Hit, Query, Stats, Weapon, norm, py_max, py_round,
     py_sum,
@@ -46,7 +47,7 @@ impl CorpusBackend {
         weapon_class: Option<&str>,
     ) -> Vec<BestWeaponRow> {
         let class = weapon_class.map(norm);
-        let mut rows: Vec<BestWeaponRow> = self
+        let mut rows: Vec<Scored> = self
             .weapons
             .iter()
             .enumerate()
@@ -61,14 +62,22 @@ impl CorpusBackend {
             })
             .filter_map(|(index, _)| self.best_weapon_row(index, ask))
             .collect();
-        rows.sort_by(|a, b| b.score.total_cmp(&a.score));
-        rows
+        rows.sort_by(|a, b| b.row.score.total_cmp(&a.row.score));
+        if ask.objective == Objective::Damage
+            && ask.window != 0.0
+            && matches!(ask.rank, Rank::Moveset | Rank::Stance)
+        {
+            let defending = self.defending(ask.sl, ask.against);
+            return self.with_arsenal(rows, ask.sl, &defending.base, ask.against.worn);
+        }
+        rows.into_iter().map(|scored| scored.row).collect()
     }
 
     /// The script's `best_weapon_row`: the weapon at the build `optimize_build` makes for it,
-    /// scored. `None` when no class wields it, when with a window a melee weapon has no attack
-    /// timing, or when the rank asks for a metric the row has none of.
-    fn best_weapon_row(&self, index: usize, ask: &Ask<'_>) -> Option<BestWeaponRow> {
+    /// scored, with what its arsenal is read at. `None` when no class wields it, when with a
+    /// window a melee weapon has no attack timing, or when the rank asks for a metric the row has
+    /// none of.
+    fn best_weapon_row(&self, index: usize, ask: &Ask<'_>) -> Option<Scored> {
         let weapon = &self.weapons[index];
         let (value, class, two, stats, worn) = self.optimize_build(
             weapon,
@@ -218,7 +227,7 @@ impl CorpusBackend {
             None
         };
         self.poise_metrics(index, two, ask.sl, ask.against.worn, &mut metrics);
-        Some(BestWeaponRow {
+        let row = BestWeaponRow {
             score,
             weapon: weapon.key.clone(),
             name: weapon.name.clone(),
@@ -233,6 +242,12 @@ impl CorpusBackend {
             label,
             ammo,
             metrics,
+        };
+        Some(Scored {
+            row,
+            weapon: index,
+            eff,
+            worn,
         })
     }
 

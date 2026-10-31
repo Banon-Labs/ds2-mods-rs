@@ -500,11 +500,11 @@ KEY_SEAMLESS_PASSWORD = "cooppassword"
 #: Nothing here ships or downloads it. The archive is the one the owner fetched from Nexus into
 #: `~/DS2`; when it is not there, a run with a matching install proceeds and a run without one is
 #: refused with the path it looked for.
-SEAMLESS_VERSION = "0.0.5"
+SEAMLESS_VERSION = "0.0.6"
 SEAMLESS_ARCHIVE = (
     Path.home()
     / "DS2"
-    / "Dark Souls II SoTFS - Seamless Co-op v0.0.5 1468 0.0.5 2026-10-04T23-30Z nUt1ZkmJ.zip"
+    / "Dark Souls II SoTFS - Seamless Co-op v0.0.6 1468 0.0.6 2026-10-26T15-00Z 823VAhJ2.zip"
 )
 #: Archive member (which is also the path under the game directory) -> SHA-256 of that member.
 #: `ds2sc_launcher.exe` and `crashpad_handler.exe` are byte-identical from 0.0.1 through 0.0.5;
@@ -514,8 +514,11 @@ SEAMLESS_ARCHIVE = (
 #: and `boss_damage_scaling` (0 -> 25), which the merge does not apply over an existing value.
 #: 0.0.5 (2026-10-04) changes only the DLL; its locale file and settings template are 0.0.4's
 #: bytes. 0.0.4 has refused to boot with the author's "Update required" box since 2026-10-14.
+#: 0.0.6 (2026-10-26) changes the DLL and adds `no_hollowing_visual_effect` to the settings
+#: template; the other three files are 0.0.5's bytes. 0.0.5 has refused to boot with the same box
+#: since at least 2026-10-30.
 SEAMLESS_FILES: dict[str, str] = {
-    "SeamlessCoop/ds2sc.dll": "5df6c51fae1c0a177090e39831402120a7913fe42c2625da32767de562d17a71",
+    "SeamlessCoop/ds2sc.dll": "963238fe10391d388422e33fb2cceccfc1d7971e6c8d8f1f95acd6790cf427f1",
     "SeamlessCoop/locale/english.json":
         "540df58e565a5dd9f21834ae99584a998204c1908042aec18409f3700b86240c",
     "SeamlessCoop/crashpad/crashpad_handler.exe":
@@ -523,7 +526,7 @@ SEAMLESS_FILES: dict[str, str] = {
     "ds2sc_launcher.exe": "4fb07cd36e17fba7755597395bc1b44a0809358128e8c8353e8add65583fa88c",
 }
 #: The settings file is merged, never replaced: it holds the owner's `cooppassword`, and the
-#: template (0.0.3 through 0.0.5 alike) ships that key empty -- which is itself a boot-stopping dialog.
+#: template (0.0.3 through 0.0.6 alike) ships that key empty -- which is itself a boot-stopping dialog.
 SEAMLESS_SETTINGS_MEMBER = f"SeamlessCoop/{SEAMLESS_SETTINGS_NAME}"
 
 #: Files and directories other people's mods own in the game directory. This script writes none

@@ -23,7 +23,7 @@ use ds2_build_recommender_core::paperdoll::{self, Held, Paperdoll, Piece, Slot};
 
 /// STR's place in the nine stats, for the log lines that say what a grip did to it.
 const STR_INDEX: usize = 4;
-use ds2_build_recommender_core::nav::{self, Control, Dir, Nudge, Shape};
+use ds2_build_recommender_core::nav::{self, Control, Dir, Nudge, Placed, Shape, Wrapped};
 use ds2_build_recommender_core::weapons::{self, WeaponRow};
 use ds2_overlay::fefont::{Button, button};
 use ds2_overlay::panels::{EmptySlot, IconDraw};
@@ -166,7 +166,8 @@ enum List {
     Weapon,
     Infusion,
     Class,
-    /// The spells Generate Build must cast. Choosing a row toggles it and leaves the list open.
+    /// The spells Generate Build must cast. Choosing a row, or Right, adds a copy and leaves the
+    /// list open; Left takes one out.
     Spell,
     /// Who the damage goal is scored against: the average defender, then the four armour slots,
     /// each of which opens [`List::DefenderPiece`].
@@ -222,8 +223,11 @@ enum Action {
     ToggleSpend,
     /// Make one of the refusal's checked fixes, by index into [`Panel::fixes`], and ask again.
     Fix(usize),
-    /// Generate Build: add or take out one spell, by index into the backend's spell table.
-    ToggleSpell(usize),
+    /// Generate Build: one more copy of a spell, by index into the backend's spell table, while
+    /// the attunement slots a build can have hold it.
+    AddSpell(usize),
+    /// Generate Build: one copy fewer of a spell, by index into the backend's spell table.
+    RemoveSpell(usize),
     /// Generate Build: no spells.
     ClearSpells,
     ToggleBleed,
@@ -259,8 +263,10 @@ struct Panel {
     list_cursor: usize,
     /// Rows the weapon picker showed on its last draw, which LB and RB page by.
     picker_rows: usize,
-    /// How many buttons the footer had when the log last said whether they fit.
-    footer_logged: usize,
+    /// How many buttons the footer had, and on how many lines, when the log last said so.
+    footer_logged: (usize, usize),
+    /// Where the footer's buttons were drawn last frame, which the cursor's grid follows.
+    wrapped: Wrapped,
     /// Whether the log has said how the weapon picker opened this time.
     picker_logged: bool,
     answer: Option<Answer>,
@@ -317,7 +323,8 @@ impl Panel {
             list_scroll: 0,
             list_cursor: 0,
             picker_rows: PICKER_ROWS,
-            footer_logged: 0,
+            footer_logged: (0, 0),
+            wrapped: Wrapped::default(),
             picker_logged: false,
             answer: None,
             results_scroll: 0,
@@ -356,6 +363,7 @@ impl Panel {
                 0
             },
             paperdoll: self.doll_shown(),
+            wrapped: self.wrapped,
         }
     }
 
@@ -375,8 +383,8 @@ impl Panel {
                     .item
                     .map_or_else(|| "no item id".to_owned(), |id| format!("item {id}"))
             ),
-            Some(Held::Bare) => "bare in the build; Apply leaves what is worn there".to_owned(),
-            Some(Held::Kept) => "not in the build; Apply leaves it as it is".to_owned(),
+            Some(Held::Bare) => "bare in the build; Apply takes off what is worn there".to_owned(),
+            Some(Held::Empty) => "not in the build; Apply empties it".to_owned(),
             None => "no build generated".to_owned(),
         }
     }
@@ -478,16 +486,21 @@ impl Panel {
                 if spells.is_empty() {
                     return Vec::new();
                 }
-                let chosen = &self.state.spells;
                 std::iter::once((
-                    format!("No spells ({} chosen)", chosen.len()),
+                    format!(
+                        "No spells ({} chosen, {} of {} slots)",
+                        self.state.spells.len(),
+                        self.state.spell_slots(&spells),
+                        backend().spell_slots_max()
+                    ),
                     Action::ClearSpells,
                 ))
                 .chain(spells.iter().enumerate().map(|(index, spell)| {
-                    let mark = if chosen.contains(&spell.key) {
-                        "[x]"
-                    } else {
-                        "[ ]"
+                    // How many copies: one is the plain check, more say their count.
+                    let mark = match self.state.spell_copies(&spell.key) {
+                        0 => "[ ]".to_owned(),
+                        1 => "[x]".to_owned(),
+                        copies => format!("[x{copies}]"),
                     };
                     (
                         format!(
@@ -498,7 +511,7 @@ impl Panel {
                             spell.intelligence,
                             spell.faith
                         ),
-                        Action::ToggleSpell(index),
+                        Action::AddSpell(index),
                     )
                 }))
                 .collect()
@@ -586,7 +599,7 @@ impl Panel {
     /// Move the cursor one step, and say where it landed.
     fn move_cursor(&mut self, dir: Dir) {
         let rows = nav::layout(self.shape());
-        let next = nav::step(&rows, self.cursor, dir);
+        let next = nav::step_in(&rows, &self.wrapped, self.cursor, dir);
         if next != self.cursor {
             self.cursor = next;
             if let Control::Slot(slot) = next {
@@ -783,7 +796,7 @@ impl Panel {
         log_line(format_args!(
             "{LOG_PREFIX} panel restored: mode={:?} objective={:?} stats={:?} sl-override={:?} \
              weapon={} infusion={} class={} window={:.1}s neighbours={} search={:?} answer={} \
-             results-scroll={} generated={} cursor={:?}",
+             results-scroll={} generated={} cursor={:?} spells={:?}",
             state.mode,
             state.objective,
             state.stats,
@@ -802,6 +815,7 @@ impl Panel {
             self.results_scroll,
             self.generated.is_some(),
             self.cursor,
+            state.spells,
         ));
     }
 
@@ -1051,6 +1065,9 @@ impl Panel {
                     ask_flexibility(&build.stats, build.sl, &build.armor, &build.suggested_rings);
                 let doll = Paperdoll::of(&build);
                 log_line(format_args!("{LOG_PREFIX} paperdoll: {}", doll_line(&doll)));
+                if let Some(offhand) = &build.offhand {
+                    log_line(format_args!("{LOG_PREFIX} left hand: {}", offhand.why));
+                }
                 self.doll = Some(doll);
                 self.doll_logged = false;
                 self.generated = Some(build);
@@ -1137,7 +1154,8 @@ impl Panel {
                 | Action::ChooseWeapon(_)
                 | Action::ChooseInfusion(_)
                 | Action::ChooseClass(_)
-                | Action::ToggleSpell(_)
+                | Action::AddSpell(_)
+                | Action::RemoveSpell(_)
                 | Action::ClearSpells
                 | Action::Nothing
         ) {
@@ -1247,13 +1265,42 @@ impl Panel {
                 self.changed();
             }
             Action::Fix(index) => self.fix(index),
-            Action::ToggleSpell(index) => {
+            Action::AddSpell(index) => {
+                let table = backend().spells();
+                if let Some(spell) = table.get(index) {
+                    let most = backend().spell_slots_max();
+                    let added = self.state.add_spell(&spell.key, &table, most);
+                    let used = self.state.spell_slots(&table);
+                    log_line(format_args!(
+                        "{LOG_PREFIX} spell {} {} -> spells={:?} slots {used}/{most}",
+                        spell.key,
+                        if added {
+                            "copy added"
+                        } else {
+                            "refused, no room"
+                        },
+                        self.state.spells
+                    ));
+                    if !added {
+                        self.status = Some(format!(
+                            "No room for another {}: {used} of {most} attunement slots chosen, it \
+                             costs {}",
+                            spell.name, spell.slots
+                        ));
+                    }
+                }
+            }
+            Action::RemoveSpell(index) => {
                 if let Some(spell) = backend().spells().get(index) {
-                    let chosen = self.state.toggle_spell(&spell.key);
+                    let removed = self.state.remove_spell(&spell.key);
                     log_line(format_args!(
                         "{LOG_PREFIX} spell {} {} -> spells={:?}",
                         spell.key,
-                        if chosen { "chosen" } else { "not chosen" },
+                        if removed {
+                            "copy removed"
+                        } else {
+                            "none to remove"
+                        },
                         self.state.spells
                     ));
                 }
@@ -1402,8 +1449,32 @@ impl Panel {
             }
             Press::Char(typed) => self.type_char(typed),
             Press::Backspace => self.backspace(),
-            Press::Left | Press::Right | Press::Tab | Press::Run => {}
+            Press::Left | Press::Right => self.step_spell_copies(list, press == Press::Right),
+            Press::Tab | Press::Run => {}
         }
+    }
+
+    /// Left or Right on the spell list's highlighted spell: one copy fewer or one more. Anywhere
+    /// else they do nothing.
+    fn step_spell_copies(&mut self, list: List, more: bool) {
+        if list != List::Spell {
+            return;
+        }
+        let Some((label, Action::AddSpell(index))) =
+            self.list_rows(list).get(self.list_cursor).cloned()
+        else {
+            return;
+        };
+        log_line(format_args!(
+            "{LOG_PREFIX} list {list:?} {} on row {} [{label}]",
+            if more { "Right" } else { "Left" },
+            self.list_cursor + 1
+        ));
+        self.act(if more {
+            Action::AddSpell(index)
+        } else {
+            Action::RemoveSpell(index)
+        });
     }
 
     /// A field: typing replaces its number, the D-pad steps it, A or B keeps it.
@@ -1703,6 +1774,9 @@ const BUTTON_PAD_X: f32 = 14.0;
 const BUTTON_PAD_Y: f32 = 7.0;
 /// Between two footer buttons.
 const BUTTON_GAP: f32 = 12.0;
+/// Between two of the footer's groups on one line (`nav::footer`), and between two of its lines.
+const FOOTER_GROUP_GAP: f32 = 32.0;
+const FOOTER_LINE_GAP: f32 = 8.0;
 
 // The weapon picker, from the same design.
 
@@ -1804,6 +1878,9 @@ struct Canvas<'ui> {
     /// Left and right of a button's label: the design's [`BUTTON_PAD_X`], or [`PAIR_PAD`] on a
     /// frame whose footer would not fit the panel at the design's.
     button_pad: f32,
+    /// The widest a button is drawn, its label cut to fit: the panel's content width once the
+    /// footer is drawn, so a label longer than a line still ends inside the panel.
+    button_max: f32,
 }
 
 impl Canvas<'_> {
@@ -2015,6 +2092,8 @@ impl Canvas<'_> {
     }
 
     /// A clickable cell, which the cursor rings when it is `control`. Returns its right edge.
+    ///
+    /// No wider than [`Self::button_max`].
     fn button(
         &mut self,
         x: f32,
@@ -2024,11 +2103,18 @@ impl Canvas<'_> {
         action: Option<Action>,
         control: Option<Control>,
     ) -> f32 {
+        // Wider than `button_max`, the box stops there and the label is cut to the room inside it.
+        let natural = self.width(label) + self.button_pad * 2.0;
+        let width = natural.min(self.button_max);
+        let cut;
+        let label = if natural > width {
+            cut = clip(self.ui, label, width - self.button_pad * 2.0);
+            cut.as_str()
+        } else {
+            label
+        };
         let min = [x, y];
-        let max = [
-            x + self.width(label) + self.button_pad * 2.0,
-            y + self.button_h(),
-        ];
+        let max = [x + width, y + self.button_h()];
         let hovered = action.is_some() && self.inside(min, max);
         let fill = if on {
             CELL_ON
@@ -2076,6 +2162,147 @@ impl Panel {
             value,
             placeholder,
         }
+    }
+}
+
+/// One footer button: its label, whether it is lit (the list it opens is open), what a click does,
+/// and the control the cursor knows it by.
+type FooterButton = (String, bool, Option<Action>, Control);
+
+/// The footer for this frame: its buttons in [`nav::footer`]'s order and where each goes, and the
+/// status line's place after them. Places are from the footer's top left.
+struct Footer {
+    buttons: Vec<(FooterButton, Placed)>,
+    status: Option<Placed>,
+    /// Left and right of a button's label: [`BUTTON_PAD_X`] when the buttons fit one line with it.
+    pad: f32,
+    lines: usize,
+}
+
+impl Footer {
+    /// `room` wide: the buttons in their groups, wrapped where a line runs out.
+    fn lay(panel: &Panel, ui: &Ui, room: f32) -> Self {
+        let buttons: Vec<Vec<FooterButton>> = nav::footer(panel.generated.is_some())
+            .iter()
+            .map(|group| {
+                group
+                    .iter()
+                    .map(|&control| footer_button(panel, control))
+                    .collect()
+            })
+            .collect();
+        let text_w = |text: &str| ui.calc_text_size(text)[0];
+        let widths = |pad: f32| -> Vec<Vec<f32>> {
+            buttons
+                .iter()
+                .map(|group| {
+                    group
+                        .iter()
+                        .map(|(label, ..)| text_w(label) + pad * 2.0)
+                        .collect()
+                })
+                .collect()
+        };
+        let wrap = |widths: &[Vec<f32>]| {
+            let groups: Vec<&[f32]> = widths.iter().map(Vec::as_slice).collect();
+            nav::wrap(&groups, room, BUTTON_GAP, FOOTER_GROUP_GAP)
+        };
+        // The design's padding when it leaves the buttons on one line, the tighter one otherwise.
+        let mut pad = BUTTON_PAD_X;
+        let mut widths_now = widths(pad);
+        if wrap(&widths_now).iter().any(|place| place.line > 0) {
+            pad = PAIR_PAD;
+            widths_now = widths(pad);
+        }
+        // The status is a group of its own after the buttons: beside the last when it fits there.
+        if let Some(status) = &panel.status {
+            widths_now.push(vec![text_w(status)]);
+        }
+        let mut placed = wrap(&widths_now);
+        let status = (placed.len() > buttons.iter().map(Vec::len).sum::<usize>())
+            .then(|| placed.pop())
+            .flatten();
+        let lines = placed
+            .iter()
+            .chain(&status)
+            .map(|place| place.line + 1)
+            .max()
+            .unwrap_or(1);
+        Self {
+            buttons: buttons.into_iter().flatten().zip(placed).collect(),
+            status,
+            pad,
+            lines,
+        }
+    }
+
+    /// How tall it draws, `button_h` a line.
+    fn height(&self, button_h: f32) -> f32 {
+        self.lines as f32 * (button_h + FOOTER_LINE_GAP) - FOOTER_LINE_GAP
+    }
+
+    /// Where the cursor's grid should break the footer's row: where this breaks it, from the same
+    /// left edge as the answer's.
+    fn wrap(&self) -> Wrapped {
+        let (controls, placed): (Vec<Control>, Vec<Placed>) = self
+            .buttons
+            .iter()
+            .map(|((.., control), place)| (*control, *place))
+            .unzip();
+        Wrapped::new(&controls, &placed)
+    }
+}
+
+/// The footer button for `control`, labelled for what the panel holds now.
+fn footer_button(panel: &Panel, control: Control) -> FooterButton {
+    let state = &panel.state;
+    match control {
+        Control::Generate => (
+            "Generate Build".to_owned(),
+            false,
+            Some(Action::Generate),
+            control,
+        ),
+        Control::AllowNaked => (
+            checked("Allow no armor", state.allow_naked),
+            false,
+            Some(Action::ToggleAllowNaked),
+            control,
+        ),
+        Control::Spells => (
+            format!("Spells ({}) v", state.spells.len()),
+            panel.list == Some(List::Spell),
+            Some(Action::OpenList(List::Spell)),
+            control,
+        ),
+        Control::IgnoreFloors => (
+            checked("Ignore typical minimums", state.ignore_floors),
+            false,
+            Some(Action::ToggleIgnoreFloors),
+            control,
+        ),
+        Control::Spend => (
+            checked(Spend::Ehp.label(), state.spend == Spend::Ehp),
+            false,
+            Some(Action::ToggleSpend),
+            control,
+        ),
+        Control::ShowToggle => {
+            let (label, shown) = if panel.shown == Shown::Build {
+                ("Show results", Shown::Answer)
+            } else {
+                ("Show build", Shown::Build)
+            };
+            (label.to_owned(), false, Some(Action::Show(shown)), control)
+        }
+        Control::Apply => (
+            "Apply to character...".to_owned(),
+            false,
+            panel.generated.is_some().then_some(Action::AskApply),
+            control,
+        ),
+        // `nav::footer` names no other control.
+        _ => (panel.describe(control), false, None, control),
     }
 }
 
@@ -2136,11 +2363,21 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         )
     };
     let content_at = content_rule_at + 1.0 + content_pad_top;
+    // The footer's buttons on as many lines as the panel's width needs, before the height that
+    // depends on them. The cursor's grid breaks the footer, and a refusal's fixes, where these do.
+    let footer = Footer::lay(panel, ui, right - inner);
+    let fixes: Vec<Control> = (0..panel.fixes.len()).map(Control::Fix).collect();
+    panel.wrapped = footer.wrap().with(
+        &fixes,
+        &fix_places(ui, &panel.fixes, right - inner),
+        FIX_INDENT,
+    );
+    let footer_h = footer.height(button_h);
     // The answer's space, its rule, the buttons, the key bar's rule and the key bar.
     let below_content = content_pad_bottom
         + 1.0
         + FOOTER_TOP
-        + button_h
+        + footer_h
         + FOOTER_GAP
         + 1.0
         + KEYS_TOP
@@ -2162,7 +2399,7 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
     let content_bottom = content_top + content_h;
     let footer_rule_y = content_bottom + content_pad_bottom;
     let footer_y = footer_rule_y + 1.0 + FOOTER_TOP;
-    let keys_rule_y = footer_y + button_h + FOOTER_GAP;
+    let keys_rule_y = footer_y + footer_h + FOOTER_GAP;
     let hint_y = keys_rule_y + 1.0 + KEYS_TOP;
 
     // A control that left the grid (a mode's option, a results table that was cleared) hands the
@@ -2178,6 +2415,7 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         targets: Vec::new(),
         cursor: panel.cursor,
         button_pad: BUTTON_PAD_X,
+        button_max: f32::INFINITY,
     };
     canvas.rect([0.0, 0.0], display, DIM_COVER);
     canvas
@@ -2356,86 +2594,34 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         draw_answer(panel, &mut canvas, results_rect);
     }
 
-    // Footer: its buttons in a row, as the design pads them, or tighter when they would not fit.
-    let mut footer = vec![
-        (
-            "Generate Build".to_owned(),
-            false,
-            Some(Action::Generate),
-            Control::Generate,
-        ),
-        (
-            checked("Allow no armor", panel.state.allow_naked),
-            false,
-            Some(Action::ToggleAllowNaked),
-            Control::AllowNaked,
-        ),
-        (
-            format!("Spells ({}) v", panel.state.spells.len()),
-            panel.list == Some(List::Spell),
-            Some(Action::OpenList(List::Spell)),
-            Control::Spells,
-        ),
-        (
-            checked("Ignore typical minimums", panel.state.ignore_floors),
-            false,
-            Some(Action::ToggleIgnoreFloors),
-            Control::IgnoreFloors,
-        ),
-        (
-            checked(Spend::Ehp.label(), panel.state.spend == Spend::Ehp),
-            false,
-            Some(Action::ToggleSpend),
-            Control::Spend,
-        ),
-    ];
-    if panel.generated.is_some() {
-        let (label, shown) = if panel.shown == Shown::Build {
-            ("Show results", Shown::Answer)
-        } else {
-            ("Show build", Shown::Build)
-        };
-        footer.push((
-            label.to_owned(),
-            false,
-            Some(Action::Show(shown)),
-            Control::ShowToggle,
-        ));
-    }
-    footer.push((
-        "Apply to character...".to_owned(),
-        false,
-        panel.generated.is_some().then_some(Action::AskApply),
-        Control::Apply,
-    ));
-    let labels_w: f32 = footer.iter().map(|(label, ..)| canvas.width(label)).sum();
-    let gaps_w = BUTTON_GAP * (footer.len() - 1) as f32;
-    let needed = labels_w + gaps_w + BUTTON_PAD_X * 2.0 * footer.len() as f32;
-    if needed > right - inner {
-        canvas.button_pad = PAIR_PAD;
-    }
-    if std::mem::replace(&mut panel.footer_logged, footer.len()) != footer.len() {
+    // Footer: its buttons in their groups, as the design pads them or tighter when that would not
+    // fit one line, wrapped onto more lines when even that does not. None ends past `right`.
+    canvas.button_pad = footer.pad;
+    canvas.button_max = right - inner;
+    let logged = (footer.buttons.len(), footer.lines);
+    if std::mem::replace(&mut panel.footer_logged, logged) != logged {
         log_line(format_args!(
-            "{LOG_PREFIX} footer: {} buttons need {needed:.0}px of {:.0}px -- padded {}",
-            footer.len(),
+            "{LOG_PREFIX} footer: {} buttons on {} line(s) of {:.0}px -- padded {}",
+            logged.0,
+            logged.1,
             right - inner,
-            canvas.button_pad
+            footer.pad
         ));
     }
-    let mut x = inner;
-    let mut spells_x = inner;
-    for (label, on, action, control) in &footer {
+    let line_y = |place: &Placed| footer_y + place.line as f32 * (button_h + FOOTER_LINE_GAP);
+    let mut spells_at = [inner, footer_y];
+    for ((label, on, action, control), place) in &footer.buttons {
+        let y = line_y(place);
         if *control == Control::Spells {
-            spells_x = x;
+            spells_at = [inner + place.x, y];
         }
-        x = canvas.button(x, footer_y, label, *on, *action, Some(*control)) + BUTTON_GAP;
+        canvas.button(inner + place.x, y, label, *on, *action, Some(*control));
     }
-    x += BUTTON_GAP;
-    if let Some(status) = &panel.status {
+    if let (Some(status), Some(place)) = (&panel.status, &footer.status) {
         canvas.text(
-            [x, footer_y + BUTTON_PAD_Y],
+            [inner + place.x, line_y(place) + BUTTON_PAD_Y],
             GOOD,
-            &clip(ui, status, right - x),
+            &clip(ui, status, place.width),
         );
     }
     // Key help, one button and one word each, for the device the player is on: the panel's own
@@ -2479,8 +2665,8 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
             let shown = panel.list_rows(List::Spell).len().clamp(1, LIST_VISIBLE) as f32;
             let list_height = (line + 6.0) * shown + 8.0;
             Some((
-                [spells_x, footer_y - 2.0 - list_height],
-                canvas.width("[x] Promised Walk of Peace  2 slots  INT 30 FTH 40") + 40.0,
+                [spells_at[0], spells_at[1] - 2.0 - list_height],
+                canvas.width("[x2] Promised Walk of Peace  2 slots  INT 30 FTH 40") + 40.0,
                 "no spell data: the stub backend offers none",
             ))
         }
@@ -2564,8 +2750,19 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         }
     }
     if ui.is_mouse_clicked(MouseButton::Right) {
+        // On a spell row, a right click takes out the copy a left click added.
+        let spell = targets
+            .iter()
+            .rev()
+            .find(|(min, max, _)| canvas.inside(*min, *max))
+            .and_then(|(_, _, action)| match action {
+                Action::AddSpell(index) => Some(*index),
+                _ => None,
+            });
         if panel.confirming {
             panel.confirming = false;
+        } else if let Some(index) = spell {
+            panel.act(Action::RemoveSpell(index));
         } else {
             panel.commit_focus();
             panel.list = None;
@@ -2786,23 +2983,45 @@ fn draw_refusal(
         "Make it build (each was checked to give a build):",
     );
     y += line + 4.0;
-    let mut x = min[0] + 12.0;
-    for (index, fix) in fixes.iter().enumerate() {
-        let width = canvas.width(&fix.label) + canvas.button_pad * 2.0;
-        if x + width > max[0] && x > min[0] + 12.0 {
-            x = min[0] + 12.0;
-            y += canvas.button_h() + 4.0;
-        }
-        x = canvas.button(
-            x,
-            y,
+    // Wrapped as `draw_panel` told the cursor's grid they are, each cut to the line if longer.
+    let places = fix_places(canvas.ui, fixes, max[0] - min[0]);
+    let left = min[0] + FIX_INDENT;
+    let step_y = canvas.button_h() + FIX_LINE_GAP;
+    let held = (canvas.button_pad, canvas.button_max);
+    (canvas.button_pad, canvas.button_max) = (BUTTON_PAD_X, max[0] - left);
+    for (index, (fix, place)) in fixes.iter().zip(&places).enumerate() {
+        canvas.button(
+            left + place.x,
+            y + place.line as f32 * step_y,
             &fix.label,
             false,
             Some(Action::Fix(index)),
             Some(Control::Fix(index)),
-        ) + 8.0;
+        );
     }
-    y + canvas.button_h()
+    (canvas.button_pad, canvas.button_max) = held;
+    y + fix_lines(&places) as f32 * step_y - FIX_LINE_GAP
+}
+
+/// A refusal's fix buttons: indented this far under their heading, and this far apart across and
+/// down.
+const FIX_INDENT: f32 = 12.0;
+const FIX_GAP: f32 = 8.0;
+const FIX_LINE_GAP: f32 = 4.0;
+
+/// Where a refusal's fix buttons go in the answer's `width`: one group, wrapped as the footer is,
+/// from [`FIX_INDENT`] in. At the design's padding, which is the answer's.
+fn fix_places(ui: &Ui, fixes: &[Fix], width: f32) -> Vec<Placed> {
+    let widths: Vec<f32> = fixes
+        .iter()
+        .map(|fix| ui.calc_text_size(&fix.label)[0] + BUTTON_PAD_X * 2.0)
+        .collect();
+    nav::wrap(&[&widths], width - FIX_INDENT, FIX_GAP, 0.0)
+}
+
+/// How many lines `places` take.
+fn fix_lines(places: &[Placed]) -> usize {
+    places.last().map_or(0, |place| place.line + 1)
 }
 
 /// The answer to the last Run, or why there is none.
@@ -3068,16 +3287,17 @@ fn draw_table(
 fn content_height(panel: &Panel, ui: &Ui, width: f32, line: f32) -> f32 {
     let lines = |n: usize| n as f32 * (line + 4.0);
     let button_h = line + BUTTON_PAD_Y * 2.0;
-    let refusal = |reasons: &[String], fixes: usize| {
+    let refusal = |reasons: &[String], fixes: &[Fix]| {
         let wrapped: usize = reasons
             .iter()
             .map(|reason| wrap(ui, reason, width - 24.0).len())
             .sum();
-        let fix_rows = if fixes == 0 {
+        let fix_rows = if fixes.is_empty() {
             0.0
         } else {
-            // The heading, then the buttons, which wrap onto a second row when many.
-            8.0 + line + 4.0 + 2.0 * (button_h + 4.0)
+            // The heading, then the buttons on as many lines as `draw_refusal` wraps them onto.
+            let lines = fix_lines(&fix_places(ui, fixes, width));
+            8.0 + line + 4.0 + lines as f32 * (button_h + FIX_LINE_GAP)
         };
         line + wrapped as f32 * (line + 2.0) + fix_rows + line
     };
@@ -3087,7 +3307,7 @@ fn content_height(panel: &Panel, ui: &Ui, width: f32, line: f32) -> f32 {
         return doll_height(line, 1.0);
     }
     if !panel.refused.is_empty() {
-        return refusal(&panel.refused, panel.fixes.len());
+        return refusal(&panel.refused, &panel.fixes);
     }
     // draw_answer's defender line over the answer.
     let defender = if panel.answer_defender.is_some() {
@@ -3102,7 +3322,7 @@ fn content_height(panel: &Panel, ui: &Ui, width: f32, line: f32) -> f32 {
                     + rows.len().max(1) as f32 * table_row_h(line)
                     + table_footer_h(line)
             }
-            Some(Answer::Refused(refused)) => refusal(&refused.lines, refused.fixes.len()),
+            Some(Answer::Refused(refused)) => refusal(&refused.lines, &refused.fixes),
             Some(Answer::Build(_)) => lines(6),
             // The heading, the violations, and the line offering the second Run.
             Some(Answer::FloorViolations(violations)) => {
@@ -3197,11 +3417,11 @@ fn piece_name(piece: &Piece) -> String {
 }
 
 /// The paperdoll for the log, written once per build: every slot it fills, with what and under
-/// which item id, the armour it leaves bare, and how many slots Apply leaves alone.
+/// which item id, the armour it leaves bare, and how many other slots Apply empties.
 fn doll_line(doll: &Paperdoll) -> String {
     let mut filled = Vec::new();
     let mut bare = Vec::new();
-    let mut kept = 0usize;
+    let mut empty = 0usize;
     for (slot, held) in doll.slots() {
         match held {
             Held::Item(piece) => filled.push(format!(
@@ -3213,11 +3433,11 @@ fn doll_line(doll: &Paperdoll) -> String {
                     .map_or_else(|| "no item id".to_owned(), |id| format!("item {id}"))
             )),
             Held::Bare => bare.push(slot.label()),
-            Held::Kept => kept += 1,
+            Held::Empty => empty += 1,
         }
     }
     format!(
-        "{} | bare: {} | {kept} slots Apply leaves as they are",
+        "{} | bare: {} | {empty} more slots Apply empties",
         filled.join(", "),
         if bare.is_empty() {
             "none".to_owned()
@@ -3335,7 +3555,7 @@ fn draw_paperdoll(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32;
                     }
                 }
             }
-            Held::Bare | Held::Kept => {
+            Held::Bare | Held::Empty => {
                 art &= ds2_overlay::panels::empty_slot(
                     &canvas.list,
                     empty_art(slot),
@@ -3394,9 +3614,36 @@ fn draw_paperdoll(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32;
 type Note = Vec<([f32; 4], String)>;
 
 /// What the pane says under a slot's item: how a weapon is held, why a ring is worn and what else
-/// is granted beside it, why armour is missing, and what Apply does with a slot the build leaves
-/// alone.
+/// is granted beside it, why armour is missing, and that Apply empties a slot the build leaves
+/// out.
 fn slot_notes(build: &GeneratedBuild, slot: Slot, held: &Held) -> Vec<Note> {
+    let kit = &build.kit;
+    let picked = match slot {
+        Slot::Item(i) => kit.items.get(usize::from(i)),
+        Slot::Arrows(i) => kit.ammo.get(usize::from(i)).and_then(Option::as_ref),
+        Slot::Bolts(i) => kit.ammo.get(2 + usize::from(i)).and_then(Option::as_ref),
+        _ => None,
+    };
+    if let (Some(pick), Held::Item(_)) = (picked, held) {
+        let stack = if pick.name == "Estus Flask" {
+            "Apply fills the flask"
+        } else {
+            "Apply tops it up to a full stack"
+        };
+        return vec![
+            vec![(TEXT, pick.why.clone())],
+            vec![(DIM, stack.to_owned())],
+        ];
+    }
+    if let (Slot::RightHand(2), Some(launcher), Held::Item(_)) = (slot, &kit.launcher, held) {
+        return vec![
+            vec![(TEXT, launcher.why.clone())],
+            vec![(DIM, "Swap to it from the primary for range".to_owned())],
+        ];
+    }
+    if let (Slot::LeftHand(0), Some(offhand)) = (slot, &build.offhand) {
+        return left_hand_notes(offhand, held);
+    }
     match (slot, held) {
         (Slot::RightHand(_) | Slot::LeftHand(_), Held::Item(_)) => vec![vec![
             (
@@ -3487,10 +3734,36 @@ fn slot_notes(build: &GeneratedBuild, slot: Slot, held: &Held) -> Vec<Note> {
                     .clone()
                     .unwrap_or_else(|| "The build wears nothing here".to_owned()),
             )],
-            vec![(WARN, "Apply leaves what you wear here".to_owned())],
+            vec![(DIM, "Apply takes off what you wear here".to_owned())],
         ],
-        (_, Held::Kept) => vec![vec![(DIM, "Apply leaves what you have here".to_owned())]],
+        (_, Held::Empty) => vec![vec![(DIM, "Apply empties this slot".to_owned())]],
     }
+}
+
+/// What the pane says under the left hand stance swapping pairs with the primary: why it was
+/// picked, and the grips the build swaps between with each one's rate.
+fn left_hand_notes(offhand: &backend::Offhand, held: &Held) -> Vec<Note> {
+    let tone = if matches!(held, Held::Item(_)) {
+        TEXT
+    } else {
+        WARN
+    };
+    let mut notes = vec![vec![(tone, offhand.why.clone())]];
+    if !offhand.stances.is_empty() {
+        let grips: Vec<String> = offhand
+            .stances
+            .iter()
+            .map(|(stance, rate)| format!("{stance} {rate:.0}"))
+            .collect();
+        notes.push(vec![
+            (DIM, format!("Stands in {}", offhand.home)),
+            (DIM, format!("grip rates {}", grips.join(", "))),
+        ]);
+    }
+    if !matches!(held, Held::Item(_)) {
+        notes.push(vec![(DIM, "Apply empties this slot".to_owned())]);
+    }
+    notes
 }
 
 /// The pane beside the paperdoll: the slot the cursor is on -- its name, its item and what that
@@ -3527,7 +3800,7 @@ fn draw_doll_detail(
             }
         }
         Held::Bare => canvas.big_text([x, y], DIM, "Bare", width),
-        Held::Kept => canvas.big_text([x, y], DIM, "Not in this build", width),
+        Held::Empty => canvas.big_text([x, y], DIM, "Not in this build", width),
     }
     y += title_h + 4.0;
     let notes = slot_notes(build, slot, held);
@@ -3674,7 +3947,10 @@ fn draw_confirm(
         ),
         (
             TEXT,
-            format!("Grants up to {grants} items you lack, and equips the gear."),
+            format!(
+                "Grants up to {grants} items you lack, equips the gear, and empties every other \
+                 slot."
+            ),
         ),
     ];
     let width = lines

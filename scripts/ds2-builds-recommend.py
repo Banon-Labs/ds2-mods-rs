@@ -208,6 +208,8 @@ class Data:
         # (roll_shape); empty when the regulation is not read, and then nobody rolls.
         self.roll_rate = []
         self.throwables,self.heals, self.item_buffs = {}, {}, {}  # regulation_consumables
+        self.stat_buffs, self.status_guards, self.cures = {}, {}, {}  # regulation_consumables
+        self.invader_refused = set()  # regulation_consumables: names whose use an invader is refused
         # weapon class (Dagger, Greatsword, ...): MugenMonkey only, joined by normalized name
         mm_w = {}
         for k, v in mm["darkSouls2WeaponDetails"].items():
@@ -847,10 +849,11 @@ def max_load(data: Data, eff: dict, rings=()) -> float:
 
 #: Whether a generated build must wear a piece in every armour slot: best_armor and
 #: armor_poise_steps leave Naked out of each slot, and generate_armor lets a slot go bare only when
-#: no set with all four fits the load. scripts/ds2-bracket-builds.py sets it (user rule 2026-10-24:
-#: every armour slot of a bracket build is filled); the default, and the Rust port's, still leaves a
-#: slot bare when no piece's defense is worth its weight.
-FULL_ARMOR = False
+#: no set with all four fits the load. On by default, and always in the Rust port (user rule
+#: 2026-10-24 for bracket builds, 2026-10-30 for every generated build: a SL 100 Dark Fume Ultra
+#: Greatsword came back in a Minotaur Helm alone, the poise steps having bought the helm with the
+#: chest, hands and legs); scripts/ds2-bracket-builds.py's --allow-bare turns it off.
+FULL_ARMOR = True
 #: The armour keys a generated build may wear; None allows every piece. scripts/ds2-bracket-builds.py
 #: sets it to what the mule's bag holds, as it does HELD_RINGS.
 HELD_ARMOR: set[str] | None = None
@@ -1227,7 +1230,7 @@ def apply_regulation(data: Data) -> str:
             "BulletParam": "BULLET_PARAM", "SystemBulletParam": "BULLET_PARAM", "ArrowParam": "ARROW_PARAM",
             "WeaponActionCategoryParam": "WEAPON_ACTION_CATEGORY_PARAM",
             "WeaponAttackMotionParam": "WEAPON_ATTACK_MOTION_PARAM", "DamageCtrlParam": "DAMAGE_CTRL_PARAM",
-            "ArmorParam": "ARMOR_PARAM", "ItemParam": "ITEM_PARAM",
+            "ArmorParam": "ARMOR_PARAM", "ItemParam": "ITEM_PARAM", "ItemUsageParam": "ITEM_USAGE_PARAM",
             "ArmorReinforceParam": "ARMOR_REINFORCE_PARAM",
             "WeaponStaminaCostParam": "WEAPON_STAMINA_COST_PARAM", "ChrParam": "CHR_PARAM"})
         names = ex.item_names(reg.GAME_DIR, reg.DEFAULT_REGULATION)
@@ -2157,11 +2160,50 @@ def regulation_defense_buffs(data: Data, emevd, members: dict, d: dict, names: d
 #: Old Radiant 1300 / 28.8 s, and the Estus Flask rows 550..800 by upgrade, which is why `hp` is read
 #: as hit points and the float as seconds.
 ITEM_THROW, ITEM_HEAL = (100120, 0), (100050, 0)
+#: ItemUsageParam.exEvalFuncID (byte 7) whose check refuses an invader the item. EXE, read
+#: 2026-10-30: the can-use check 0x1401a8b90 dispatches on exEvalFuncID, and handler 30
+#: (0x1401a6490) returns false when 0x1401ab8d0 and 0x1401b2d00 both hold. One reading ties that
+#: to the local phantom type's ChrNetworkPhantomParam.healItemUsageType (byte 0x43), 1 for the
+#: break-in/invader types 6-11, 14, 16, 17 and 106-110; a second pass saw only the two predicates
+#: (`[x+0x40] == 0x1c2`, and bit 1 of byte +0x50 of a 0x58-byte table row) and not byte 0x43. That a Seamless Co-op invader is such
+#: a phantom is INFERRED; the user could not use a Monastery Charm invading under Seamless 0.0.6
+#: (2026-10-30). REGULATION: rows 1500 (Estus Flask), 1610 (every Lifegem, herb and charm, Divine
+#: Blessing, Rouge and Crimson Water) and 2645 (Smooth & Silky Stone) carry it; 1600 (burrs,
+#: troches, Green Blossom), 1700 (resins, knives, urns, Repair Powder) and 1750 (ammunition) are 0.
+INVADER_REFUSED_CHECK = 30
+#: Item ids exempt from INVADER_REFUSED_CHECK. UNVERIFIED: the Estus Flask (60155000), because the
+#: user (2026-10-30) says Seamless Co-op re-enables Estus for invaders, and ds2sc.dll registers a
+#: handler keyed to 60155000 (0x180061160, called from 0x18000caa0) and to no other item; what
+#: that handler does has not been read. Empty this set to drop the Estus from invader kits.
+INVADER_CHECK_EXEMPT = {60155000}
 #: ItemParam.itemUsageParamId of a thrown item (Throwing Knife, Firebomb, every urn).
 THROWN_USAGE = 1700
+
+
+def hurts_host(d: dict, rid: int) -> bool:
+    """Whether PlayerDamageParam row `rid` can hurt an invaded host. Not when its damageCategory's
+    DamageCtrlParam row sets isHollowOnlyDamage (JP 亡者ダメージ, "hollow damage"; REGULATION: set on
+    three rows, which only Holy Water Urn's burst 60620010/60620011 among the thrown items uses):
+    a host is in human form to be invaded. How the EXE tests the flag was not read."""
+    r = d["PlayerDamageParam"].get(str(rid)) or {}
+    return not (d["DamageCtrlParam"].get(str(r.get("damageCategory"))) or {}).get("isHollowOnlyDamage")
+
+
 #: The buff types an item's BUFF_SCALED/BUFF_FLAT name past DAMAGE_TYPE: Rotten Pine Resin's 5
 #: and Bleeding Serum's 6 (REGULATION; their ids are the order STATUS_TERMS gives the two).
 BUFF_STATUS = {5: "poison", 6: "bleed"}
+#: `1000[0] [kind, seconds f32, value]` adds `value` to a stat (docs/DS2-BUILD-MECHANICS.md section 2:
+#: the kinds matched against the Strength/Dexterity/Knowledge/Prayer/Simpleton's rings, VERIFIED).
+#: On an item it lasts `seconds`: the four balms (60235000-60238000) carry kinds 10-13, +5 for 45 s.
+STAT_ADD = (1000, 0)
+STAT_KINDS = {6: "vigor", 7: "endurance", 8: "vitality", 10: "strength", 11: "dexterity", 12: "intelligence",
+              13: "faith", 14: "adaptability"}
+#: `100070[0] [1, 871, category]` ends a status category; 872 in the same word starts one (the
+#: SpEffectAbnormalState.emevd procs, STATUS_PERIODIC). INFERRED from the items that carry 871:
+#: Poison Moss (categories 0 and 8), Monastery and Dragon Charm (0, 8) and Divine Blessing (0-11),
+#: whose text says they cure. Category 0 is poison and 8 toxic (EXE, regulation_status_procs).
+STATUS_END = 871
+STATUS_CATEGORY = {0: "poison", 1: "bleed", 8: "toxic"}
 
 
 def regulation_consumables(data: Data, emevd, members: dict, d: dict, names: dict) -> str:
@@ -2169,16 +2211,26 @@ def regulation_consumables(data: Data, emevd, members: dict, d: dict, names: dic
     (event id == item id, name from itemname.fmg):
 
     * data.throwables: name -> {"item", "hits": damage_row_terms of the thrown damage row and each
-      child bullet's row that hits enemies, "words": (w2, w3)} for every ITEM_THROW item whose
-      ItemParam row is thrown (THROWN_USAGE) and some row deals damage.
+      child bullet's row that hits enemies and can hurt a host (hurts_host), "words": (w2, w3)}
+      for every ITEM_THROW item whose ItemParam row is thrown (THROWN_USAGE) and some row deals
+      damage. Holy Water Urn has none: its burst only hurts a hollow.
     * data.heals: name -> {"item", "hp", "seconds"} for every ITEM_HEAL whose `hp` is an integer
       (Divine Blessing's percent float is left out).
     * data.item_buffs: name -> {"type", "scale", "flat", "seconds"}: regulation_buffs's reading of
-      BUFF_SCALED/BUFF_FLAT on an item (the resins), with BUFF_STATUS types."""
+      BUFF_SCALED/BUFF_FLAT on an item (the resins), with BUFF_STATUS types.
+    * data.invader_refused: the name of every ItemParam row whose ItemUsageParam check is
+      INVADER_REFUSED_CHECK, but INVADER_CHECK_EXEMPT's."""
     events = {e.id: e for e in emevd.Emevd(Path("SpEffectActiveItem.emevd"),
                                            members["SpEffectActiveItem.emevd"]).events}
     pdp, bullets, items = d["PlayerDamageParam"], d["BulletParam"], d["ItemParam"]
     data.throwables, data.heals, data.item_buffs = {}, {}, {}
+    data.stat_buffs, data.status_guards, data.cures = {}, {}, {}
+    usage = d["ItemUsageParam"]
+    data.invader_refused = {names[eid] for eid, row in items.items()
+                            if int(eid) not in INVADER_CHECK_EXEMPT and eid in names
+                            and not names[eid].startswith("<")
+                            and (usage.get(str(row["itemUsageParamId"])) or {}).get("exEvalFuncID")
+                            == INVADER_REFUSED_CHECK}
     for eid, ev in sorted(events.items()):
         name = names.get(str(eid), "")
         if not name or name.startswith("<"):
@@ -2190,8 +2242,8 @@ def regulation_consumables(data: Data, emevd, members: dict, d: dict, names: dic
             if op == ITEM_THROW and len(w) >= 4 and (items.get(str(eid)) or {}).get("itemUsageParamId") == THROWN_USAGE:
                 b = bullets.get(str(w[0][0])) or {}
                 rows = [w[1][0]] + [b.get(f"childeDamageId{s}") for s in ("", "02", "03") if b.get(f"childeBulletId{s}")]
-                hits = [t for t in (damage_row_terms(pdp, r) for r in rows if r) if t and t["enemy"]
-                        and (t["flat"] or t["status"])]
+                hits = [t for t in (damage_row_terms(pdp, r) for r in rows if r and hurts_host(d, r))
+                        if t and t["enemy"] and (t["flat"] or t["status"])]
                 if hits:
                     data.throwables[name] = {"item": eid, "hits": hits, "words": (w[2][0], round(w[3][1], 3))}
             elif op == ITEM_HEAL and len(w) >= 4 and 0 < w[2][0] < 100_000:
@@ -2203,10 +2255,18 @@ def regulation_consumables(data: Data, emevd, members: dict, d: dict, names: dic
                 t = w[1][2] & 0xFFFF
                 buff.setdefault("type", DAMAGE_TYPE.get(t) or BUFF_STATUS.get(t))
                 buff.update(flat=w[1][2] >> 16, seconds=w[0][1])
+            elif op == STAT_ADD and len(w) >= 3 and w[0][0] in STAT_KINDS and w[1][1] > 0:
+                sb = data.stat_buffs.setdefault(name, {"add": {}, "seconds": w[1][1]})
+                sb["add"][STAT_KINDS[w[0][0]]] = sb["add"].get(STAT_KINDS[w[0][0]], 0) + w[2][0]
+            elif op == DEF_ADD and len(w) >= 2 and BUFF_STATUS.get(w[1][2] & 0xFF):
+                sg = data.status_guards.setdefault(name, {"add": {}, "seconds": w[0][1]})
+                sg["add"][BUFF_STATUS[w[1][2] & 0xFF]] = w[1][2] >> 16
+            elif op == STATUS_PERIODIC and len(w) >= 3 and w[1][0] == STATUS_END and w[2][0] in STATUS_CATEGORY:
+                data.cures.setdefault(name, set()).add(STATUS_CATEGORY[w[2][0]])
         if buff.get("type"):
             data.item_buffs[name] = {"scale": 0.0, "flat": 0, **buff}
     return (f"{len(data.throwables)} thrown items, {len(data.heals)} heals and {len(data.item_buffs)} weapon "
-            "buffs from SpEffectActiveItem.emevd")
+            f"buffs from SpEffectActiveItem.emevd; {len(data.invader_refused)} items an invader may not use")
 
 
 def ring_attack_add(data: Data, row: dict, rings) -> dict:
@@ -3725,59 +3785,99 @@ def offhand_room(data: Data, stats: dict, rings, held) -> float:
 
 def choose_offhand(data: Data, corpus: list[Build], attacks: dict, weapon: str, inf: str, st: dict, rings,
                    sl: int, dfn: dict, ranked: list, defender=None, room: float | None = None) -> dict:
-    """What the left hand holds beside `weapon`+`inf`: of nothing, the primary's own twin, a shield
-    when the primary attacks out of a raised guard (the lightest it wields), and `ranked`
-    (weapons_for rows at these stats, best first: each weapon at its best infusion there) -- its
-    first OFFHAND_TRIES melee weapons, then the next OFFHAND_PS_TRIES that can power stance with
-    the primary -- the one stance_metrics rates highest, of those no heavier than `room`
-    (offhand_room; None for no limit). Returns stance_metrics' answer for it plus
-    "left" and "left_infusion" (None for an empty hand), "solo" (the primary alone, swapping only
-    its own grip) and "ps_short": for the best-ranked power stance partner the stats fall short of,
-    (its key, the STR and DEX it needs); None when none does."""
+    """What the left hand holds beside `weapon`+`inf`. It always holds something when anything
+    fits: a two-handed build taps Y to one-hand its weapon and use what the left holds, or holds Y
+    to two-hand the left one, so an empty left hand is a grip swap the build cannot make (user
+    report 2026-10-30: a Fume Ultra Greatsword build came with none, because every candidate was
+    over `room` and an empty hand then won). The candidates are those that fit -- wieldable at `st`
+    in some grip (two-handed at least, STR halved: a left hand only two-handable still swaps to
+    L2H, and the 1H tie-break prefers one that also works one-handed) and no heavier than `room`
+    (offhand_room; None for no limit) -- of the primary's own twin,
+    a shield when the primary attacks out of a raised guard (the lightest it wields), and `ranked`
+    (weapons_for rows at these stats, best first: each weapon at its best infusion there): its
+    first OFFHAND_TRIES melee weapons that fit, then the next OFFHAND_PS_TRIES that fit and can
+    power stance with the primary. The one stance_metrics rates highest wins, a tie broken by its
+    1H stance's rate (the primary one-handed beside it) and then its L2H rate, the first of a full
+    tie kept; the hand is empty only when nothing fits or scores. Returns stance_metrics' answer
+    for it plus "left" and "left_infusion" (None for an empty hand), "solo" (the primary alone,
+    swapping only its own grip), "ps_short": for the best-ranked power stance partner the stats
+    fall short of, (its key, the STR and DEX it needs), None when none does, and "why"
+    (offhand_why)."""
+    def fits(key: str) -> bool:
+        return weapon_ok(data, key, st, True) and (room is None or data.weapons[key].get("weight", 0) <= room)
+
     melee, seen, by_name = [], set(), {}
     for k, w in data.weapons.items():  # generate_build's: a name's first key
         by_name.setdefault(w["name"], k)
     for _, name, winf, _, _ in ranked:
         key = by_name.get(name)
         if (not key or key in seen or key in data.ranged or CATALYST.search(key)
-                or data.weapons[key].get("isShield")):
+                or data.weapons[key].get("isShield") or not fits(key)):
             continue
         seen.add(key)
         melee.append((key, winf))
     picks = melee[:OFFHAND_TRIES]
     pairs = [m for m in melee[OFFHAND_TRIES:] if power_stance(data, weapon, m[0], st) is not None]
     picks += pairs[:OFFHAND_PS_TRIES]
-    if weapon not in seen:
+    if weapon not in seen and fits(weapon):
         picks.append((weapon, inf))
     guard = next((a for a in (attacks.get((norm(nm), "GuardNormal1st"))
                               for nm in (data.weapons[weapon]["name"], weapon.replace("_", " "))) if a), None)
     if guard and live_hits(guard):
-        shields = [k for k, w in data.weapons.items() if w.get("isShield") and weapon_ok(data, k, st, False)]
+        shields = [k for k, w in data.weapons.items()
+                   if w.get("isShield") and weapon_ok(data, k, st, False) and fits(k)]  # guarded one-handed
         if shields:
             picks.append((min(shields, key=lambda k: (data.weapons[k].get("weight", 0), k)), "No_Infusion"))
     base = stance_metrics(data, corpus, attacks, weapon, inf, None, None, st, rings, sl, dfn, defender)
-    best = base | {"left": None, "left_infusion": None}
-    short = None
+    best, rank, short, tried = None, None, None, 0
     for key, linf in picks:
-        if room is not None and data.weapons[key].get("weight", 0) > room:
-            continue  # it would leave no armour under EQUIP_CAP (offhand_room)
         m = stance_metrics(data, corpus, attacks, weapon, inf, key, linf, st, rings, sl, dfn, defender)
-        if m and m["stance"] > best.get("stance", 0.0):
-            best = m | {"left": key, "left_infusion": linf}
         ps = m.get("power_stance") if m else None
         if short is None and ps and not ps["met"]:
             short = (key, ps["need"])
-    if "stance" not in best:  # nothing the primary throws scores
-        return {}
-    return best | {"solo": base.get("stance", 0.0), "ps_short": short}
+        if not m:
+            continue
+        tried += 1
+        r = (m["stance"], m["stances"].get("1H", 0.0), m["stances"].get("L2H", 0.0))
+        if rank is None or r > rank:
+            best, rank = m | {"left": key, "left_infusion": linf}, r
+    if best is None:
+        if not base:  # nothing the primary throws scores
+            return {}
+        best = base | {"left": None, "left_infusion": None}
+    best |= {"solo": base.get("stance", 0.0), "ps_short": short}
+    return best | {"why": offhand_why(data, best, tried, room)}
+
+
+def offhand_why(data: Data, o: dict, tried: int, room: float | None) -> str:
+    """Why choose_offhand's answer `o` holds what it does, as the paperdoll's slot pane says it:
+    the stance rate the left hand raises, or, when none of the `tried` candidates raises it, the
+    one-handed stance's rate it wins on (the left two-handed's when the primary cannot be
+    one-handed), and its weight against the `room` left; for an empty hand, that nothing fits."""
+    left = o.get("left")
+    if not left:
+        return ("empty: nothing wieldable at these stats weighs at most the "
+                f"{room:.1f} of load a full armour set leaves" if room is not None
+                else "empty: nothing wieldable at these stats scores")
+    stances = o.get("stances", {})
+    if o["stance"] > o["solo"]:
+        out = (f"best of {tried} left hands that fit: stance rate {o['stance']:.0f} against "
+               f"{o['solo']:.0f} for the primary alone")
+    else:
+        grip = "1H" if "1H" in stances else "L2H"
+        out = (f"best of {tried} left hands that fit for grip swaps: {grip} rate {stances.get(grip, 0.0):.0f}; "
+               f"none raises the stance rate {o['stance']:.0f}")
+    if room is not None:
+        out += f"; weighs {data.weapons[left].get('weight', 0):.1f} of {room:.1f} load left"
+    return out
 
 
 def offhand_summary(data: Data, o: dict) -> dict | None:
     """choose_offhand's answer as generate_build returns it, by display name: the left hand
     ("left", "infusion"; None for an empty hand), the stance rate with it and the primary's alone,
     the home stance and every stance's rate, per family the stance and engagement it throws, whether
-    the pair power stances (and which weapon's L1/L2 play) and chains, and the power stance the
-    stats fall short of. None for a launcher."""
+    the pair power stances (and which weapon's L1/L2 play) and chains, the power stance the
+    stats fall short of, and why the left hand was picked. None for a launcher."""
     if not o:
         return None
     name = lambda k: data.weapons[k]["name"] if k else None
@@ -3788,7 +3888,8 @@ def offhand_summary(data: Data, o: dict) -> dict | None:
             "families": {f: {"stance": r["stance"], "engagement": r["engagement"], "rate": r["rate"]}
                          for f, r in (o.get("families") or {}).items()},
             "power_stance": ps and {"owner": name(ps["owner"]), "need": ps["need"], "met": ps["met"]},
-            "chain": bool(o.get("chain")), "ps_short": short and (name(short[0]), short[1])}
+            "chain": bool(o.get("chain")), "ps_short": short and (name(short[0]), short[1]),
+            "why": o.get("why", "")}
 
 
 def offhand_lines(o: dict | None) -> list[str]:
@@ -3798,7 +3899,8 @@ def offhand_lines(o: dict | None) -> list[str]:
     left = f"{o['left']} ({o['infusion'].replace('_', ' ')})" if o["left"] else "empty"
     ps = o["power_stance"]
     out = [f"left hand: {left}; stance rate {o['stance']:.2f} against {o['solo']:.2f} for the primary alone, "
-           f"stands in {o['home']} (" + ", ".join(f"{s} {v:.2f}" for s, v in o["stances"].items()) + ")"]
+           f"stands in {o['home']} (" + ", ".join(f"{s} {v:.2f}" for s, v in o["stances"].items()) + ")",
+           f"  why: {o['why']}"]
     if ps:
         out.append(f"power stance: {'yes' if ps['met'] else 'no'}, {ps['owner']}'s L1/L2, needs "
                    + " ".join(f"{s[:3].upper()} {v}" for s, v in ps["need"].items())
@@ -4263,10 +4365,27 @@ def armor_poise_steps(data: Data, b: Build, eff: dict, mix: dict, scarcity: floa
     return sorted(out)
 
 
+def swung_weapons(data: Data, weapon: str, inf: str, two: bool,
+                  left: tuple[str, str] | None) -> list[tuple[str, str, bool]]:
+    """The weapons generate_armor's poise pick scores, as (key, infusion, two-handed): the
+    primary in the build's grip, and choose_offhand's `left` (key, infusion) one-handed when the
+    build swings it -- a weapon, not a shield, whose attacks out of a raised guard are the
+    primary's. The weapons the build lists beside them never count: armour is chosen for the
+    weapon the build is made for (user, 2026-10-30, replacing the 2026-10-01 rule that weighed every
+    listed weapon). Measured at SL 100 before the change: a Dagger build's 21 listed weapons, half
+    of them whips, spears, halberds and a hammer, bought it 62 poise its own R1 gained 0.3 damage
+    per trade from."""
+    out = [(weapon, inf, two)]
+    if left and left[0] and not data.weapons[left[0]].get("isShield"):
+        out.append((left[0], left[1], False))
+    return out
+
+
 def granted_trades(data: Data, corpus: list[Build], sl: int, stats: dict, rings: list[str], granted) -> dict | None:
     """exchange_pairs for a build at `stats` wearing `rings`, swinging each of `granted` ((key,
-    infusion, two-handed)) against `sl`'s bracket counters (trade_counters): each weapon's
-    first_strike at its attack_rating there, plus STONE_RING_POISE when `rings` hold a Stone Ring.
+    infusion, two-handed); generate_armor passes swung_weapons') against `sl`'s bracket counters
+    (trade_counters): each weapon's first_strike at its attack_rating there, plus
+    STONE_RING_POISE when `rings` hold a Stone Ring.
     A launcher, or a weapon without attack timing or poise rows, is left out. Adds `basis`, what was
     weighed. None when nothing is left on either side."""
     # read once per `data`: about a second, and generate_build asks per build (first_strike only reads it)
@@ -4285,7 +4404,7 @@ def granted_trades(data: Data, corpus: list[Build], sl: int, stats: dict, rings:
             mine.append(hit)
     table = exchange_pairs(mine, trade_counters(data, corpus, sl, attacks))
     if table is not None:
-        table["basis"] = (f"{len(mine)} of {len(granted)} granted weapons x {len(table['counters'])} SL "
+        table["basis"] = (f"{len(mine)} of {len(granted)} swung weapons x {len(table['counters'])} SL "
                           f"bracket counter-hits, " + ("game play speed" if timing is not None else
                                                        f"mean play speed (no {SPEED_WINDOWS.name})"))
     return table
@@ -4302,6 +4421,71 @@ def armor_trade(data: Data, table: dict, pieces, stats: dict, rings: list[str], 
     k = bisect.bisect_left(table["keys"], poise)
     return {"poise": round(poise, 1), "poise_target": round(table["keys"][k - 1], 1) if k else 0.0,
             "trade_rate": round(rate, 3), "exchange": round(val, 2)}
+
+
+#: The stats _optimize_with credits with the R1 trades their poise wins (poise_trade_value): VIT
+#: through the load armour can take, END and ADP through the stat poise at min(END, ADP).
+POISE_STATS = ("vitality", "endurance", "adaptability")
+
+
+def poise_keys(data: Data, corpus: list[Build], weapon: str, two: bool, sl: int) -> tuple[list[float], int] | None:
+    """exchange_pairs' `keys` and `pairs` for `weapon` alone in its grip at `sl`'s bracket: the
+    stagger thresholds of the counter-hits that land before its first_strike (trade_counters), sorted,
+    and how many counters there are. Poise above a threshold holds through that counter and my hit
+    lands (exchange_value). Cached on `data`. None for a launcher, a weapon without attack timing or
+    poise rows, or a bracket with no counters."""
+    cache = data.__dict__.setdefault("_poise_keys", {})
+    key = (id(corpus), weapon, two, sl_bracket(sl))
+    if key not in cache:
+        attacks = data.__dict__.get("_trade_attacks")
+        if attacks is None:
+            attacks = data._trade_attacks = load_attacks(data)
+        mine = None if weapon in data.ranged else first_strike(data, attacks, weapon, two, speed_windows())
+        counters = trade_counters(data, corpus, sl, attacks)
+        cache[key] = None
+        if mine and counters:
+            keys = sorted(th for th in (stagger_threshold(c, mine) for c in counters if c["t"] < mine["t"])
+                          if th is not None)
+            cache[key] = (keys, len(counters))
+    return cache[key]
+
+
+def poise_frontier(data: Data) -> tuple[list[float], list[float]]:
+    """Every full armour set (a piece in each slot, armor_allowed's) that no lighter-or-equal set
+    out-poises, as (weights, pieces' poise), weight rising and poise with it: the most armour poise
+    each load buys. Requirements are not read: generate_armor checks them on the set it picks.
+    Cached on `data` per HELD_ARMOR."""
+    cache = data.__dict__.setdefault("_poise_frontier", {})
+    held = None if HELD_ARMOR is None else frozenset(HELD_ARMOR)
+    out = cache.get(held)
+    if out is None:
+        states = [(0.0, 0.0)]
+        for slot in ARMOR_SLOTS:
+            pieces = [(v.get("weight", 0), v.get("poise", 0)) for k, v in data.armor[slot].items()
+                      if armor_allowed(k, True)]
+            nxt = sorted(((sw + w, sp + p) for sw, sp in states for w, p in pieces), key=lambda s: (s[0], -s[1]))
+            states, best = [], None
+            for w, p in nxt:
+                if best is None or p > best:
+                    states.append((w, p))
+                    best = p
+        out = cache[held] = ([w for w, _ in states], [p for _, p in states])
+    return out
+
+
+def poise_trade_value(data: Data, keys: tuple[list[float], int], hit: float, st: dict, rings, carried: float) -> float:
+    """What a build at levelled stats `st` wearing `rings` and carrying `carried` weight wins in R1
+    trades by its poise, in damage per trade: `hit` (one hit of the objective) times the share of
+    poise_keys' pairs whose counter hits first and its poise holds through -- exchange_value's poise
+    term, each held pair's damage read as `hit`. The poise is the most poise_frontier's armour buys
+    under EQUIP_CAP of max_load, less what is carried, plus the stat poise and the rings' (armor_poise);
+    0 armour poise when no full set fits."""
+    weights, poises = poise_frontier(data)
+    budget = max_load(data, st, rings) * EQUIP_CAP
+    budget -= carried
+    at = bisect.bisect_right(weights, budget)
+    poise = (poises[at - 1] if at else 0.0) + armor_poise(data, (), rings, gear_stats(data, st, rings))
+    return hit * bisect.bisect_left(keys[0], poise) / keys[1]
 
 
 ATTACK_TYPES =Path.home() / ".cache/ds2-builds/attack-type.json"  # per weapon slot: slash/strike/thrust per hit
@@ -4758,6 +4942,111 @@ def row_status(data: Data, corpus: list[Build], sl: int, defender, weapon: str, 
     return out
 
 
+# --------------------------------------------------------------------------------------------
+# arsenal: what else a build's stats swing well
+#
+# A build's stats are optimized for one weapon, but a build that also swings other weapon classes
+# well can swap movesets to what the fight needs. arsenal() reads, at the row's own stats and
+# rings, the best moveset rate each other melee class reaches, and best_weapons ranks the
+# moveset and stance rows by a blend of the primary's rate and the mean of the build's best
+# ARSENAL_K slots. Only weapons whose uninfused scaling stays on the primary's own stats count:
+# no STR weapon on a DEX build unless the primary is innately both (scaling_axis).
+
+#: The stat line an uninfused weapon's scaling is read at, and how far each stat is raised
+#: (scaling_axis).
+AXIS_BASE, AXIS_STEP = 20, 20
+#: A weapon scales on every requirement stat whose gain is at least this share of its largest.
+#: Over the 290 melee and ranged weapons with an uninfused row, the second stat's gain over the
+#: first's is 0.06 at the 25th percentile, 0.33 at the median, 0.52 at the 75th and 0.80 at the
+#: 90th (scripts/ds2-arsenal-evidence.py axes, 2026-10-24): 0.75 makes the top tenth or so
+#: two-stat weapons -- Spear 21/27, Yorgh's Spear 29/22, Berserker Blade 20/26 -- and keeps the
+#: Ashen Warrior Sword (30 STR / 21 DEX, 0.70) a STR weapon.
+AXIS_BOTH = 0.75
+#: Weapon classes that are not a melee moveset to swap to: shields, catalysts and launchers.
+NOT_ARSENAL = {"Normal Shield", "Small Shield", "Greatshield", "Staff", "Chime", "Flame", "Bow", "Greatbow",
+               "Crossbow"}
+#: Per class, how many of its weapons -- best one-hit damage first -- have their moveset scored.
+ARSENAL_SHORTLIST = 2
+#: The arsenal's slots: the primary and its best ARSENAL_K - 1 other classes. The SL 155 run
+#: (bracket-ehp-155, the top five rows of every infusion) averages 8.2 other classes within 0.8 of
+#: the row's own moveset rate (scripts/ds2-arsenal-evidence.py arsenal, 2026-10-24): a build
+#: below that baseline is thinner than the top builds are.
+ARSENAL_K = 9
+#: The arsenal mean's share of a row's ranked value; the primary's own rate keeps the rest.
+ARSENAL_WEIGHT = 0.25
+#: best_weapons reads the arsenal of its rows best first until this many are in their final
+#: order; the rest keep their own score (an arsenal never raises a row, so none of them can pass).
+ARSENAL_EXACT = 15
+
+
+def scaling_axis(data: Data, weapon: str) -> frozenset:
+    """The requirement stats `weapon` uninfused scales on: each whose raise from AXIS_BASE by
+    AXIS_STEP (the others at AXIS_BASE or the weapon's requirement) adds at least AXIS_BOTH of the
+    largest such gain to its attack rating. Empty when no stat adds any. Cached on `data`."""
+    cache = data.__dict__.setdefault("_axis_cache", {})
+    if weapon not in cache:
+        base = dict.fromkeys(STATS, AXIS_BASE)
+        for s, v in (data.weapons[weapon].get("require") or {}).items():
+            base[s] = max(base.get(s, 0), int(v))
+        ar0 = sum(attack_rating(data, weapon, "No_Infusion", base).values())
+        gains = {}
+        for s in REQ_STATS:
+            up = dict(base)
+            up[s] += AXIS_STEP
+            gains[s] = sum(attack_rating(data, weapon, "No_Infusion", up).values()) - ar0
+        top = max(gains.values())
+        cache[weapon] = frozenset(s for s in REQ_STATS if top > 0 and gains[s] >= AXIS_BOTH * top)
+    return cache[weapon]
+
+
+def arsenal(data: Data, corpus: list[Build], attacks: dict, weapon: str, eff: dict, rings, sl: int, dfn: dict,
+            own: float, defender=None) -> dict:
+    """The build's arsenal at effective stats `eff` with `rings`: per melee class other than
+    `weapon`'s, its best moveset rate (moveset_metrics, in the better grip `eff` wields) among the
+    weapons whose scaling_axis is within `weapon`'s, each at the infusion with the most one-hit
+    damage against `dfn` -- the class's ARSENAL_SHORTLIST best by that damage scored. Unclassed
+    weapons are left out.
+
+    `own` is the row's own rate. The arsenal mean is (own + the best ARSENAL_K - 1 class rates,
+    each capped at own) / ARSENAL_K, a missing class 0; the value is (1 - ARSENAL_WEIGHT) x own +
+    ARSENAL_WEIGHT x that mean, never above own. Returns {"arsenal": the mean, "arsenal_value":
+    the value, "arsenal_classes": [[class, weapon, infusion, two-handed, rate], ...] best first}."""
+    axis = scaling_axis(data, weapon)
+    mine = data.weapon_class.get(weapon)
+    shortlist = {}
+    for key, w in data.weapons.items():
+        cls = data.weapon_class.get(key)
+        if (not cls or cls == mine or cls in NOT_ARSENAL or key in EMPTY or CATALYST.search(key)
+                or w.get("isShield") or key in data.ranged or "No_Infusion" not in (w.get("infusions") or {})
+                or not weapon_ok(data, key, eff, True) or not scaling_axis(data, key) <= axis):
+            continue
+        best = None
+        for inf in w["infusions"]:
+            ar = attack_rating(data, key, inf, eff, rings)
+            hit = sum(damage(k, v, dfn[k]) for k, v in ar.items())
+            if ar and (best is None or hit > best[0]):
+                best = (hit, inf)
+        if best:
+            shortlist.setdefault(cls, []).append((best[0], key, best[1]))
+    classes = []
+    for cls, cands in shortlist.items():
+        top = None
+        for _, key, inf in sorted(cands, key=lambda c: -c[0])[:ARSENAL_SHORTLIST]:
+            for two in (False, True):
+                if not weapon_ok(data, key, eff, two):
+                    continue
+                m = moveset_metrics(data, corpus, attacks, key, inf, two, eff, rings, sl, dfn, defender)
+                if m and (top is None or m["moveset"] > top[4]):
+                    top = [cls, key, inf, two, m["moveset"]]
+        if top:
+            classes.append(top)
+    classes.sort(key=lambda c: -c[4])
+    classes = classes[:ARSENAL_K - 1]
+    mean = (own + sum(min(own, c[4]) for c in classes)) / ARSENAL_K
+    return {"arsenal": mean, "arsenal_value": (1 - ARSENAL_WEIGHT) * own + ARSENAL_WEIGHT * mean,
+            "arsenal_classes": classes}
+
+
 def best_weapons(data: Data, corpus: list[Build], inf: str, sl: int, objective: str = "damage",
                  grip: str = "two", flex_weight: float | None = None, spells=(), only_class: str | None = None,
                  use_floors: bool = True, defender=None, weapon_class: str | None = None, window: float = 0.0,
@@ -4778,7 +5067,29 @@ def best_weapons(data: Data, corpus: list[Build], inf: str, sl: int, objective: 
             rows = pool.map(_best_weapon_job, keys)
     else:
         rows = [best_weapon_row(data, corpus, key, *args) for key in keys]
-    return sorted((r for r in rows if r), key=lambda r: -r[0])
+    rows = sorted((r for r in rows if r), key=lambda r: -r[0])
+    if objective == "damage" and window and rank in ("moveset", "stance"):
+        rows = with_arsenal(data, corpus, attacks, rows, sl, defender)
+    return rows
+
+
+def with_arsenal(data: Data, corpus: list[Build], attacks: dict, rows: list[tuple], sl: int, defender=None):
+    """best_weapons' rows (best first) ranked by their arsenal_value: each row's arsenal (its
+    metrics gain arsenal()'s keys and its score becomes the value) read best first until
+    ARSENAL_EXACT rows have one and the next row's own score is no higher than the
+    ARSENAL_EXACT-th value. The rows after keep their own score and no arsenal keys; as an arsenal
+    never raises a score, none of them belongs above those."""
+    dfn, _ = defender_defense(data, corpus, sl, defender)
+    out, values = [], []
+    for i, r in enumerate(rows):
+        if len(values) >= ARSENAL_EXACT and r[0] <= sorted(values, reverse=True)[ARSENAL_EXACT - 1]:
+            out.extend(rows[i:])
+            break
+        score, key, val, cls, two, st, worn, label, ammo, m = r
+        a = arsenal(data, corpus, attacks, key, gear_stats(data, st, worn), worn, sl, dfn, score, defender)
+        values.append(a["arsenal_value"])
+        out.append((a["arsenal_value"], key, val, cls, two, st, worn, label, ammo, {**m, **a}))
+    return sorted(out, key=lambda r: -r[0])
 
 
 _row_attacks: dict = {}  # id(data) -> load_attacks(data), read once for every row_metrics
@@ -5214,6 +5525,14 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     flex = (lambda s_: sum(flex_counts(data, s_))) if flex_weight else None
     dfn, _ = defender_defense(data, corpus, sl, defender)
     E =(lambda s_: gear_stats(data, s_, rings)) if rings else (lambda s_: s_)
+    # What the build's poise wins in its own R1 trades (poise_keys, poise_trade_value): VIT buys it
+    # through the armour its load carries, END and ADP through the stat poise at min(END, ADP). It
+    # is in damage per trade, the objective's unit, so a point there is weighed against a point of
+    # damage: a slow weapon most counters hit first (a Dark Fume Ultra Greatsword at SL 100 sat at
+    # VIT 6 and 36 poise, its exchange -61 per trade) buys load, a dagger that hits first does not.
+    keys = poise_keys(data, corpus, weapon, two, sl) if objective == "damage" and SPEND["mode"] != "ehp" else None
+    carried = (data.weapons[weapon].get("weight", 0) + sum(data.rings.get(r, {}).get("weight", 0) for r in rings)
+               if keys else 0.0)
     best = None
     for cls in classes:
         base = data.classes[cls]
@@ -5282,16 +5601,24 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             peak["attunement"] = peak["adaptability"]
         while free > 0:
             pick, best_w = None, 0.0
+            # One hit at these stats: the damage each trade the poise wins is read at.
+            # (Not `hit`: the ehp curve's closure reads that name.)
+            one_hit = objective_value(data, weapon, inf, E(st), objective, dfn, rings) if keys else 0.0
             for s, f in curves.items():
                 cur = f(st)
                 rel = cur if ehp else 1.0
                 # Only a requirement stat changes what the build wields; the term is left off
                 # the rest rather than added as a zero, so a weight of 0 is the old optimizer.
                 fcur = flex(st) if flex and s in REQ_STATS else None
+                tcur = (poise_trade_value(data, keys, one_hit, st, rings, carried)
+                        if keys and s in POISE_STATS else None)
                 for n in range(1, min(free, 99 - st[s], 8) + 1):  # look past table plateaus
                     w = (f({**st, s: st[s] + n}) - cur) / n / peak[s] / rel
                     if fcur is not None:
                         w += flex_weight * (flex({**st, s: st[s] + n}) - fcur) / n
+                    if tcur is not None:
+                        w += (poise_trade_value(data, keys, one_hit, {**st, s: st[s] + n}, rings, carried)
+                              - tcur) / n / shared
                     if w > best_w + 1e-12:
                         pick, best_w = (s, n), w
             if dark:
@@ -5976,7 +6303,7 @@ def suggest_rings(data: Data, near: Counter, every: Counter | None = None, n: in
 
 def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: bool, stats: dict,
                    rings: list[str], listed=(), catalysts=(), sl: int | None = None,
-                   granted=(), offhand: tuple[str, str] | None = None) -> tuple[list[str], str | None, dict]:
+                   swung=(), offhand: tuple[str, str] | None = None) -> tuple[list[str], str | None, dict]:
     """The generated build's armour, for a build wearing `rings` and holding the heaviest one of the
     primary and the `listed` weapons (keys) -- any one of them can be equipped in its place without
     passing 70% -- plus, for a build that casts, the heaviest of its `catalysts` (keys), which is
@@ -5987,10 +6314,11 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
     every slot holds a piece unless no set with four fits the load at all.
 
     Which set: best_armor's top set, unless a set that buys poise trades better. With `sl` and
-    `granted` ((key, infusion, two-handed) of every weapon the build lists, primary first) the
-    candidates are best_armor's top set and, per poise step the budget reaches, best_armor's pick
-    among the sets reaching it (armor_poise_steps); each is valued by its exchange value
-    (exchange_value) -- the mean, over the granted weapons and the bracket's counter-hits
+    `swung` (swung_weapons: the primary, and the left hand when the build swings it -- never the
+    weapons it lists) the candidates are best_armor's top set and, per poise step the budget
+    reaches, best_armor's pick among the sets reaching it (armor_poise_steps); each is valued by
+    its exchange value (exchange_value) -- the mean, over the swung weapons and the bracket's
+    counter-hits
     (trade_counters), of the damage of my R1's first hit when it lands less the counter's first hit
     against this set's defense when that lands, both pressing R1 at once (trade). Poise decides
     whether I land when the counter hits first; it is worth buying only as far as that damage won
@@ -6020,7 +6348,7 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
         return [], (f"no armor fits: {what} weigh {carried:.1f}, over the {cap:.1f} a "
                     f"{EQUIP_CAP:.0%} load allows at VIT {stats['vitality']}"), {}
     pieces, info, poise_note = sets[0][2], {}, None
-    table = granted_trades(data, corpus, sl, stats, rings, granted) if sl is not None and granted else None
+    table = granted_trades(data, corpus, sl, stats, rings, swung) if sl is not None and swung else None
     if table is not None:
         prev = armor_trade(data, table, pieces, stats, rings, two)
         best, best_pieces, cands = prev, pieces, [(list(pieces), prev)]
@@ -6059,10 +6387,11 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     wear most (suggest_rings: no NO_USE_RINGS ring), plus one of every other ring at least
     COMMON_RING of all builds wear; and armour, generate_armor's set under 70% load with the
     heaviest listed weapon and those four rings carried: best_armor's, or a higher-poise one when
-    its R1 trades against the bracket over every listed weapon (each in the grip its listed damage
-    is swung in) are worth more -- `poise`, `poise_target`, `trade_rate`, `exchange`,
+    its R1 trades against the bracket are worth more over the weapons the build swings
+    (swung_weapons: the primary, and the left hand choose_offhand picks when it is a weapon; not
+    the listed ones) -- `poise`, `poise_target`, `trade_rate`, `exchange`,
     `trade_previous` (best_armor's set's numbers), `trade_basis` and `trade_candidates` (every set
-    weighed, as (keys, numbers)) are generate_armor's, over `granted`. `allow_naked`
+    weighed, as (keys, numbers)) are generate_armor's, over `swung`. `allow_naked`
     skips the armour, as every generated build did before it had any. `only_class` is
     optimize_build's: the build for a character that already has a class.
 
@@ -6082,12 +6411,11 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     slots = (sum(data.spells[s]["slots"] for s in spells), slots_of(data, eff, worn))
     assert slots[0] <= slots[1]
     rows, _, _ = weapons_for(data, eff, sl, corpus, top=10_000, window=window, defender=defender)
-    one, only2, seen, grips = [], [], {data.weapons[weapon]["name"]}, {}
+    one, only2, seen = [], [], {data.weapons[weapon]["name"]}
     for dmg, name, winf, ar, label in rows:
         if name in seen:
             continue
         seen.add(name)
-        grips[name] = label.startswith("2H")  # the grip its listed damage is swung in
         (only2 if "2H only" in label else one).append((name, winf, round(dmg)))
     # dict.fromkeys, not set: most_common breaks ties by first-seen order, and a set of strings
     # iterates in the per-process hash order, so tied rings came out differently on every run
@@ -6102,7 +6430,6 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
         by_name.setdefault(w["name"], key)
     listed = [by_name[name] for name, _, _ in one[:15] + only2[:5]]
     catalysts = [c for _, c, _, _ in best_catalysts(data, spells, eff)]
-    granted = [(weapon, inf, two)] + [(by_name[n], i, grips[n]) for n, i, _ in one[:15] + only2[:5]]
     weight = lambda k: data.weapons.get(k, {}).get("weight", 0)
     held = [max([weapon, *listed], key=weight)] + ([max(catalysts, key=weight)] if catalysts else [])
     offhand = (choose_offhand(data, corpus, data.__dict__.setdefault("_attacks", load_attacks(data)), weapon, inf,
@@ -6110,8 +6437,9 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
                               None if allow_naked else offhand_room(data, stats, suggested, held))
                if weapon not in data.ranged else {})
     left = (offhand["left"], offhand["left_infusion"]) if offhand.get("left") else None
+    swung = swung_weapons(data, weapon, inf, two, left)
     armor, armor_note, trades = ([], None, {}) if allow_naked else generate_armor(
-        data, corpus, weapon, inf, two, stats, suggested, listed, catalysts, sl, granted, left)
+        data, corpus, weapon, inf, two, stats, suggested, listed, catalysts, sl, swung, left)
     return {"class": cls, "sl": sl, "stats": stats, "two_handed": two, "objective": objective, "value": round(val),
             "primary": (data.weapons[weapon]["name"], inf), "weapons_1h": one[:15], "weapons_2h_only": only2[:5],
             "rings": [data.rings[r]["name"] for r in suggested for _ in range(3)]
@@ -6119,7 +6447,7 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             "poise": trades.get("poise"), "poise_target": trades.get("poise_target"),
             "trade_rate": trades.get("trade_rate"), "exchange": trades.get("exchange"),
             "trade_previous": trades.get("previous"), "trade_basis": trades.get("basis"),
-            "trade_candidates": trades.get("candidates"), "granted": granted,
+            "trade_candidates": trades.get("candidates"), "swung": swung,
             "offhand": offhand_summary(data, offhand),
             "flex": flexibility(data, corpus, stats, sl, armor_keys(data, armor), suggested),
             "spells": [data.spells[s]["name"] for s in spells], "slots": slots,
@@ -6135,6 +6463,15 @@ QUICK_SLOTS = 10
 #: The fewest quick slots choose_kit fills (user rule 2026-10-24: at least half): past the picks for
 #: the build it adds the next-best heal, throw, defensive item and resin in turn.
 QUICK_MIN = QUICK_SLOTS // 2
+#: Quick items every kit carries after its picks and QUICK_MIN's fill, as (name, why) (user rule
+#: 2026-10-30: "every build can benefit from the stamina boosting consumable and repair powder").
+#: FMG (simpleexplanation.fmg): Green Blossom (60310000) "Temporarily boost stamina recovery speed",
+#: the only consumable whose text names stamina; Repair Powder (60410000) "Restore equipment
+#: durability". REGULATION (SpEffectActiveItem.emevd): Green Blossom's event carries
+#: `100090[1] [60 s, 1.15]`, the instruction the Chloranthy Ring's (40020000) carries as
+#: `[0, 1.15]` (+1 1.2, +2 1.25); that its float is the recovery multiplier is INFERRED from that.
+ALWAYS_ITEMS = (("Green Blossom", "always: stamina recovery x1.15 for 60 s"),
+                ("Repair Powder", "always: restores equipment durability"))
 #: Normalized names (norm) of the items, ammunition included, a kit may carry; None allows every
 #: one. scripts/ds2-bracket-builds.py sets it to what the mule's bag holds, as it does HELD_RINGS.
 HELD_ITEMS: set[str] | None = None
@@ -6179,6 +6516,229 @@ def thrown_value(data: Data, item: dict, dfn: dict) -> tuple[float, dict]:
     return best
 
 
+def bracket_status(data: Data, corpus: list[Build], sl: int) -> dict[str, list[tuple[float, float]]]:
+    """Per STATUS_PROC status, the build-up per hit before resistance that each build of `sl`'s
+    bracket (bracket_builds) lands with its melee weapon -- the first usable one in MELEE_ORDER, as
+    threat_opponents takes it -- as (weight, build-up) pairs whose weights sum to 1 per build: a
+    recorded infusion is one pair, a MugenMonkey weapon ('?') one per infusion at InfusionModel's
+    probability, as threat_opponents weighs its attack. Not the mean build-up: a 10% chance of a
+    Poison infusion is a tenth of a poisoner, not a tenth of a poisoner's build-up. Spells, throws
+    and resins build up nothing here: their status build-up is not read. Cached on `data`."""
+    cache = data.__dict__.setdefault("_bracket_status", {})
+    key = (id(corpus), sl_bracket(sl))
+    if key in cache:
+        return cache[key]
+    builds = bracket_builds(data, corpus, sl)
+    mm = [b for b in builds if any(inf == "?" for _, inf in b.hands)]
+    dist = {}
+    if mm:
+        model = data.__dict__.get("_infusion_model")
+        if model is None:
+            model = data.__dict__.setdefault("_infusion_model", InfusionModel(infusion_cases(data, corpus)))
+        for c in infusion_cases(data, corpus, recorded=False, builds=mm):
+            dist[(id(mm[c["build"]]), c["weapon"])] = {f: p for p, f in model.predict(c)}
+    out = {s: [] for s in STATUS_PROC}
+    for b in builds:
+        eff = gear_stats(data, effective(data, b), [r for r in b.rings if r in data.rings])
+        per = {s: [(1.0, 0.0)] for s in STATUS_PROC}
+        for slot in MELEE_ORDER:
+            w, inf = b.hands[HAND_SLOTS.index(slot)]
+            if (w in EMPTY or w not in data.weapons or data.weapons[w].get("isShield") or CATALYST.search(w)
+                    or not weapon_ok(data, w, eff, two_hand=(b.grip == 1 and slot == "rh1"))):
+                continue
+            infs = data.weapons[w]["infusions"]
+            ps = ({inf: 1.0} if inf != "?" else dist.get((id(b), w))
+                  or {("No_Infusion" if "No_Infusion" in infs else next(iter(infs))): 1.0})
+            for s in STATUS_PROC:
+                per[s] = [(p, objective_value(data, w, f, eff, s, {})) for f, p in ps.items()]
+            break
+        for s in STATUS_PROC:
+            out[s].append(per[s])
+    cache[key] = out
+    return out
+
+
+def status_taken(buildup: list[list[tuple[float, float]]], cut: float, hits: float,
+                 proc: dict | None) -> tuple[float, float]:
+    """What a build that resists `cut` of a status takes from it in a fight of `hits` hits taken,
+    against opponents whose hits carry the build-ups bracket_status gives: the proc's damage from
+    every opponent whose hits_to_proc, ceil(100 / (build-up x (1 - cut))), is within `hits`, at its
+    weight, averaged over the opponents. One proc a fight at most: after one the status is locked out
+    for proc["lockout"] seconds (regulation_status_procs) and how long a fight runs is not known.
+    (HP, procs per fight)."""
+    if not proc or not buildup:
+        return 0.0, 0.0
+    procs = 0.0
+    for pairs in buildup:
+        for w, p in pairs:
+            b = p * (1 - min(1.0, max(0.0, cut)))
+            if b > 0 and math.ceil(100 / b - 1e-9) <= hits:
+                procs += w
+    share = procs / len(buildup)
+    return share * proc["damage"], share
+
+
+#: How much the status_guards' type 5-9 defense change adds to a status cut: INFERRED. The
+#: SpEffect defense reader adds 0.01 x each status entry to the caller's array as it does an
+#: element's (ChrGameParamCalculator slot +0x250, docs/DS2-DPS-MECHANICS.md "Defense from a
+#: SpEffect"), and the status cut is resistance x 0.01 (status_cut); that the status entries reach
+#: the cut status_cut models was not read.
+STATUS_GUARD_UNIT = 0.01
+
+
+def buff_edges(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, stats: dict, rings: list[str],
+               armor: list[str], dfn, usable) -> list[tuple[float, str, str, str, float]]:
+    """The eaten buffs choose_kit ranks for its buff slot, valued in kit_edge's unit, ln(R' / R)
+    while the buff lasts: a build at levelled `stats` wearing `rings` and `armor` (keys) whose
+    primary is weapon+inf, an invader at `sl` hitting the defender `dfn`. (edge, name, why, kind,
+    seconds) for every item `usable` allows whose edge is above 0, best first.
+
+    * guard: data.defense_buffs from an item (the burrs and Dark Troches), ln(T / T'): T the
+      bracket's mean hit taken (hit_taken_at) at the build's own defense (build_defense: armour,
+      stats and rings), T' with the item's defense added (with_defense).
+    * stat: data.stat_buffs (the balms), every term at the raised stats (each capped at 99):
+      ln(HP' / HP) + ln(T / T') + ln(D' / D), HP hit_points at the rings' stats, D the primary's
+      hit on `dfn` (objective_value "damage") -- STR and DEX raise HP and physical defense, INT and
+      FTH HP and the elemental bases, as well as the attack.
+
+    Why these two and nothing else (2026-10-30, scripts/ds2-consumables.py values): every one is used with
+    the same ItemTypeParam row (300) and the same ItemParam.motionSpeedRate (0.7), so whatever
+    their use takes -- the animation's length is not read -- it is the same for each, and they
+    differ only in what they do and how long (90 s, the balms 45 s). A cure or a status
+    resistance item (Poison Moss, Common Fruit, Red Leech Troches) is valued by kit_edge but not
+    ranked: what Common Fruit's poison +20 does to the gauge is INFERRED (STATUS_GUARD_UNIT), and
+    a cure's worth turns on how soon after a proc it is eaten, which nothing read gives."""
+    eff = gear_stats(data, stats, rings)
+
+    def at(st: dict) -> tuple[float, float, float, dict]:
+        e = gear_stats(data, st, rings)
+        mine = build_defense(data, Build("", st, armor, [], 0, rings, []))
+        return (hit_points(data, e), hit_taken_at(data, corpus, sl, e, mine),
+                max(objective_value(data, weapon, inf, e, "damage", dfn, rings), 1e-9), mine)
+
+    hp, taken, dealt, mine = at(stats)
+    out = []
+    for n, b in data.defense_buffs.items():
+        if b["source"] != "item" or not usable(n):
+            continue
+        v = math.log(taken / hit_taken_at(data, corpus, sl, eff, with_defense(mine, b["add"])))
+        if v > 0:
+            out.append((v, n, " ".join(f"{k} +{x}" for k, x in b["add"].items())
+                        + f" for {b['seconds']:g} s: exchange +{100 * v:.2f}%", "guard", b["seconds"]))
+    for n, b in data.stat_buffs.items():
+        if not usable(n):
+            continue
+        h2, t2, d2, _ = at({s: min(99, x + b["add"].get(s, 0)) for s, x in stats.items()})
+        v = math.log(h2 / hp) + math.log(taken / t2) + math.log(d2 / dealt)
+        if v > 0:
+            out.append((v, n, " ".join(f"{LABEL[s]} +{x}" for s, x in b["add"].items())
+                        + f" for {b['seconds']:g} s: exchange +{100 * v:.2f}%", "stat", b["seconds"]))
+    return sorted(out, key=lambda x: (x[0], x[1], x[2]), reverse=True)
+
+
+def kit_edge(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, sl: int, defender=None) -> dict:
+    """Every quick item an invader may use, valued for generated build `g` in one unit: how much
+    using it moves the fight's exchange, ln(R' / R), where R = (my max HP / their mean hit on me) /
+    (their max HP / my hit on them) -- the hits they need to kill me over the hits I need to kill
+    them, the product SPEND "ehp" spends stat points by. A buff that cuts their hit by 10% and one
+    that raises mine by 10% score alike, as do a heal and a throw of the same share of a life.
+    scripts/ds2-consumables.py `values` prints it; choose_kit ranks only buff_edges' part of it.
+
+    * guard and stat: buff_edges (only those above 0).
+    * resin (data.item_buffs, an element, the primary buffable): ln((d + gain) / d) on an MV-1 hit,
+      as choose_kit's gain.
+    * status (data.status_guards) and cure (data.cures): the status HP a fight takes
+      (status_taken: bracket_status's build-up, the build's status_cut, a fight of max HP / T hits)
+      comes off max HP, and the item gives some back: a guard by raising the cut (STATUS_GUARD_UNIT,
+      INFERRED), a cure all of it (an upper bound: the ticks before it is used, and its use time,
+      are not counted).
+    These four last while active: per fight when the fight is no longer than the item's seconds,
+    which choose_kit cannot know (no fight length is read).
+    * heal (data.heals): one use, ln(1 + healed / max HP).
+    * throw (data.throwables): one throw, -ln(1 - thrown_value / their max HP), their max HP the
+      bracket builds' mean.
+    Use time is not counted for any: the use animations are not read (UNKNOWN).
+
+    Returns hp, taken, dealt, their_hp, hits (max HP / taken), status {status: share, n, cut, procs,
+    damage}, items [(edge, name, kind, seconds, why)] best first, refused [(name, why)]."""
+    stats = g["stats"]
+    rings = [k for k in (data.sp_key.get(norm(n)) for n in dict.fromkeys(g["rings"])) if k in data.rings][:4]
+    armor = armor_keys(data, g["armor"])
+    gear = ring_gear(data)
+    factor = math.prod(gear[r]["hp"] for r in rings if r in gear)
+    dfn, _ = defender_defense(data, corpus, sl, defender)
+    usable = lambda n: (HELD_ITEMS is None or norm(n) in HELD_ITEMS) and n not in data.invader_refused
+
+    eff = gear_stats(data, stats, rings)
+    hp = hit_points(data, eff) * factor
+    taken = hit_taken_at(data, corpus, sl, eff, build_defense(data, Build("", stats, armor, [], 0, rings, [])))
+    dealt = objective_value(data, weapon, inf, eff, "damage", dfn, rings)
+    hits = hp / taken
+    theirs = [hit_points(data, gear_stats(data, effective(data, b), [r for r in b.rings if r in data.rings]))
+              * math.prod(gear[r]["hp"] for r in b.rings if r in gear) for b in bracket_builds(data, corpus, sl)]
+    their_hp = float(np.mean(theirs)) if theirs else float(hp)
+    me = Build("", stats, armor, [], 0, rings, [])
+    threat = bracket_status(data, corpus, sl)
+    cuts = {s: status_cut(data, me, s) for s in STATUS_PROC}
+    status = {}
+    for s in STATUS_PROC:
+        dmg, share = status_taken(threat[s], cuts[s], hits, data.status_procs.get(s))
+        status[s] = {"share": sum(w for pairs in threat[s] for w, p in pairs if p > 0) / max(len(threat[s]), 1), "n": len(threat[s]),
+                     "cut": cuts[s], "procs": share, "damage": dmg}
+    lost = sum(t["damage"] for t in status.values())
+    items = [(v, n, kind, sec, why) for v, n, why, kind, sec
+             in buff_edges(data, corpus, weapon, inf, sl, stats, rings, armor, dfn, usable)]
+    refused = []
+    for n in sorted(set(data.defense_buffs) | set(data.stat_buffs) | set(data.item_buffs) | set(data.status_guards)
+                    | set(data.cures) | set(data.heals) | set(data.throwables)):
+        if not usable(n):
+            if n in data.invader_refused:
+                refused.append((n, "an invader may not use it (data.invader_refused)"))
+            continue
+        rb = data.item_buffs.get(n)
+        ar = attack_rating(data, weapon, inf, eff, rings)
+        if rb and rb["type"] in ELEMENTS:
+            if buffable(ar):
+                base = hit_damage(ar, respond(dfn, ar), 1.0)
+                add = dict(ar)
+                add[rb["type"]] = add.get(rb["type"], 0) + buff_attack(data, rb, weapon, eff)
+                gain = hit_damage(add, respond(dfn, add), 1.0) - base
+                items.append((math.log((base + gain) / base), n, "resin", rb["seconds"],
+                              f"+{gain:.0f} on an MV-1 hit of {base:.0f}"))
+            else:
+                items.append((0.0, n, "resin", rb["seconds"], "the primary has an element: no resin coats it"))
+        elif rb:
+            items.append((0.0, n, "resin", rb["seconds"], f"{rb['type']} build-up: its gauge points are not read"))
+        sg = data.status_guards.get(n)
+        if sg:
+            before, after = lost, 0.0
+            for s in STATUS_PROC:
+                c = cuts[s] + sg["add"].get(s, 0) * STATUS_GUARD_UNIT
+                after += status_taken(threat[s], c, hits, data.status_procs.get(s))[0]
+            items.append((math.log((hp - after) / (hp - before)), n, "status", sg["seconds"],
+                          " ".join(f"{s} +{x}" for s, x in sg["add"].items())
+                          + f" (INFERRED: cut +{STATUS_GUARD_UNIT:g} a point): status HP a fight "
+                          f"{before:.0f} -> {after:.0f}"))
+        cu = data.cures.get(n)
+        if cu:
+            cured = sum(status[s]["damage"] for s in cu if s in status)
+            items.append((math.log(hp / (hp - cured)), n, "cure", 0.0,
+                          f"ends {', '.join(sorted(cu))}: {cured:.0f} HP a fight at most"))
+        h = data.heals.get(n)
+        if h:
+            got = min(h["hp"], hp)
+            items.append((math.log(1 + got / hp), n, "heal", 0.0, f"{got} of {hp:.0f} HP in {h['seconds']:g} s, one use"))
+        t = data.throwables.get(n)
+        if t:
+            v = thrown_value(data, t, dfn)[0]
+            items.append((-math.log(1 - min(v, their_hp - 1) / their_hp) if v > 0 else 0.0, n, "throw", 0.0,
+                          f"{v:.0f} of their {their_hp:.0f} HP a throw (flat, unscaled)" if v > 0
+                          else "its status build-up is not read"))
+    items.sort(key=lambda x: -x[0])
+    return {"hp": hp, "taken": taken, "dealt": dealt, "their_hp": their_hp, "hits": hits, "status": status,
+            "items": items, "refused": refused}
+
+
 def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, sl: int,
                defender=None) -> dict:
     """What a generated build `g` (generate_build, for `weapon`+`inf` at `sl`) carries beyond its
@@ -6188,14 +6748,22 @@ def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, 
       second, its HP capped at the build's max HP (hit_points x the rings' HP factor), is highest
       -- an overheal is wasted; the resin (data.item_buffs, an element) that adds the most damage
       to one MV-1 hit of the primary against the bracket defender, when the primary is buffable;
-      the best throw of each THROWN_GROUPS group by thrown_value; and the defensive item
-      (data.defense_buffs, source "item") whose defense is worth most under threat_mix, the corpus's
-      damage-type mix. er-mods-rs's pouch keeps a pick only if it raises the kit's score; here a
-      pick with a value of 0 is left out. Short of QUICK_MIN, the runners-up of the heal, throw,
-      defensive item and resin pools fill the rest in turn. Only HELD_ITEMS.
+      the best throw of each THROWN_GROUPS group by thrown_value; and the eaten buff -- a burr, the
+      Dark Troches or a balm -- that moves the fight's exchange most (buff_edges, kit_edge's unit:
+      a burr by the bracket's hit it cuts at the build's own defense, a balm by the HP, defense and
+      damage its stat adds). er-mods-rs's pouch keeps a pick only if it raises the kit's score;
+      here a pick with a value of 0 is left out. Short of QUICK_MIN, the runners-up of the heal,
+      throw, eaten buff and resin pools fill the rest in turn; then ALWAYS_ITEMS. The heal, resin,
+      throws and buff keep a slot each: a throw or a heal is worth something per use and a buff
+      per fight, and how many uses a fight has, or how long each takes, is not read, so the four
+      are not ranked against each other. Only HELD_ITEMS, and only what an
+      invader may use: nothing in data.invader_refused, the Estus Flask included unless
+      INVADER_CHECK_EXEMPT names it. Every heal the regulation has but the Estus is refused, so
+      an invader's kit has no other heal.
     * launcher: the bow, greatbow or crossbow (data.ranged) with the most damage per stamina point
       (ranged_pick's shot over shot_stamina) that the build can fire at its stats
-      (TWO_HANDED_LAUNCHERS) and carry -- its weight added to everything worn and held stays under
+      (TWO_HANDED_LAUNCHERS) and carry -- its weight added to everything worn and held (the primary
+      and the offhand's left hand, the weapons the build equips) stays under
       EQUIP_CAP of max_load. Per stamina, not per shot: the fire rate is not in the files read
       (ranged_value), and per shot a greatbow always wins. None when no launcher fits.
     * ammo: {slot: (name, why)} for the launcher's best ammunition and the best of another element
@@ -6214,18 +6782,20 @@ def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, 
     ar = attack_rating(data, weapon, inf, eff, rings)
     hp = int(hit_points(data, eff) * math.prod(ring_gear(data)[r]["hp"] for r in rings if r in ring_gear(data)))
     held_item = lambda n: HELD_ITEMS is None or norm(n) in HELD_ITEMS
-    items = [("Estus Flask", "always")]
+    # a quick item is one the build holds and, as an invader, may use (data.invader_refused)
+    usable = lambda n: held_item(n) and n not in data.invader_refused
+    items = [("Estus Flask", "always")] if usable("Estus Flask") else []
     # each pool best first, as (value, name, why); its head is the build's pick, the rest QUICK_MIN's fill
     heals = sorted(((min(h["hp"], hp) / max(h["seconds"], 0.1), n,
                      f"heals {min(h['hp'], hp)} of {hp} max HP in {h['seconds']:g} s "
                      f"({min(h['hp'], hp) / max(h['seconds'], 0.1):.0f} HP/s)")
-                    for n, h in data.heals.items() if n != "Estus Flask" and h["seconds"] > 0 and held_item(n)),
+                    for n, h in data.heals.items() if n != "Estus Flask" and h["seconds"] > 0 and usable(n)),
                    reverse=True)
     resins = []
     if buffable(ar):
         base = hit_damage(ar, respond(dfn, ar), 1.0)
         for n, b in data.item_buffs.items():
-            if b["type"] not in ELEMENTS or not held_item(n):
+            if b["type"] not in ELEMENTS or not usable(n):
                 continue
             add = dict(ar)
             add[b["type"]] = add.get(b["type"], 0) + buff_attack(data, b, weapon, eff)
@@ -6235,28 +6805,32 @@ def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, 
         resins.sort(reverse=True)
     throws = {group: sorted(((v, n, f"{v:.0f} HP per throw (flat, unscaled)")
                              for v, n in ((thrown_value(data, t, dfn)[0], n) for n, t in data.throwables.items()
-                                          if any(w in n for w in words) and held_item(n)) if v > 0), reverse=True)
+                                          if any(w in n for w in words) and usable(n)) if v > 0), reverse=True)
               for group, words in THROWN_GROUPS.items()}
-    mix = threat_mix(data, corpus, sl)
-    guards = sorted(((v, n, " ".join(f"{k} +{x}" for k, x in b["add"].items()) + f" for {b['seconds']:g} s")
-                     for v, n, b in ((sum(mix.get(k, 0) * x for k, x in b["add"].items()), n, b)
-                                     for n, b in data.defense_buffs.items() if b["source"] == "item" and held_item(n))
-                     if v > 0), reverse=True)
-    for pool in (heals, resins, *throws.values(), guards):
+    buffs = [x[:3] for x in buff_edges(data, corpus, weapon, inf, sl, stats, rings, armor_keys(data, g["armor"]),
+                                       dfn, usable)]
+    for pool in (heals, resins, *throws.values(), buffs):
         if pool:
             items.append(pool[0][1:])
-    # QUICK_MIN: the next-best heal, throw (either group), defensive item and resin in turn
-    spare = [heals[1:], sorted((x for t in throws.values() for x in t[1:]), reverse=True), guards[1:], resins[1:]]
+    # QUICK_MIN: the next-best heal, throw (either group), eaten buff and resin in turn
+    spare = [heals[1:], sorted((x for t in throws.values() for x in t[1:]), reverse=True), buffs[1:], resins[1:]]
     while len(items) < QUICK_MIN and any(spare):
         for pool in spare:
             if pool and len(items) < QUICK_MIN:
                 _, n, why = pool.pop(0)
                 items.append((n, why + "; fills the quick slots"))
-    worn = sum(item_weight(data, s, k) for s, k in zip(ARMOR_SLOTS, armor_keys(data, g["armor"])) if k)
+    items += [(n, why) for n, why in ALWAYS_ITEMS if held_item(n)]
+    worn =sum(item_weight(data, s, k) for s, k in zip(ARMOR_SLOTS, armor_keys(data, g["armor"])) if k)
     worn += sum(item_weight(data, "ring", r) for r in rings)
-    held = [data.key_by_name.get(g["primary"][0])] + [data.key_by_name.get(n) for n, _, _ in g["weapons_1h"][:1]]
+    # what the build equips beside the launcher: the primary (RH1) and the left hand choose_offhand
+    # picked (LH1), as ds2-bracket-builds.py's build_for equips them. Not weapons_1h[0], a list
+    # entry the build never equips (2026-10-30: the launcher was fit beside a 2.5 whip while the
+    # 6.0 offhand was held, and the applied build sat at 74% load)
+    held = [data.key_by_name.get(n) for n in (g["primary"][0], (g.get("offhand") or {}).get("left")) if n]
     worn += sum(item_weight(data, "weapon", k) for k in held if k)
-    cap = max_load(data, eff, rings) * EQUIP_CAP
+    # the levelled stats, not eff: max_load adds the rings' VIT itself, and eff already holds it
+    # (a Ring of the Embedded at VIT 6 read VIT 19, not 13: a 75.4 max load the game puts at 65.25)
+    cap = max_load(data, stats, rings) * EQUIP_CAP
     launcher, ammo = None, {}
     best = None
     for key, r in data.ranged.items():
@@ -6644,10 +7218,22 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             at0(5) per(5), in DMG order
 #   RE bracket evade(99)                                      roll_evade at the bracket for agility
 #                                                             rows 1-99 (none unread)
+#   EL base:coef(4)                                           the last W's data.weapon_elements,
+#                                                             magic fire lightning dark: what
+#                                                             buff_attack reads
+#   HL name hp seconds                                        data.heals, in its order
+#   IB name type scale flat seconds                           data.item_buffs, in its order: type a
+#                                                             DMG index, else poison or bleed
+#   TH name mv:lower:flat(5) ..                               data.throwables, in its order: each
+#                                                             of its hits, flat comma-separated
+#                                                             in DMG order
+#   IR name                                                   data.invader_refused, sorted
+#   SB name seconds stat:value,..                             data.stat_buffs, in its order: stat a
+#                                                             STATS index
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 23"
+BACKEND_FORMAT = "ds2-build-recommender-data 26"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -6863,6 +7449,9 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
             out.append("\t".join(["I", INFUSION_CODE[inf], *(_num(atk.get(k, 0)) for k in ATK_KEYS),
                                   *(_num(sc.get(k, 1 if k == "modifier" else 0)) for k in SCALE_KEYS),
                                   *(_num(float(rate.get(k, 0.0))) for k in DMG)]))
+        we = data.weapon_elements.get(key)
+        if we:  # what buff_attack reads, for choose_kit's resins
+            out.append("\t".join(["EL", *(f"{_num(float(we[e][0]))}:{_num(float(we[e][1]))}" for e in ELEMENTS)]))
         for two in (False, True):
             tl = r1_timeline(attacks, w["name"], two) or r1_timeline(attacks, key.replace("_", " "), two)
             if tl:
@@ -6909,6 +7498,21 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
     for name, a in sorted(data.ammo.items()):
         out.append("\t".join(["AM", name, _num(a["type"]), *(_num(a["flat"].get(k, 0)) for k in DMG),
                               *(_num(a["status"].get(k, 0)) for k in STATUS_PROC), _num(a["mv"]), _num(a["lower"])]))
+    # choose_kit's quick items: the heals, the weapon buffs (resins) and the thrown items
+    for name, h in data.heals.items():
+        out.append("\t".join(["HL", name, _num(h["hp"]), _num(float(h["seconds"]))]))
+    for name, b in data.item_buffs.items():
+        out.append("\t".join(["IB", name, str(DMG.index(b["type"])) if b["type"] in DMG else b["type"],
+                              _num(float(b["scale"])), _num(b["flat"]), _num(float(b["seconds"]))]))
+    for name, t in data.throwables.items():
+        out.append("\t".join(["TH", name, *(f"{_num(h['mv'])}:{_num(h['lower'])}:"
+                                             + ",".join(_num(h["flat"].get(k, 0)) for k in DMG)
+                                             for h in t["hits"])]))
+    for name in sorted(data.invader_refused):
+        out.append("\t".join(["IR", name]))
+    for name, b in data.stat_buffs.items():
+        out.append("\t".join(["SB", name, _num(float(b["seconds"])),
+                              ",".join(f"{STATS.index(s)}:{_num(v)}" for s, v in b["add"].items())]))
     floors = bracket_floors(data, corpus, r1)
     for i, (lo, _) in enumerate(SL_BRACKETS):
         dfn, _ = bracket_defense(data, corpus, lo)
@@ -7031,8 +7635,11 @@ EXPECT_BUILDS = [  # weapon key, infusion, sl, objective: --optimize and --gener
     ("Uchigatana", "Lightning", 150, "ar"),
     # a crossbow scored by its best shot; dark reads min(INT, FTH), so the two rise together
     ("Sanctum_Crossbow", "Dark", 150, "damage"),
+    # the 2026-10-30 report: so heavy that every left hand weapons_for ranks first is over the
+    # load offhand_room leaves, which once left the hand empty
+    ("Fume_Ultra_Greatsword", "Dark", 100, "damage"),
 ]
-EXPECT_NAKED = [("Demons_Great_Hammer", "Raw", 100, "damage", True)]  # --generate --allow-naked
+EXPECT_NAKED =[("Demons_Great_Hammer", "Raw", 100, "damage", True)]  # --generate --allow-naked
 EXPECT_ONE_HANDED = [  # --optimize and --generate with --grip one
     ("Murakumo", "Dark", 74, "damage"),
     ("Demons_Great_Hammer", "Raw", 20, "damage"),
@@ -7048,6 +7655,11 @@ EXPECT_AS_CLASS = [  # class key, weapon key, infusion, sl, objective: --generat
     ("warrior", "Black_Flamestone_Dagger", "No_Infusion", 120, "damage"),
     ("warrior", "Giant_Warrior_Club", "Dark", 120, "damage"),
     ("warrior", "Uchigatana", "No_Infusion", 120, "damage"),
+    # the poise pick scores the weapons the build swings, not the 21 it lists (swung_weapons): an
+    # SL 100 Dagger build, whose listed whips, spears and hammer bought it 62 poise on the full
+    # corpus, and the user's Fume Ultra Greatsword (Dark, two-handed) build of 2026-10-30
+    ("warrior", "Dagger", "No_Infusion", 100, "damage"),
+    ("warrior", "Fume_Ultra_Greatsword", "Dark", 100, "damage"),
 ]
 EXPECT_SPELLS = [  # weapon key, infusion, sl, objective, spell keys: --generate --spells
     ("Demons_Great_Hammer", "Raw", 100, "damage", []),  # the same build EXPECT_BUILDS generates
@@ -7364,8 +7976,11 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append(f"pub const ADAPTIVE_GENERATE: AdaptiveGenerateCases = {_rs(a_gen)};\n")
     flexes: list = []  # the generated builds, as flexibility() questions: filled by expect_builds
     offhands: list = []  # every GENERATE and GENERATE_ONE_HANDED build's left hand
-    opt, gen = expect_builds(data, corpus, EXPECT_BUILDS, EXPECT_NAKED, "two", flexes, offhands=offhands)
-    opt_one, gen_one = expect_builds(data, corpus, EXPECT_ONE_HANDED, [], "one", flexes, offhands=offhands)
+    kits: list = []  # and its quick items, launcher and ammunition
+    opt, gen = expect_builds(data, corpus, EXPECT_BUILDS, EXPECT_NAKED, "two", flexes, offhands=offhands,
+                             kits=kits)
+    opt_one, gen_one = expect_builds(data, corpus, EXPECT_ONE_HANDED, [], "one", flexes, offhands=offhands,
+                                     kits=kits)
     out.append("// weapon, infusion, sl, objective -> class, two-handed, stats, value.")
     out.append(f"pub const OPTIMIZE: OptimizeCases = {_rs(opt)};\n")
     out.append("// weapon, infusion, sl, objective, allow naked -> class, two-handed, stats, 1H rows, 2H-only")
@@ -7378,6 +7993,9 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append("// weapon, infusion, sl, objective, allow naked, grip -> the left hand choose_offhand put")
     out.append("// beside it (expect_offhand), None for a launcher: GENERATE's and GENERATE_ONE_HANDED's.")
     out.append(f"pub const OFFHAND: OffhandCases = {_rs(offhands)};\n")
+    out.append("// weapon, infusion, sl, objective, allow naked, grip -> choose_kit's quick items (name, why),")
+    out.append("// launcher (name, infusion code, why), ammunition by slot ammo1-4 (name, why), max HP.")
+    out.append(f"pub const KIT: KitCases = {_rs(kits)};\n")
     gen_class = []
     for cls, weapon, inf, sl, objective in EXPECT_AS_CLASS:
         _, got = expect_builds(data, corpus, [(weapon, inf, sl, objective)], [], "two", only_class=cls)
@@ -7427,11 +8045,20 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     return backend_expectations_rest(data, corpus, out, mins, flexes)
 
 
+def expect_kit(kit: dict):
+    """choose_kit's answer as a KIT fixture tuple: the quick items, the launcher (None for none),
+    every ammunition slot in ARROW_SLOTS + BOLT_SLOTS order (None for an empty one), max HP."""
+    launcher = kit["launcher"] and _Some((kit["launcher"][0], INFUSION_CODE[kit["launcher"][1]],
+                                          kit["launcher"][2]))
+    ammo = [kit["ammo"].get(s) for s in ARROW_SLOTS + BOLT_SLOTS]
+    return ([tuple(i) for i in kit["items"]], launcher, [a and _Some(tuple(a)) for a in ammo], kit["max_hp"])
+
+
 def expect_offhand(o: dict | None):
     """offhand_summary's answer as an OFFHAND fixture tuple: left hand and its infusion code ("" for
     none), the stance rate, the primary's alone, the home stance, every stance's rate, per family
     (family, stance, engagement, rate), power stance (owner, STR and DEX it needs, met), chain, and
-    the power stance partner the stats fall short of (name, STR and DEX)."""
+    the power stance partner the stats fall short of (name, STR and DEX), and why it was picked."""
     if not o:
         return None
     ps, short = o["power_stance"], o["ps_short"]
@@ -7440,15 +8067,16 @@ def expect_offhand(o: dict | None):
                   float(o["solo"]), o["home"], [(s, float(v)) for s, v in o["stances"].items()],
                   [(f, r["stance"], r["engagement"], float(r["rate"])) for f, r in o["families"].items()],
                   ps and _Some((ps["owner"], need(ps["need"]), ps["met"])), o["chain"],
-                  short and _Some((short[0], need(short[1])))))
+                  short and _Some((short[0], need(short[1]))), o["why"]))
 
 
 def expect_builds(data: Data, corpus: list[Build], cases: list, naked_cases: list, grip: str,
                   flexes: list | None = None, only_class: str | None = None, defender=None,
-                  offhands: list | None = None):
+                  offhands: list | None = None, kits: list | None = None):
     """The script's --optimize and --generate answers for `cases` (plus `naked_cases` generated with
     --allow-naked) at `grip`, and for `only_class` alone when given, against `defender`
-    (defender_defense), as fixture tuples. `offhands` gets each generated build's OFFHAND tuple."""
+    (defender_defense), as fixture tuples. `offhands` gets each generated build's OFFHAND tuple,
+    `kits` its KIT tuple (expect_kit)."""
     arr = lambda d: [int(d[s]) for s in STATS]
     opt, gen = [], []
     for weapon, inf, sl, objective in cases:
@@ -7465,6 +8093,9 @@ def expect_builds(data: Data, corpus: list[Build], cases: list, naked_cases: lis
             continue
         if offhands is not None:
             offhands.append((weapon, INFUSION_CODE[inf], sl, objective, naked, grip, expect_offhand(g["offhand"])))
+        if kits is not None:
+            kits.append((weapon, INFUSION_CODE[inf], sl, objective, naked, grip,
+                         expect_kit(choose_kit(data, corpus, g, weapon, inf, sl, defender))))
         rings, suggested = g["rings"], []
         while len(rings) >= 3 and rings[0] == rings[1] == rings[2]:
             suggested.append(rings[0])
@@ -7617,6 +8248,12 @@ def expect_best_weapons(data: Data, corpus: list[Build]) -> list:
                      (float(f["f_reach"]), float(f["f_stagger"]), float(f["f_trade"]), float(f["f_punish"]),
                       float(f["f_stamina"]), opt(f["caught"])))
                     for fam, f in m["families"].items()]))
+            kept = r[9]
+            arsenal_row = None
+            if "arsenal" in kept:
+                arsenal_row = _Some((float(kept["arsenal"]), float(kept["arsenal_value"]),
+                                     [(cl, k, INFUSION_CODE[i], t, float(rate))
+                                      for cl, k, i, t, rate in kept["arsenal_classes"]]))
             rows.append((float(score), key, float(val), data.classes[c]["name"], two, [int(st[s]) for s in STATS],
                          [data.rings[x]["name"] for x in worn], label,
                          _Some((ammo["ammo"] or "", ammo["shot"])) if ammo else None,
@@ -7626,7 +8263,7 @@ def expect_best_weapons(data: Data, corpus: list[Build]) -> list:
                           opt(m.get("poise_damage_per_hit")), opt_int(m.get("armor_break")),
                           opt_int(m.get("hits_to_stagger")), float(m.get("defender_poise", 0.0))),
                          status, opt(m.get("damage_with_status")), stamina, moveset,
-                         expect_offhand(m.get("offhand"))))
+                         expect_offhand(m.get("offhand")), arsenal_row))
         out.append((INFUSION_CODE[inf], sl, objective, grip, cls, float(window), rank, with_status, defender or [],
                     buff, rows))
     return out
@@ -7688,6 +8325,18 @@ def trade_selftest_cases() -> list:
          trade(dagger, hammer | {"armor": [(0.2, 1.0)]}, 0, 11), (True, True)),
         ("mine first before their hyperarmor opens: 35 into 11", trade(dagger, hammer, 0, 11), (True, False)),
         ("a tie is mine first", trade(hit(0.5, 50), hit(0.5, 50), 0, 10), (True, False)),
+    ]
+    # what the poise pick scores (swung_weapons): the primary in its grip and a left-hand weapon
+    # one-handed; a shield is not swung, an empty hand adds nothing, a listed weapon never counts
+    held = type("Held", (), {"weapons": {"Dagger": {}, "Uchigatana": {}, "Buckler": {"isShield": True}}})
+    cases += [
+        ("swung: the primary alone", swung_weapons(held, "Dagger", "No_Infusion", True, None),
+         [("Dagger", "No_Infusion", True)]),
+        ("swung: a left-hand weapon one-handed",
+         swung_weapons(held, "Dagger", "No_Infusion", True, ("Uchigatana", "Bleed")),
+         [("Dagger", "No_Infusion", True), ("Uchigatana", "Bleed", False)]),
+        ("swung: a shield is not", swung_weapons(held, "Dagger", "No_Infusion", False, ("Buckler", "No_Infusion")),
+         [("Dagger", "No_Infusion", False)]),
     ]
     # one weapon, one counter, by hand: mine 100 AR into 200 DEF = (1000 - 200) / 12; theirs 120
     # AR into 300 DEF = (1200 - 300) / 12 = 75, 40 poise damage landing first
@@ -7845,13 +8494,17 @@ def moveset_selftest_cases() -> list[tuple]:
     """The moveset and kit pieces over made-up rows: a slot's stamina field (1H as written, 2H by
     swapping the suffix, the R1 1st's misspelt "Nnormal1st1H"); an attack's startup and commit
     (the planted chain open at 0.5 s outlasts its frame-9 hit, at play speed 1); buffability; and a
-    throw scored on the row's flat damage against its own type's defense."""
+    throw scored on the row's flat damage against its own type's defense, and a hollow-only row not
+    counted as one that hurts the host."""
     rates = {"Nnormal1st1H": 0.95, "normal1st2H": 1.2, "rolling1H": 1.5, "rolling2H": 2.0}
     fake = type("Moveset", (), {"stamina_cost": {"W": {"melee": 200.0, "ranged": 0.0, "rates": rates}}})
     _chain_cache[-8] = 0.5
     a = {"anim": -8, "spd": [1.0, 1.0], "hits": [_hit(6, 9, 1.0)]}
     zero = dict.fromkeys(DMG + PHYS_TYPES, 0.0)
     knife = {"hits": [{"flat": {"physical": 180}, "mv": 0.85, "lower": 70}]}
+    # Holy Water Urn's burst row and Firebomb's, cut down to the fields hurts_host reads.
+    urns = {"PlayerDamageParam": {"60620010": {"damageCategory": 99993030}, "60570010": {"damageCategory": 81074400}},
+            "DamageCtrlParam": {"99993030": {"isHollowOnlyDamage": 1}, "81074400": {"isHollowOnlyDamage": 0}}}
     return [
         ("R1 1st 1H reads Nnormal1st1H", move_stamina(fake, "W", False, "Normal1st"), 19.0),
         ("R1 1st 2H swaps the suffix", move_stamina(fake, "W", True, "Normal1st"), 24.0),
@@ -7861,6 +8514,8 @@ def moveset_selftest_cases() -> list[tuple]:
         ("a physical weapon takes a resin", buffable({"physical": 300}), True),
         ("an elemental one does not", buffable({"physical": 200, "fire": 100}), False),
         ("knife: max(1800 - 0, 70) / 12 x 0.85", round(thrown_value(None, knife, zero)[0], 2), 127.5),
+        ("a hollow-only burst cannot hurt a human host", hurts_host(urns, 60620010), False),
+        ("a firebomb's burst can", hurts_host(urns, 60570010), True),
     ]
 
 
@@ -7972,6 +8627,14 @@ def status_selftest_cases() -> list:
         ("status cut: poison stat row + armour", round(status_cut(cut_data, hat, "poison"), 6), 0.32),
         # bleed row trunc((60 + 4) / 4) = 16 -> 36 %, plus 90 % from the coat: clamped to 1
         ("status cut: clamped to 1", status_cut(cut_data, coat, "bleed"), 1.0),
+        # three opponents: a sure poisoner (40 a hit), a 30% one (MugenMonkey), none. At cut 0.2 the
+        # 40 needs ceil(100 / 32) = 4 hits; a 5-hit fight takes 1.3 procs over 3 opponents
+        ("status taken: weights, not mean build-up",
+         tuple(round(x, 6) for x in status_taken([[(1.0, 40.0)], [(0.3, 40.0), (0.7, 0.0)], [(1.0, 0.0)]],
+                                                 0.2, 5, bleed)), (round(1.3 / 3 * 200, 6), round(1.3 / 3, 6))),
+        ("status taken: one proc a fight, however many hits",
+         status_taken([[(1.0, 100.0)]], 0.0, 50, bleed), (200.0, 1.0)),
+        ("status taken: a fight too short to proc", status_taken([[(1.0, 40.0)]], 0.2, 3, bleed), (0.0, 0.0)),
     ]
 
 

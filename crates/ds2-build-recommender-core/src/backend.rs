@@ -247,6 +247,23 @@ pub struct WeaponMetrics {
     /// The same rate with the left hand stance swapping pairs it with, under
     /// [`crate::model::Rank::Stance`] only.
     pub stance: Option<Offhand>,
+    /// What else the build's stats swing well, under [`crate::model::Rank::Moveset`] and
+    /// [`crate::model::Rank::Stance`], for the rows ranked by it.
+    pub arsenal: Option<Arsenal>,
+}
+
+/// The other weapon classes a build's stats swing well: the script's `arsenal`. The row's score
+/// is `value`.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Arsenal {
+    /// The mean of the row's own rate and its best other classes' (each at most the row's own),
+    /// a missing class `0`.
+    pub mean: f64,
+    /// The row's own rate blended with `mean`: what the row ranks by.
+    pub value: f64,
+    /// Its best other classes, best first: class, weapon (soulsplanner key), infusion, whether
+    /// two-handed, and the moveset rate in HP a second.
+    pub classes: Vec<(String, String, Infusion, bool, f64)>,
 }
 
 /// What the left hand holds beside the primary, and the build's rate swapping stance with it: the
@@ -273,6 +290,10 @@ pub struct Offhand {
     /// The best-ranked power stance partner the stats fall short of: its name and the STR and DEX
     /// it needs.
     pub ps_short: Option<(String, [u16; 2])>,
+    /// Why the left hand holds what it does, for the paperdoll's slot pane: the stance rate it
+    /// raises or the grip-swap rate it wins on, and its weight against the load left; for an
+    /// empty hand, that nothing fits.
+    pub why: String,
 }
 
 /// One family's engagement in a stance-swapping build.
@@ -501,8 +522,9 @@ pub struct GeneratedBuild {
     /// Why the armour is not four pieces, when it is not: the load cap left a slot, or every slot,
     /// bare. Never silent.
     pub armor_note: Option<String>,
-    /// What the armour does in R1 trades against the build's SL bracket, over every weapon it
-    /// lists: `None` for a build that wears none or has nothing to trade.
+    /// What the armour does in R1 trades against the build's SL bracket, over the weapons it
+    /// swings -- the primary, and the left hand when that is a weapon; never the ones it lists:
+    /// `None` for a build that wears none or has nothing to trade.
     pub trade: Option<ArmorTrade>,
     /// The same for the set picked on defense and load alone, which poise outbid when it differs.
     pub trade_previous: Option<ArmorTrade>,
@@ -523,8 +545,58 @@ pub struct GeneratedBuild {
     /// Per stat, in [`STAT_LABELS`] order, whether those rings let the build level it less than
     /// its floor or requirement: a floor such a stat is under is met by the ring, not missed.
     pub ring_lowered: [bool; STAT_COUNT],
+    /// What it carries beyond its weapons, rings and armour: quick items, a launcher, ammunition.
+    pub kit: Kit,
     /// Whether this came from [`StubBackend`], so the panel can say its numbers mean nothing.
     pub stub: bool,
+}
+
+/// How many quick item slots a build has.
+pub const QUICK_SLOTS: usize = 10;
+
+/// The fewest quick items a generated build carries: half the slots. Short of it, the runners-up
+/// of the heals, throws, defensive items and resins fill the rest.
+pub const QUICK_MIN: usize = QUICK_SLOTS / 2;
+
+/// The ammunition slots: two of arrows, then two of bolts, the game's own order.
+pub const AMMO_SLOTS: usize = 4;
+
+/// One thing a generated build carries and the number it won on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KitPick {
+    /// Its display name.
+    pub name: String,
+    /// Why it was picked: `heals 500 of 1012 max HP in 11.1 s (45 HP/s)`.
+    pub why: String,
+}
+
+/// The bow, greatbow or crossbow a generated build carries in its third right hand.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LauncherPick {
+    /// The weapon, by soulsplanner key.
+    pub key: String,
+    /// Its display name.
+    pub name: String,
+    /// The infusion it is scored in.
+    pub infusion: Infusion,
+    /// Its shot, its damage per stamina point and the load it leaves.
+    pub why: String,
+}
+
+/// What a generated build carries beyond its weapons, rings and armour: the script's
+/// `choose_kit`.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub struct Kit {
+    /// The quick items in slot order, the Estus Flask first: at least [`QUICK_MIN`] when there
+    /// are that many to pick, at most [`QUICK_SLOTS`].
+    pub items: Vec<KitPick>,
+    /// The launcher, when the build can fire and carry one.
+    pub launcher: Option<LauncherPick>,
+    /// Arrows 1, arrows 2, bolts 1, bolts 2. Every slot is filled when any ammunition exists:
+    /// the slots the launcher does not fire from take a stand-in launcher's.
+    pub ammo: [Option<KitPick>; AMMO_SLOTS],
+    /// The build's max HP, which a heal is capped at.
+    pub max_hp: u32,
 }
 
 /// An armour set's R1 trades against an SL bracket: the script's `armor_trade`.
@@ -673,12 +745,7 @@ impl Change {
     pub fn apply(&self, state: &mut PanelState) -> bool {
         match self {
             Change::RaiseSl(sl) => state.set_sl_override(Some(*sl)),
-            Change::RemoveSpell(key) => {
-                let Some(at) = state.spells.iter().position(|spell| spell == key) else {
-                    return false;
-                };
-                state.spells.remove(at);
-            }
+            Change::RemoveSpell(key) => return state.remove_spell(key),
             Change::IgnoreFloors => state.ignore_floors = true,
             Change::Class(_) => return false,
         }
@@ -795,6 +862,13 @@ pub trait RecommenderBackend: Sync {
     /// no spell data and offers none.
     fn spells(&self) -> Vec<SpellRow> {
         Vec::new()
+    }
+    /// The most attunement slots any build [`Self::generate_build`] makes can have: the most ATT
+    /// gives, plus the sub ring that adds the most (a Southern Ritual Band+2's three). The spells
+    /// the panel lets a build ask for, every copy counted, cost no more. The default offers no
+    /// spells and holds none.
+    fn spell_slots_max(&self) -> u16 {
+        0
     }
     /// How many weapons `stats` wield, where that sits among the builds nearest them at `sl`, and
     /// the load `armor` (head to legs) and `rings`, by name, leave for weapons. `None` when this
@@ -1205,7 +1279,8 @@ const NO_COVENANT: &str = "No_Covenant";
 /// grants its fixed slots cannot hold.
 ///
 /// The build wears the suggested rings, holds the primary in the right hand, wears the armour and
-/// attunes its spells. The extras are everything else the build lists: the second and third copy
+/// attunes its spells; its kit's quick items fill the belt in order, its launcher RH3 and its
+/// ammunition the arrow and bolt slots. The extras are everything else the build lists: the second and third copy
 /// of each suggested ring, one of each common ring, every recommended weapon at its ranked
 /// infusion, and each recommended catalyst uninfused. They are
 /// granted through the same per-name count as the build's own gear, so a player who already holds
@@ -1228,6 +1303,11 @@ pub fn to_import(generated: &GeneratedBuild) -> (Build, Vec<(String, Infusion)>)
         hands.push(EMPTY_HAND.to_owned());
         hands.push(weapons::planner_name(Infusion::None).to_owned());
     }
+    // The launcher goes in RH3, the last pair.
+    if let Some(launcher) = &generated.kit.launcher {
+        hands[10].clone_from(&launcher.key);
+        hands[11] = weapons::planner_name(launcher.infusion).to_owned();
+    }
     let worn: Vec<String> = generated
         .suggested_rings
         .iter()
@@ -1248,7 +1328,22 @@ pub fn to_import(generated: &GeneratedBuild) -> (Build, Vec<(String, Infusion)>)
         weapons: hands,
         rings,
         spells: generated.spells.clone(),
-        items: Vec::new(),
+        items: generated
+            .kit
+            .items
+            .iter()
+            .take(QUICK_SLOTS)
+            .map(|item| item.name.clone())
+            .collect(),
+        ammo: generated
+            .kit
+            .ammo
+            .iter()
+            .map(|slot| {
+                slot.as_ref()
+                    .map_or_else(String::new, |pick| pick.name.clone())
+            })
+            .collect(),
         stats,
     };
 
@@ -1510,8 +1605,35 @@ impl RecommenderBackend for StubBackend {
             catalysts: Vec::new(),
             ring_trades: Vec::new(),
             ring_lowered: [false; STAT_COUNT],
+            kit: Self::stub_kit(),
             stub: true,
         })
+    }
+}
+
+impl StubBackend {
+    /// A fixed kit of [`QUICK_MIN`] quick items and four ammunitions, so the paperdoll's belt and
+    /// quivers can be drawn and applied without a data file.
+    fn stub_kit() -> Kit {
+        let pick = |name: &str| KitPick {
+            name: name.to_owned(),
+            why: "placeholder".to_owned(),
+        };
+        Kit {
+            items: [
+                "Estus Flask",
+                "Lifegem",
+                "Throwing Knife",
+                "Firebomb",
+                "Small Orange Burr",
+            ]
+            .map(pick)
+            .to_vec(),
+            launcher: None,
+            ammo: ["Wood Arrow", "Iron Arrow", "Wood Bolt", "Heavy Bolt"]
+                .map(|name| Some(pick(name))),
+            max_hp: 0,
+        }
     }
 }
 

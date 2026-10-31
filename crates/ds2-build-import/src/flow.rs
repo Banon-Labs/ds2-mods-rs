@@ -220,6 +220,10 @@ struct Pending {
     /// Extra items to grant, each counted with the build's own gear by [`crate::build_items`].
     /// Empty for a soulsplanner link.
     extras: Vec<(String, ds2_build_import_core::Infusion)>,
+    /// Whether every slot the build leaves out is emptied after the equip. Set for a generated
+    /// build, whose Apply leaves the character holding the build and nothing else; clear for a
+    /// soulsplanner link, which is silent about the slots it leaves out.
+    empty_the_rest: bool,
 }
 
 /// Hand a fetched build to the game thread.
@@ -228,6 +232,7 @@ fn hand_over(build: ds2_build_import_core::Build) {
         *pending = Some(Pending {
             build,
             extras: Vec::new(),
+            empty_the_rest: false,
         });
     }
 }
@@ -236,8 +241,9 @@ fn hand_over(build: ds2_build_import_core::Build) {
 ///
 /// Applied by the next pause-menu tick exactly as a soulsplanner link is: soul memory, stats, the
 /// grant (the build's gear and `extras`, each item counted against what the character already
-/// holds), the equip, the covenant and the Estus Flask. **Raising soul memory cannot be undone.**
-/// A build already waiting is replaced.
+/// holds), the equip, the covenant and the Estus Flask. Unlike a link, every equipment and
+/// attunement slot the build leaves out is emptied, so the character holds the build and nothing
+/// else. **Raising soul memory cannot be undone.** A build already waiting is replaced.
 pub fn queue_generated(
     build: ds2_build_import_core::Build,
     extras: Vec<(String, ds2_build_import_core::Infusion)>,
@@ -248,7 +254,11 @@ pub fn queue_generated(
         extras.len()
     ));
     if let Ok(mut pending) = PENDING.lock() {
-        *pending = Some(Pending { build, extras });
+        *pending = Some(Pending {
+            build,
+            extras,
+            empty_the_rest: true,
+        });
     }
 }
 
@@ -269,13 +279,14 @@ pub(crate) fn drain_tick() {
     let Some(pending) = PENDING.lock().ok().and_then(|mut pending| pending.take()) else {
         return;
     };
-    apply(&pending.build, &pending.extras);
+    apply(&pending.build, &pending.extras, pending.empty_the_rest);
 }
 
 /// Put a build on the live character, as far as this crate honestly can.
 fn apply(
     build: &ds2_build_import_core::Build,
     extras: &[(String, ds2_build_import_core::Infusion)],
+    empty_the_rest: bool,
 ) {
     // WHAT THE CHARACTER IS NOW, read before anything changes, so the log can say what happened
     // rather than what was asked for.
@@ -458,8 +469,25 @@ fn apply(
             }
         }
     }
+    // Quick items and ammunition, a full stack each, one per call: see `crate::stack_items`.
+    let stacks = crate::stack_items(build);
+    if !stacks.is_empty() {
+        // SAFETY: as the grant above -- the game thread, a character loaded, the prologue
+        // re-checked inside.
+        match unsafe { crate::game::give_items(&stacks, 1) } {
+            Ok(stocked) => log_line(format_args!(
+                "{LOG_PREFIX} stocked {stocked}/{} quick item and ammunition stacks of {} for \
+                 build {}: {:?}",
+                stacks.len(),
+                crate::STACK_QUANTITY,
+                build.id,
+                stacks.iter().map(|spawn| spawn.item_id).collect::<Vec<_>>()
+            )),
+            Err(error) => log_line(format_args!("{LOG_PREFIX} stocking failed: {error}")),
+        }
+    }
 
-    equip_everything(build);
+    equip_everything(build, empty_the_rest);
     join_covenant(build);
     fill_estus();
 }
@@ -587,21 +615,99 @@ const fn flat_slot(kind: ds2_build_import_core::equip::SlotKind, position: usize
         SlotKind::Ring => ds2_rva::ITEM_SLOT_RING_FLAT_BASE,
         SlotKind::Spell => ds2_rva::ITEM_SLOT_SPELL_FLAT_BASE,
         SlotKind::Hotbar => ds2_rva::ITEM_SLOT_HOTBAR_FLAT_BASE,
+        SlotKind::Ammo => ds2_rva::ITEM_SLOT_AMMO_FLAT_BASE,
     };
     base + position
 }
 
-/// **Wear, hold, attune and quick-slot everything the build named.**
+/// What emptying a list of slots did.
+#[derive(Default)]
+struct Emptied {
+    /// Slots that held something and read back empty.
+    emptied: usize,
+    /// Slots that were empty before anything was called.
+    already: usize,
+    /// Slots that still hold something, or could not be reached, each with why.
+    failed: Vec<String>,
+}
+
+impl Emptied {
+    fn add(&mut self, other: Emptied) {
+        self.emptied += other.emptied;
+        self.already += other.already;
+        self.failed.extend(other.failed);
+    }
+}
+
+/// Empty each of `slots`, one line per slot that held something.
+///
+/// The read-back decides, as it does for the equip: a slot counts as emptied only when the game's
+/// own accessor answers that nothing is in it afterwards.
+fn empty_slots(slots: &[(ds2_build_import_core::equip::SlotKind, usize)]) -> Emptied {
+    let mut out = Emptied::default();
+    for (kind, position) in slots {
+        let name = kind.position_name(*position);
+        let Some(internal) = ds2_rva::ITEM_SLOT_FLAT_TO_INTERNAL
+            .get(flat_slot(*kind, *position))
+            .copied()
+            .filter(|internal| *internal >= 0)
+        else {
+            out.failed.push(format!("{name} (no such slot)"));
+            continue;
+        };
+        // SAFETY: the game thread, from the pause menu's own per-frame update, with a character
+        // loaded. The call site's prologue is re-checked inside.
+        match unsafe { crate::game::unequip(internal as u32) } {
+            Ok(done) if done.before.is_none() => out.already += 1,
+            Ok(done) if done.after.is_none() => {
+                out.emptied += 1;
+                log_line(format_args!(
+                    "{LOG_PREFIX}   emptied {name} ({}), held id={}",
+                    kind.describe(),
+                    done.before.unwrap_or_default()
+                ));
+            }
+            Ok(done) => out.failed.push(format!(
+                "{name} (held {:?}, still holds {:?})",
+                done.before, done.after
+            )),
+            Err(error) => out.failed.push(format!("{name} ({error})")),
+        }
+    }
+    out
+}
+
+/// **Wear, hold, attune and quick-slot everything the build named**, and with `empty_the_rest`
+/// empty every slot it did not.
 ///
 /// Runs after the grant, because the equip function names an item by a pointer to its inventory
 /// entry and that entry does not exist until the item has been given.
-fn equip_everything(build: &ds2_build_import_core::Build) {
+///
+/// # Emptying happens on both sides of the equip
+///
+/// The attunement positions are emptied first. A spell written into a slot is moved next to any
+/// other copy of it already attuned (`docs/DS2-ATTUNEMENT.md`), so a stale copy sitting above the
+/// build's spells could pull a build spell up into a position emptied afterwards.
+///
+/// Everything else is emptied after. The equip prefers the copy of an item already worn, which is
+/// the one with the player's upgrades on it, and emptying its slot first would turn that copy into
+/// a spare the scan no longer prefers. Equipping is a move, so a worn copy the build places
+/// elsewhere has already left its old slot by the time that slot is emptied.
+fn equip_everything(build: &ds2_build_import_core::Build, empty_the_rest: bool) {
     use ds2_build_import_core::equip::SlotKind;
 
     let planned = ds2_build_import_core::equip::plan(build);
-    if planned.is_empty() {
+    if planned.is_empty() && !empty_the_rest {
         return;
     }
+    let (spells_to_empty, rest_to_empty): (Vec<_>, Vec<_>) = if empty_the_rest {
+        ds2_build_import_core::equip::unfilled(&planned)
+            .into_iter()
+            .partition(|(kind, _)| *kind == SlotKind::Spell)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    let mut emptied = empty_slots(&spells_to_empty);
 
     // THE ATTUNEMENT BUDGET. Reading it after the stats were written is NOT enough: the count is
     // cached on the bag and the stat write does not touch it, so a character written to attunement
@@ -732,6 +838,25 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
         planned.len(),
         build.id
     ));
+    if empty_the_rest {
+        emptied.add(empty_slots(&rest_to_empty));
+        let outside = spells_to_empty.len() + rest_to_empty.len();
+        log_line(format_args!(
+            "{LOG_PREFIX} {}/{outside} slots outside build {} are empty: {} emptied, {} already \
+             were, {} still hold something",
+            emptied.emptied + emptied.already,
+            build.id,
+            emptied.emptied,
+            emptied.already,
+            emptied.failed.len()
+        ));
+        if !emptied.failed.is_empty() {
+            log_line(format_args!(
+                "{LOG_PREFIX} did not empty: {}",
+                emptied.failed.join("; ")
+            ));
+        }
+    }
     // Printed whether or not it is zero. A stored copy equips exactly like a carried one and says
     // nothing until the player takes the item off, so this is the difference between "there were
     // none to skip" and "nobody looked".
@@ -752,7 +877,15 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
             refused.join("; ")
         ));
     }
-    say(&format!("Equipped {done}/{}", planned.len()));
+    if empty_the_rest {
+        say(&format!(
+            "Equipped {done}/{}, emptied {}",
+            planned.len(),
+            emptied.emptied
+        ));
+    } else {
+        say(&format!("Equipped {done}/{}", planned.len()));
+    }
 }
 
 /// **Join the covenant the build names, if it names one.**

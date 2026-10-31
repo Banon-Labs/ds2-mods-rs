@@ -62,6 +62,9 @@ pub struct Build {
     pub spells: Vec<String>,
     /// Consumable slots, `No_Item` where empty.
     pub items: Vec<String>,
+    /// Arrows 1, arrows 2, bolts 1, bolts 2, empty where none. Neither planner has an ammunition
+    /// field, so a parsed build has none; a generated build fills them.
+    pub ammo: Vec<String>,
     /// The nine levelled stats.
     pub stats: Stats,
 }
@@ -235,6 +238,7 @@ pub fn parse(html: &str, id: u32) -> Result<Build, ParseError> {
         rings: list("rings")?,
         spells: list("spells")?,
         items: list("items")?,
+        ammo: Vec::new(),
         stats: Stats {
             vigor: stat("vigor")?,
             endurance: stat("endurance")?,

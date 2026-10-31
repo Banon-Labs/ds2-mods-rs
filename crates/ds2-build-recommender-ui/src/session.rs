@@ -119,6 +119,8 @@ mod tests {
         state.objective = Objective::Bleed;
         state.weapons_for.window_s = 1.5;
         state.similar_k = 80;
+        // Two copies of one spell are two, not one.
+        state.spells = ["Heal", "Soul_Spear", "Heal"].map(str::to_owned).to_vec();
         let before = state.clone();
 
         // B: closing, then every key up, then closed.

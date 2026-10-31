@@ -18,7 +18,7 @@ use ds2_build_import_core::Infusion;
 
 use super::{
     ADP, Ar, CorpusBackend, DEX, Defense, END, EQUIP_CAP, FTH, Hit, INT, LOAD_PRICE, STR, Stats,
-    VIT, Wearable, bad, float, int, py_max, py_min, py_round, py_sum, sl_bracket,
+    VIT, Weapon, Wearable, bad, float, int, py_max, py_min, py_round, py_sum, sl_bracket,
 };
 use crate::backend::ArmorTrade;
 
@@ -326,6 +326,8 @@ pub(super) struct Wearer<'a> {
     pub(super) scarcity: f64,
     /// The threat mix of its SL bracket: what `best_armor` weights each defense by.
     pub(super) mix: [f64; 5],
+    /// Whether every slot holds a piece: `best_armor`'s `full`, which the poise steps keep.
+    pub(super) full: bool,
 }
 
 /// What [`CorpusBackend::trade_armor`] decided: the set, the numbers of it and of `best_armor`'s
@@ -398,7 +400,12 @@ impl CorpusBackend {
     ///
     /// The pieces' stat changes and the rings' (their `ring_effects` adds, uncapped) raise the
     /// stats the defense reads; then each ring's defense changes are added.
-    fn build_defense(&self, stats: &Stats, pieces: &[&Wearable; 4], rings: &[usize]) -> Defense {
+    pub(super) fn build_defense(
+        &self,
+        stats: &Stats,
+        pieces: &[&Wearable],
+        rings: &[usize],
+    ) -> Defense {
         let mut eff = *stats;
         for piece in pieces {
             for (stat, add) in eff.iter_mut().zip(piece.alter) {
@@ -479,7 +486,9 @@ impl CorpusBackend {
     /// count; the slots are combined keeping, per poise sum, the sets no lighter one outscores.
     fn armor_poise_steps(&self, wearer: &Wearer<'_>) -> Vec<(f64, [&Wearable; 4])> {
         let (stats, rings) = (wearer.stats, wearer.rings);
-        let (_, _, Some(top)) = self.best_armor(stats, wearer.held, rings, 0.0, &wearer.mix) else {
+        let (_, _, Some(top)) =
+            self.best_armor(stats, wearer.held, rings, 0.0, &wearer.mix, wearer.full)
+        else {
             return Vec::new();
         };
         let value = top.iter().fold(0.0, |total, piece| {
@@ -499,7 +508,10 @@ impl CorpusBackend {
         for slot in &self.wearable {
             let mut cands: Vec<(f64, f64, f64, &Wearable)> = slot
                 .iter()
-                .filter(|piece| piece.require.iter().all(|&(stat, need)| need <= st[stat]))
+                .filter(|piece| {
+                    !(wearer.full && piece.key == "Naked")
+                        && piece.require.iter().all(|&(stat, need)| need <= st[stat])
+                })
                 .map(|piece| {
                     (
                         piece.weight,
@@ -657,18 +669,19 @@ impl CorpusBackend {
     /// The poise half of the script's `generate_armor`: `best_armor`'s set `pieces`, or the set
     /// of a poise step that trades better.
     ///
-    /// Each candidate is valued by its exchange over `granted`'s weapons against `sl`'s bracket;
-    /// the highest wins, a tie keeping `pieces`. `pieces` unchanged and no numbers when there is
-    /// nothing to trade.
+    /// Each candidate is valued by its exchange over the `swung` weapons (the script's
+    /// `swung_weapons`: the primary and a left-hand weapon) against `sl`'s bracket; the highest
+    /// wins, a tie keeping `pieces`. `pieces` unchanged and no numbers when there is nothing to
+    /// trade.
     pub(super) fn trade_armor<'s>(
         &'s self,
         pieces: [&'s Wearable; 4],
         wearer: &Wearer<'_>,
         sl: u32,
-        granted: &[(usize, Infusion, bool)],
+        swung: &[(usize, Infusion, bool)],
     ) -> Traded<'s> {
         let (stats, rings) = (wearer.stats, wearer.rings);
-        let Some(table) = self.granted_trades(sl, stats, rings, granted) else {
+        let Some(table) = self.granted_trades(sl, stats, rings, swung) else {
             return Traded {
                 pieces,
                 numbers: None,
@@ -706,6 +719,115 @@ impl CorpusBackend {
             numbers: Some((best, previous)),
             note,
         }
+    }
+}
+
+/// The script's `POISE_STATS`: the stats `optimize_with` credits with the R1 trades their poise
+/// wins -- VIT through the load armour can take, END and ADP through the stat poise at min(END,
+/// ADP).
+pub(super) const POISE_STATS: [usize; 3] = [VIT, END, ADP];
+
+/// What [`CorpusBackend::poise_trade_value`] weighs a build's poise against, for one weapon in one
+/// grip at one SL bracket.
+pub(super) struct PoiseTrades {
+    /// The script's `poise_keys`: the stagger thresholds of the counter-hits that land before the
+    /// weapon's first strike, sorted.
+    keys: Vec<f64>,
+    /// How many counters there are.
+    pairs: usize,
+    /// The script's `poise_frontier`: full sets' weights, rising, and the most pieces' poise each
+    /// buys.
+    weights: Vec<f64>,
+    poises: Vec<f64>,
+    /// The weapon's weight and the worn rings'.
+    carried: f64,
+}
+
+impl CorpusBackend {
+    /// The script's `poise_keys` and `poise_frontier` for `weapon` in its grip at `sl`'s bracket,
+    /// carrying it and `rings`. `None` for a launcher, a weapon without a first strike, or a
+    /// bracket with no counters.
+    pub(super) fn poise_trades(
+        &self,
+        weapon: &Weapon,
+        two: bool,
+        sl: u32,
+        rings: &[usize],
+    ) -> Option<PoiseTrades> {
+        if weapon.ranged.is_some() {
+            return None;
+        }
+        let mine = weapon.strike[usize::from(two)].as_ref()?;
+        let counters: Vec<&Counter> = self
+            .bracket_builds(sl_bracket(sl))
+            .into_iter()
+            .filter_map(|build| build.trade.as_ref())
+            .collect();
+        if counters.is_empty() {
+            return None;
+        }
+        let mut keys: Vec<f64> = counters
+            .iter()
+            .filter(|c| c.strike.hit.at < mine.hit.at)
+            .filter_map(|c| stagger_threshold(&c.strike, mine))
+            .collect();
+        keys.sort_by(|a, b| cmp(*a, *b));
+        // Every full set no lighter-or-equal set out-poises: requirements are not read, as
+        // `generate_armor` checks them on the set it picks.
+        let mut states = vec![(0.0, 0.0)];
+        for slot in &self.wearable {
+            let pieces: Vec<(f64, f64)> = slot
+                .iter()
+                .filter(|piece| piece.key != "Naked")
+                .map(|piece| (piece.weight, piece.poise))
+                .collect();
+            let mut next: Vec<(f64, f64)> = states
+                .iter()
+                .flat_map(|&(sw, sp)| pieces.iter().map(move |&(w, p)| (sw + w, sp + p)))
+                .collect();
+            next.sort_by(|a, b| cmp(a.0, b.0).then(cmp(b.1, a.1)));
+            states.clear();
+            let mut best = f64::NEG_INFINITY;
+            for (w, p) in next {
+                if p > best {
+                    states.push((w, p));
+                    best = p;
+                }
+            }
+        }
+        let (weights, poises) = states.into_iter().unzip();
+        Some(PoiseTrades {
+            keys,
+            pairs: counters.len(),
+            weights,
+            poises,
+            carried: weapon.weight + py_sum(rings.iter().map(|&ring| self.rings[ring].2)),
+        })
+    }
+
+    /// The script's `poise_trade_value`: what a build at levelled `stats` wearing `rings` wins in
+    /// R1 trades by its poise, in damage per trade -- `hit` times the share of the pairs whose
+    /// counter hits first and its poise holds through. The poise is the most armour poise the
+    /// load left under [`EQUIP_CAP`] buys (0 when no full set fits), plus the stat poise and the
+    /// rings'.
+    pub(super) fn poise_trade_value(
+        &self,
+        trades: &PoiseTrades,
+        hit: f64,
+        stats: &Stats,
+        rings: &[usize],
+    ) -> f64 {
+        let mut budget = self.max_load(stats, rings) * EQUIP_CAP;
+        budget -= trades.carried;
+        let at = trades.weights.partition_point(|&weight| weight <= budget);
+        let pieces = if at > 0 { trades.poises[at - 1] } else { 0.0 };
+        let eff = self.gear_stats(stats, rings);
+        let mut rest = 0.0;
+        if !self.tables.stat_poise.0.is_empty() {
+            rest += self.tables.stat_poise.at(eff[END].min(eff[ADP]));
+        }
+        let poise = pieces + (rest + py_sum(rings.iter().map(|&ring| self.ring_poise[ring])));
+        hit * count(bisect_left(&trades.keys, poise)) / count(trades.pairs)
     }
 }
 

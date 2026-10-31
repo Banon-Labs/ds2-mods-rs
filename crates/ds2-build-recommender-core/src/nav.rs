@@ -114,16 +114,156 @@ pub struct Shape {
     /// parameters, the mode's options and the answer, as the design draws it: the build names its
     /// own weapon, infusion and grip.
     pub paperdoll: bool,
+    /// Where the buttons that wrap -- the fixes and the footer -- were drawn: on how many lines, and
+    /// which button on which.
+    pub wrapped: Wrapped,
 }
 
 /// Where the mode's options are in [`layout`]'s rows: under the header, the stats, the mode tabs and
 /// the weapon's parameters.
 const OPTIONS_ROW: usize = 4;
 
+/// The footer's buttons in the order they are drawn, in the groups kept together on a line.
+///
+/// Generate Build with the two choices only it reads (the armour and the spells); the two that
+/// Optimize for weapon and Best weapons read as well (the floors and how the free points are
+/// spent); and what is done with the build once there is one (look at it, put it on the
+/// character).
+pub fn footer(generated: bool) -> [Vec<Control>; 3] {
+    let mut made = Vec::with_capacity(2);
+    if generated {
+        made.push(Control::ShowToggle);
+    }
+    made.push(Control::Apply);
+    [
+        vec![Control::Generate, Control::AllowNaked, Control::Spells],
+        vec![Control::IgnoreFloors, Control::Spend],
+        made,
+    ]
+}
+
+/// One box of a [`wrap`]ped row: the line it is on, counted from the first, and its left edge and
+/// width, measured from the row's left edge.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placed {
+    /// The line, 0 for the first.
+    pub line: usize,
+    /// The box's left edge.
+    pub x: f32,
+    /// The box's width: what it asked for, or `room` if that was more.
+    pub width: f32,
+}
+
+/// Lay groups of boxes `widths` wide left to right in lines `room` wide, `gap` between two boxes of
+/// a group and `group_gap` between two groups on one line. Returns every box's place, in order.
+///
+/// A group goes on the line in progress only when all of it fits what is left of that line, and on
+/// the next line otherwise, so a group is split only when it is wider than a whole line. Inside a
+/// group, a box that does not fit what is left of its line starts the next one. A box wider than a
+/// line is cut to `room`, and whoever draws it cuts its label to match: no box ever ends past
+/// `room`.
+pub fn wrap(groups: &[&[f32]], room: f32, gap: f32, group_gap: f32) -> Vec<Placed> {
+    let room = room.max(0.0);
+    let mut placed = Vec::new();
+    let (mut line, mut x, mut empty) = (0, 0.0_f32, true);
+    for group in groups {
+        let widths: Vec<f32> = group.iter().map(|width| width.clamp(0.0, room)).collect();
+        let whole = widths.iter().sum::<f32>() + gap * widths.len().saturating_sub(1) as f32;
+        if !empty && x + group_gap + whole > room {
+            (line, x, empty) = (line + 1, 0.0, true);
+        }
+        for (index, width) in widths.into_iter().enumerate() {
+            let lead = match (empty, index) {
+                (true, _) => 0.0,
+                (false, 0) => group_gap,
+                (false, _) => gap,
+            };
+            let (at, lead) = if !empty && x + lead + width > room {
+                (line + 1, 0.0)
+            } else {
+                (line, lead)
+            };
+            if at != line {
+                (line, x) = (at, 0.0);
+            }
+            placed.push(Placed {
+                line,
+                x: x + lead,
+                width,
+            });
+            (x, empty) = (x + lead + width, false);
+        }
+    }
+    placed
+}
+
+/// Most wrapped buttons a [`Wrapped`] holds the places of: the footer's and a refusal's fixes.
+pub const WRAPPED_MAX: usize = 32;
+
+/// Where the panel last drew each button that it wraps: the footer's and a refusal's fixes.
+///
+/// Each button's line, counted within its own block, and the centre of its box, in whole pixels
+/// from one left edge for every block. [`layout`] breaks each block's row where the drawing broke
+/// it, and [`step_in`] takes Up and Down between two of those lines to the button drawn nearest
+/// above or below, as between two rows of the paperdoll. The default is every block on one line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Wrapped {
+    drawn: [Option<(Control, usize, u16)>; WRAPPED_MAX],
+}
+
+impl Wrapped {
+    /// `controls` as [`wrap`] placed them: the same order, one place each.
+    pub fn new(controls: &[Control], placed: &[Placed]) -> Self {
+        Self::default().with(controls, placed, 0.0)
+    }
+
+    /// These, and another block of `controls` as [`wrap`] placed them, its line drawn from `left`
+    /// along the same edge. Past [`WRAPPED_MAX`] buttons are left without a place, which puts each
+    /// on the line of the button before it.
+    #[must_use]
+    pub fn with(mut self, controls: &[Control], placed: &[Placed], left: f32) -> Self {
+        let free = self.drawn.iter_mut().filter(|slot| slot.is_none());
+        for (slot, (&control, place)) in free.zip(controls.iter().zip(placed)) {
+            let centre = (left + place.x + place.width * 0.5)
+                .round()
+                .clamp(0.0, f32::from(u16::MAX)) as u16;
+            *slot = Some((control, place.line, centre));
+        }
+        self
+    }
+
+    /// The line `control` was drawn on and its centre, if it is a wrapped button that was drawn.
+    fn find(&self, control: Control) -> Option<(usize, u16)> {
+        self.drawn
+            .iter()
+            .flatten()
+            .find(|(drawn, ..)| *drawn == control)
+            .map(|&(_, line, centre)| (line, centre))
+    }
+
+    /// One block's controls in order, cut into the lines they were drawn on. A button with no
+    /// place yet -- the frame it first appears -- goes on the line of the one before it.
+    fn rows(&self, controls: Vec<Control>) -> Vec<Vec<Control>> {
+        let mut rows: Vec<Vec<Control>> = Vec::new();
+        let mut on = None;
+        for control in controls {
+            let line = self.find(control).map(|(line, _)| line).or(on);
+            match rows.last_mut() {
+                Some(row) if line == on => row.push(control),
+                _ => rows.push(vec![control]),
+            }
+            on = line;
+        }
+        rows
+    }
+}
+
 /// The controls, row by row, as the panel draws them: the header's two buttons, the soul level and
 /// the nine stats in one row, the mode tabs, the weapon's parameters, then the mode's options.
 ///
-/// A generated build on screen puts its paperdoll's rows where the parameters and options were.
+/// A generated build on screen puts its paperdoll's rows where the parameters and options were. A
+/// refusal's fixes and the footer take as many rows each as [`Shape::wrapped`] says they were
+/// drawn on.
 ///
 /// Run is not among them. It is a press, X on the pad and R on the keyboard, from wherever the
 /// cursor is, so it has no place of its own to walk to.
@@ -165,22 +305,13 @@ pub fn layout(shape: Shape) -> Vec<Vec<Control>> {
         if shape.results {
             rows.push(vec![Control::Results]);
         }
-        if shape.fixes > 0 {
-            rows.push((0..shape.fixes).map(Control::Fix).collect());
-        }
+        rows.extend(
+            shape
+                .wrapped
+                .rows((0..shape.fixes).map(Control::Fix).collect()),
+        );
     }
-    let mut footer = vec![
-        Control::Generate,
-        Control::AllowNaked,
-        Control::Spells,
-        Control::IgnoreFloors,
-        Control::Spend,
-    ];
-    if shape.generated {
-        footer.push(Control::ShowToggle);
-    }
-    footer.push(Control::Apply);
-    rows.push(footer);
+    rows.extend(shape.wrapped.rows(footer(shape.generated).concat()));
     rows
 }
 
@@ -253,6 +384,39 @@ pub fn step(rows: &[Vec<Control>], cursor: Control, dir: Dir) -> Control {
         (column * (to_len - 1) * 2 + (from_len - 1)) / ((from_len - 1) * 2)
     };
     rows[target_row][target_column.min(to_len - 1)]
+}
+
+/// [`step`], for fixes and a footer that may be wrapped. What the panel moves its cursor with.
+///
+/// Up and Down between two lines of wrapped buttons land on the button drawn nearest above or below
+/// rather than the one the same fraction of the way along: the lines hold different buttons of
+/// different widths.
+pub fn step_in(rows: &[Vec<Control>], wrapped: &Wrapped, cursor: Control, dir: Dir) -> Control {
+    let cursor = resolve(rows, cursor);
+    if let (Dir::Up | Dir::Down, Some((row, _)), Some((_, x))) =
+        (dir, locate(rows, cursor), wrapped.find(cursor))
+    {
+        let target = match dir {
+            Dir::Up => row.checked_sub(1),
+            _ => Some(row + 1),
+        };
+        let nearest = target.and_then(|target| rows.get(target)).and_then(|to| {
+            to.iter()
+                .map(|&control| {
+                    wrapped
+                        .find(control)
+                        .map(|(_, at)| (control, at.abs_diff(x)))
+                })
+                .collect::<Option<Vec<_>>>()?
+                .into_iter()
+                .min_by_key(|&(_, off)| off)
+                .map(|(control, _)| control)
+        });
+        if let Some(nearest) = nearest {
+            return nearest;
+        }
+    }
+    step(rows, cursor, dir)
 }
 
 /// The slot in `row` whose centre is nearest `x`, in the grid's own pixels; the leftmost of two as
@@ -402,6 +566,7 @@ mod tests {
             generated: false,
             fixes: 0,
             paperdoll: false,
+            wrapped: Wrapped::default(),
         }
     }
 
@@ -429,6 +594,7 @@ mod tests {
                     generated: true,
                     fixes: 2,
                     paperdoll: false,
+                    wrapped: Wrapped::default(),
                 },
                 doll(mode),
             ]
@@ -571,6 +737,7 @@ mod tests {
             generated: true,
             fixes: 0,
             paperdoll: false,
+            wrapped: Wrapped::default(),
         });
         assert_eq!(step(&rows, Control::RawAr, Dir::Down), Control::Results);
         assert_eq!(step(&rows, Control::Results, Dir::Down), Control::Generate);
@@ -745,5 +912,297 @@ mod tests {
         assert_eq!(resolve(&rows, Control::Fix(1)), Control::Generate);
         let rows = layout(shape(Mode::WeaponsForStats));
         assert_eq!(resolve(&rows, Control::Slot(Slot::Legs)), Control::RawAr);
+    }
+
+    /// Between two footer buttons, and between two groups on one line: the panel's.
+    const GAP: f32 = 12.0;
+    const GROUP_GAP: f32 = 32.0;
+
+    /// A footer button's box for `control`, about what the panel draws at 4K: wide enough that the
+    /// whole footer does not fit the 1500-pixel panel on one line.
+    fn box_width(control: Control) -> f32 {
+        match control {
+            Control::Generate => 200.0,
+            Control::AllowNaked => 260.0,
+            Control::Spells => 170.0,
+            Control::IgnoreFloors => 380.0,
+            Control::Spend => 230.0,
+            Control::ShowToggle => 180.0,
+            _ => 300.0,
+        }
+    }
+
+    /// The footer's groups and their boxes laid in `room`, the way the panel lays them.
+    fn lay(generated: bool, room: f32) -> (Vec<Control>, Vec<Placed>) {
+        let groups = footer(generated);
+        let widths: Vec<Vec<f32>> = groups
+            .iter()
+            .map(|group| group.iter().copied().map(box_width).collect())
+            .collect();
+        let widths: Vec<&[f32]> = widths.iter().map(Vec::as_slice).collect();
+        (groups.concat(), wrap(&widths, room, GAP, GROUP_GAP))
+    }
+
+    /// The grid for a generated build's footer as it is drawn in `room`.
+    fn wrapped(room: f32) -> Shape {
+        let (controls, placed) = lay(true, room);
+        Shape {
+            generated: true,
+            wrapped: Wrapped::new(&controls, &placed),
+            ..shape(Mode::OptimizeForWeapon)
+        }
+    }
+
+    /// The bug: at 3840x2160 the footer's one row ran past the panel's right edge. However narrow
+    /// the line and however long a label, no box ends past it, starts before it, or overlaps the
+    /// box before it on its line.
+    #[test]
+    fn no_footer_box_ends_past_the_line_however_narrow() {
+        let long = [40.0, 2400.0, 90.0];
+        for room in (0..=2000).step_by(7).map(|room| room as f32) {
+            for generated in [false, true] {
+                let (_, placed) = lay(generated, room);
+                let groups: [&[f32]; 3] = [&long, &[room, room + 1.0], &[0.0, 15.0]];
+                let more = wrap(&groups, room, GAP, GROUP_GAP);
+                for set in [&placed, &more] {
+                    for (index, place) in set.iter().enumerate() {
+                        assert!(
+                            place.x >= 0.0,
+                            "room {room}: {place:?} starts before the line"
+                        );
+                        assert!(
+                            place.x + place.width <= room,
+                            "room {room}: {place:?} ends past the line"
+                        );
+                        if let Some(before) = index.checked_sub(1).map(|i| set[i])
+                            && before.line == place.line
+                        {
+                            assert!(before.x + before.width <= place.x, "room {room}: overlap");
+                        }
+                        if index > 0 {
+                            assert!(set[index - 1].line <= place.line, "lines run in order");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_group_moves_to_the_next_line_whole_and_splits_only_when_wider_than_one() {
+        // Everything fits: one line, the groups further apart than their buttons.
+        let (_, placed) = lay(false, 3000.0);
+        assert!(placed.iter().all(|place| place.line == 0));
+        assert_eq!(placed[1].x, 200.0 + GAP);
+        assert_eq!(placed[3].x, 654.0 + GROUP_GAP);
+        // 1000 holds any one group but not two: a line each, each starting at the left.
+        let (_, placed) = lay(true, 1000.0);
+        let lines: Vec<usize> = placed.iter().map(|place| place.line).collect();
+        assert_eq!(lines, [0, 0, 0, 1, 1, 2, 2]);
+        assert_eq!((placed[3].x, placed[5].x), (0.0, 0.0));
+        // 500 is narrower than the first two groups: they break between their buttons, and the
+        // third, which fits a line, still gets one of its own.
+        let (_, placed) = lay(true, 500.0);
+        let lines: Vec<usize> = placed.iter().map(|place| place.line).collect();
+        assert_eq!(lines, [0, 0, 1, 2, 3, 4, 4]);
+        // A label wider than the line is cut to it.
+        let cut = wrap(&[&[50.0, 900.0]], 400.0, GAP, GROUP_GAP);
+        assert_eq!(
+            cut[1],
+            Placed {
+                line: 1,
+                x: 0.0,
+                width: 400.0
+            }
+        );
+    }
+
+    /// The grid's footer rows are the lines the buttons were drawn on, in the order drawn, so the
+    /// cursor walks what is on screen.
+    #[test]
+    fn the_footer_rows_are_the_lines_it_was_drawn_on() {
+        for room in [3000.0, 1500.0, 1000.0, 500.0, 120.0] {
+            let (controls, placed) = lay(true, room);
+            let rows = layout(wrapped(room));
+            let lines = placed.last().map_or(0, |place| place.line + 1);
+            let drawn: Vec<Vec<Control>> = (0..lines)
+                .map(|line| {
+                    controls
+                        .iter()
+                        .zip(&placed)
+                        .filter(|(_, place)| place.line == line)
+                        .map(|(&control, _)| control)
+                        .collect()
+                })
+                .collect();
+            assert_eq!(rows[rows.len() - lines..], drawn[..], "room {room}");
+            // Left and Right stay on the line: off its end comes back at its start.
+            for row in &drawn {
+                let end = row[row.len() - 1];
+                assert_eq!(step(&rows, end, Dir::Right), row[0], "room {room}");
+            }
+        }
+    }
+
+    /// At 1500 the first two groups share a line and Show and Apply have the second: Up and Down
+    /// land on the button drawn over or under, not the one the same fraction along.
+    #[test]
+    fn up_and_down_between_footer_lines_land_on_the_button_drawn_nearest() {
+        let shape = wrapped(1500.0);
+        let rows = layout(shape);
+        let go = |from: Control, dir: Dir| step_in(&rows, &shape.wrapped, from, dir);
+        assert_eq!(go(Control::Generate, Dir::Down), Control::ShowToggle);
+        assert_eq!(go(Control::AllowNaked, Dir::Down), Control::Apply);
+        assert_eq!(go(Control::Spells, Dir::Down), Control::Apply);
+        assert_eq!(go(Control::Spend, Dir::Down), Control::Apply);
+        assert_eq!(go(Control::Apply, Dir::Up), Control::AllowNaked);
+        assert_eq!(go(Control::ShowToggle, Dir::Up), Control::Generate);
+        assert_eq!(go(Control::Apply, Dir::Down), Control::Apply);
+        // Leaving the footer upward is the ordinary step, into the options row.
+        assert_eq!(go(Control::Generate, Dir::Up), Control::BestInfusion);
+        assert_eq!(go(Control::BestInfusion, Dir::Down), Control::Generate);
+    }
+
+    #[test]
+    fn every_footer_button_is_reachable_however_it_wrapped() {
+        for room in [1500.0, 1000.0, 500.0, 0.0] {
+            let shape = wrapped(room);
+            let rows = layout(shape);
+            let mut seen = vec![Control::Generate];
+            let mut frontier = vec![Control::Generate];
+            while let Some(at) = frontier.pop() {
+                for dir in [Dir::Up, Dir::Down, Dir::Left, Dir::Right] {
+                    let next = step_in(&rows, &shape.wrapped, at, dir);
+                    if !seen.contains(&next) {
+                        seen.push(next);
+                        frontier.push(next);
+                    }
+                }
+            }
+            for control in rows.iter().flatten() {
+                assert!(
+                    seen.contains(control),
+                    "room {room}: {control:?} unreachable"
+                );
+            }
+        }
+        assert!(footer(true).concat().len() <= WRAPPED_MAX);
+    }
+
+    /// Between two of a refusal's fix buttons, across and down: the panel's.
+    const FIX_GAP: f32 = 8.0;
+
+    /// Five fixes' boxes, about the width of `Raise SL to 139` and its kind at 4K.
+    const FIX_WIDTHS: [f32; 5] = [260.0, 300.0, 220.0, 340.0, 280.0];
+
+    /// The fixes as the panel lays them in `room`.
+    fn lay_fixes(room: f32) -> (Vec<Control>, Vec<Placed>) {
+        let controls = (0..FIX_WIDTHS.len()).map(Control::Fix).collect();
+        (controls, wrap(&[&FIX_WIDTHS], room, FIX_GAP, 0.0))
+    }
+
+    /// A refusal's five fixes on screen, drawn in `room`.
+    fn refused(room: f32) -> Shape {
+        let (controls, placed) = lay_fixes(room);
+        Shape {
+            fixes: FIX_WIDTHS.len(),
+            wrapped: Wrapped::new(&controls, &placed),
+            ..shape(Mode::OptimizeForWeapon)
+        }
+    }
+
+    /// The fix buttons wrapped on screen while the grid kept them on one row, so Up and Down skipped
+    /// a line of them. Now their rows are the lines drawn, just above the footer.
+    #[test]
+    fn the_fix_rows_are_the_lines_they_were_drawn_on() {
+        for room in [3000.0, 900.0, 600.0, 400.0, 100.0] {
+            let (controls, placed) = lay_fixes(room);
+            for place in &placed {
+                assert!(
+                    place.x >= 0.0 && place.x + place.width <= room,
+                    "room {room}"
+                );
+            }
+            let rows = layout(refused(room));
+            let lines = placed.last().map_or(0, |place| place.line + 1);
+            let drawn: Vec<Vec<Control>> = (0..lines)
+                .map(|line| {
+                    controls
+                        .iter()
+                        .zip(&placed)
+                        .filter(|(_, place)| place.line == line)
+                        .map(|(&control, _)| control)
+                        .collect()
+                })
+                .collect();
+            let footer_row = rows.len() - 1;
+            assert_eq!(
+                rows[footer_row - lines..footer_row],
+                drawn[..],
+                "room {room}"
+            );
+            assert_eq!(rows[footer_row - lines - 1], [Control::BestInfusion]);
+        }
+    }
+
+    /// At 900 the first three fixes share a line and the last two the next: Up from the fifth lands
+    /// on the second, drawn over it, not on the third, which is the same fraction along.
+    #[test]
+    fn up_and_down_between_fix_lines_land_on_the_button_drawn_nearest() {
+        let shape = refused(900.0);
+        let rows = layout(shape);
+        let go = |from: Control, dir: Dir| step_in(&rows, &shape.wrapped, from, dir);
+        assert_eq!(go(Control::Fix(4), Dir::Up), Control::Fix(1));
+        assert_eq!(go(Control::Fix(3), Dir::Up), Control::Fix(0));
+        assert_eq!(go(Control::Fix(0), Dir::Down), Control::Fix(3));
+        assert_eq!(go(Control::Fix(2), Dir::Down), Control::Fix(4));
+        assert_eq!(go(Control::Fix(0), Dir::Up), Control::BestInfusion);
+        assert_eq!(go(Control::Fix(3), Dir::Down), Control::Generate);
+        assert_eq!(go(Control::Fix(4), Dir::Right), Control::Fix(3));
+    }
+
+    /// Fixes and footer both wrapped, the fixes indented as the panel draws them, at any width and
+    /// with a fix label longer than a line: every button fits its line, and the cursor reaches each
+    /// from the first fix.
+    #[test]
+    fn every_fix_and_footer_button_is_reachable_however_both_wrapped() {
+        let widths = [260.0, 2600.0, 220.0, 340.0, 280.0, 90.0];
+        let fixes: Vec<Control> = (0..widths.len()).map(Control::Fix).collect();
+        for room in (0..=1600).step_by(37).map(|room| room as f32) {
+            let fix_room = room - 12.0;
+            let fix_places = wrap(&[&widths], fix_room, FIX_GAP, 0.0);
+            for place in &fix_places {
+                assert!(place.x + place.width <= fix_room.max(0.0), "room {room}");
+            }
+            let (footer_controls, footer_places) = lay(true, room);
+            let shape = Shape {
+                fixes: widths.len(),
+                generated: true,
+                wrapped: Wrapped::new(&footer_controls, &footer_places).with(
+                    &fixes,
+                    &fix_places,
+                    12.0,
+                ),
+                ..shape(Mode::SimilarBuilds)
+            };
+            let rows = layout(shape);
+            let mut seen = vec![Control::Fix(0)];
+            let mut frontier = vec![Control::Fix(0)];
+            while let Some(at) = frontier.pop() {
+                for dir in [Dir::Up, Dir::Down, Dir::Left, Dir::Right] {
+                    let next = step_in(&rows, &shape.wrapped, at, dir);
+                    if !seen.contains(&next) {
+                        seen.push(next);
+                        frontier.push(next);
+                    }
+                }
+            }
+            for control in rows.iter().flatten() {
+                assert!(
+                    seen.contains(control),
+                    "room {room}: {control:?} unreachable"
+                );
+            }
+        }
     }
 }

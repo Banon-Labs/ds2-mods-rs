@@ -299,6 +299,51 @@ impl CorpusBackend {
         best
     }
 
+    /// `choose_kit`'s `fill` ranking: every ammunition `weapon` (a launcher) fires at `eff`, as
+    /// (one shot's damage against the defender's answer to it, times the weapon's damage scale,
+    /// the ammunition's name), best first.
+    pub(super) fn ammo_damage(
+        &self,
+        weapon: &Weapon,
+        launcher: &Launcher,
+        infusion: Infusion,
+        eff: &Stats,
+        rings: &[usize],
+        defending: &Defending<'_>,
+    ) -> Vec<(f64, String)> {
+        let mut ranked: Vec<(f64, String)> = self
+            .ranged_options(weapon, launcher, infusion, eff, rings, false)
+            .into_iter()
+            .map(|shot| {
+                let (defense, _) = defending.respond(&shot.ar);
+                let hit = Hit {
+                    at: 0.0,
+                    motion_value: shot.mv,
+                    defense: 0,
+                    lower: shot.lower,
+                    flat: [0.0; 5],
+                };
+                (
+                    Self::hit_damage(&shot.ar, &defense, &hit) * weapon.damage_scale,
+                    shot.label,
+                )
+            })
+            .collect();
+        // Python's `sorted(..., reverse=True)` over (value, name): the name breaks a tie.
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        ranked
+    }
+
+    /// The damage types ammunition `name` adds flat attack in: the keys of the script's
+    /// `data.ammo[name]["flat"]`.
+    pub(super) fn ammo_types(&self, name: &str) -> Vec<usize> {
+        self.ammo
+            .iter()
+            .find(|ammo| ammo.name == name)
+            .map(|ammo| (0..5).filter(|&kind| ammo.flat[kind] != 0.0).collect())
+            .unwrap_or_default()
+    }
+
     /// The script's `ranged_pick`: `ranged_value`'s best shot and the note naming it -- the
     /// ammunition, or the special shot (two-handed, its count) with the best ammunition beside it,
     /// and what is unproven -- as (value, note, attack, best ammunition). Nothing for a weapon that

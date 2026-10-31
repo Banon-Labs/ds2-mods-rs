@@ -46,6 +46,8 @@ pub enum SlotKind {
     Spell,
     /// Ten consumable quick slots.
     Hotbar,
+    /// Four: two of arrows, then two of bolts. The planner has none; a generated build fills them.
+    Ammo,
 }
 
 impl SlotKind {
@@ -53,7 +55,7 @@ impl SlotKind {
     pub const fn positions(self) -> usize {
         match self {
             SlotKind::Weapon => 6,
-            SlotKind::Armour | SlotKind::Ring => 4,
+            SlotKind::Armour | SlotKind::Ring | SlotKind::Ammo => 4,
             SlotKind::Spell => 14,
             SlotKind::Hotbar => 10,
         }
@@ -92,6 +94,11 @@ impl SlotKind {
             SlotKind::Ring => format!("ring {}", position + 1),
             SlotKind::Spell => format!("attunement {}", position + 1),
             SlotKind::Hotbar => format!("hotbar {}", position + 1),
+            SlotKind::Ammo => format!(
+                "{} {}",
+                if position < 2 { "arrows" } else { "bolts" },
+                position % 2 + 1
+            ),
         }
     }
 
@@ -103,6 +110,7 @@ impl SlotKind {
             SlotKind::Ring => "ring",
             SlotKind::Spell => "spell",
             SlotKind::Hotbar => "hotbar",
+            SlotKind::Ammo => "ammunition",
         }
     }
 }
@@ -122,9 +130,10 @@ pub struct PlannedSlot {
 
 /// Everything a build wants worn, held, attuned or quick-slotted, in the order it named them.
 ///
-/// Empty slots are DROPPED rather than emitted as a request to equip nothing. Clearing a slot the
-/// player already filled is not something a build import was asked to do -- a build that names no
-/// helmet is a build that is silent about helmets, not one demanding a bare head.
+/// Empty slots are DROPPED rather than emitted as a request to equip nothing. For a soulsplanner
+/// link that is the whole story -- a link that names no helmet is silent about helmets, not one
+/// demanding a bare head. A build the recommender generated is different: its Apply empties every
+/// slot it leaves out, and [`unfilled`] lists those.
 pub fn plan(build: &Build) -> Vec<PlannedSlot> {
     let mut out = Vec::new();
 
@@ -148,6 +157,7 @@ pub fn plan(build: &Build) -> Vec<PlannedSlot> {
         (SlotKind::Ring, &build.rings),
         (SlotKind::Spell, &build.spells),
         (SlotKind::Hotbar, &build.items),
+        (SlotKind::Ammo, &build.ammo),
     ] {
         for (position, name) in names.iter().enumerate() {
             if is_empty_slot(name) || position >= kind.positions() {
@@ -161,6 +171,42 @@ pub fn plan(build: &Build) -> Vec<PlannedSlot> {
             });
         }
     }
+    out
+}
+
+/// Every slot [`plan`] leaves out, for an Apply that empties them: what a generated build's Apply
+/// takes off, so the character ends up holding the build and nothing else.
+///
+/// Weapons, armour, rings, the hotbar and ammunition come first, each family in ascending order.
+/// The attunement positions come last, from the top down, because emptying one shifts every later
+/// spell down a position (`0x1401b4330`, `docs/DS2-ATTUNEMENT.md`). Emptied from the top, every
+/// position above the one being emptied is empty already and nothing moves.
+pub fn unfilled(planned: &[PlannedSlot]) -> Vec<(SlotKind, usize)> {
+    let filled = |kind: SlotKind, position: usize| {
+        planned
+            .iter()
+            .any(|slot| slot.kind == kind && slot.position == position)
+    };
+    let mut out = Vec::new();
+    for kind in [
+        SlotKind::Weapon,
+        SlotKind::Armour,
+        SlotKind::Ring,
+        SlotKind::Hotbar,
+        SlotKind::Ammo,
+    ] {
+        out.extend(
+            (0..kind.positions())
+                .filter(|position| !filled(kind, *position))
+                .map(|position| (kind, position)),
+        );
+    }
+    out.extend(
+        (0..SlotKind::Spell.positions())
+            .rev()
+            .filter(|position| !filled(SlotKind::Spell, *position))
+            .map(|position| (SlotKind::Spell, position)),
+    );
     out
 }
 
@@ -181,6 +227,7 @@ mod tests {
             rings: Vec::new(),
             spells: spells.iter().map(|s| (*s).into()).collect(),
             items: Vec::new(),
+            ammo: Vec::new(),
             stats: Stats::default(),
         }
     }
@@ -225,6 +272,55 @@ mod tests {
         assert_eq!(planned.len(), 1);
         assert_eq!(planned[0].name, "Black_Hood");
         assert_eq!(planned[0].position, 0, "head is position zero");
+    }
+
+    /// Every slot the build leaves out is listed once, the build's own never, and the attunement
+    /// positions come last from the top down so emptying one moves no spell still to be emptied.
+    #[test]
+    fn unfilled_is_every_slot_the_plan_leaves_out() {
+        let build = build_with(
+            &["Bare_Fists", "No_Infusion", "Fume_Sword", "Dark"],
+            &["Black_Hood", "Naked", "", "No_Item"],
+            &["Soul_Arrow", "Heal"],
+        );
+        let planned = plan(&build);
+        let empty = unfilled(&planned);
+        let all: usize = [
+            SlotKind::Weapon,
+            SlotKind::Armour,
+            SlotKind::Ring,
+            SlotKind::Spell,
+            SlotKind::Hotbar,
+            SlotKind::Ammo,
+        ]
+        .iter()
+        .map(|kind| kind.positions())
+        .sum();
+        assert_eq!(empty.len() + planned.len(), all);
+        for slot in &planned {
+            assert!(
+                !empty.contains(&(slot.kind, slot.position)),
+                "{slot:?} is the build's"
+            );
+        }
+        for (index, at) in empty.iter().enumerate() {
+            assert!(!empty[..index].contains(at), "{at:?} twice");
+        }
+        // Left hand 1 names bare fists, which is an empty slot, so Apply empties it.
+        assert_eq!(empty[0], (SlotKind::Weapon, 0));
+        assert!(!empty.contains(&(SlotKind::Weapon, 1)), "right hand 1");
+        assert!(empty.contains(&(SlotKind::Armour, 1)), "Naked is emptied");
+        let spells: Vec<usize> = empty
+            .iter()
+            .filter(|(kind, _)| *kind == SlotKind::Spell)
+            .map(|(_, position)| *position)
+            .collect();
+        assert_eq!(spells, (2..14).rev().collect::<Vec<_>>());
+        assert_eq!(
+            empty.last(),
+            Some(&(SlotKind::Spell, 2)),
+            "the spells are last"
+        );
     }
 
     /// A list longer than the game has positions is truncated, not wrapped around.

@@ -109,41 +109,13 @@ pub(crate) fn build_items(
     build: &ds2_build_import_core::Build,
     extras: &[(String, ds2_build_import_core::Infusion)],
 ) -> Vec<game::ItemSpawn> {
-    use ds2_build_import_core::{Infusion, ItemError, id_for, is_empty_slot};
+    use ds2_build_import_core::{Infusion, is_empty_slot};
 
     let mut out = Vec::new();
     let mut asked = std::collections::HashMap::<i32, usize>::new();
     let mut push = |name: &str, infusion: Infusion| {
-        let item_id = match id_for(name) {
-            Ok(item_id) => item_id,
-            Err(ItemError::EmptySlot) => return,
-            // A NAME CARRIED BY SEVERAL IDS STILL GETS THE PLAYER AN ITEM.
-            //
-            // `id_for` refuses, and it is right to: the question "which id is this name" has no
-            // single answer. But the question the BUILD asks is different. soulsplanner only ever
-            // names a display name, and the seven collisions in the catalogue are all one item
-            // appearing more than once -- three Estus Flasks, and two complete armour sets whose
-            // ids differ by 1000 while every piece keeps its name. So refusing means a player who
-            // asked for an Estus Flask gets nothing, which is a worse answer than getting one of
-            // the three things called Estus Flask.
-            //
-            // The LOWEST id, because the two variant sets are laid out base-then-variant and the
-            // lower run is the one the game's own item lists start from. That is a reading of the
-            // catalogue, not a fact about the game -- so the line below names every candidate,
-            // which makes a wrong pick visible instead of silent.
-            Err(ItemError::Ambiguous { ref ids, .. }) => {
-                let Some(chosen) = ids.iter().copied().min() else {
-                    return;
-                };
-                log_line(format_args!(
-                    "{LOG_PREFIX} {name:?} names {} items {ids:?} -- granting {chosen}",
-                    ids.len()
-                ));
-                chosen
-            }
-            Err(error) => {
-                return log_line(format_args!("{LOG_PREFIX} skipping {name:?}: {error}"));
-            }
+        let Some(item_id) = grant_id(name) else {
+            return;
         };
         // Grant only what the character does not already carry. Their copy carries their
         // reinforcement, their infusion and their durability; a minted duplicate carries none of
@@ -186,13 +158,14 @@ pub(crate) fn build_items(
             Infusion::from_name(infusion).unwrap_or(Infusion::None),
         );
     }
-    // Everything else is one name per slot, uninfused.
+    // Everything else is one name per slot, uninfused. Consumables and ammunition that stack are
+    // [`stack_items`]'s.
     for name in build
         .armor
         .iter()
         .chain(&build.rings)
         .chain(&build.spells)
-        .chain(&build.items)
+        .chain(build.items.iter().filter(|name| !stacks(name)))
     {
         push(name, Infusion::None);
     }
@@ -200,6 +173,87 @@ pub(crate) fn build_items(
         push(name, *infusion);
     }
     out
+}
+
+/// How many of each quick item and ammunition [`stack_items`] asks for: a full stack. The grant
+/// clamps a quantity past the item's own limit (bit `0x2` of `ds2_rva::ITEM_GIVE_ERROR_OFFSET`)
+/// and answers "already full" for a stack that is.
+pub(crate) const STACK_QUANTITY: u16 = 99;
+
+/// Whether a quick item `name` is granted as a stack: every one but the Estus Flask, which is one
+/// item the game refills.
+fn stacks(name: &str) -> bool {
+    !name.starts_with("Estus Flask")
+}
+
+/// The build's stacking quick items and its ammunition, each asked for as a full stack whatever
+/// the character already holds, once per name.
+///
+/// Held stacks are topped up rather than skipped: a character holding three Lifegems has the item
+/// [`build_items`] counts as held, and three is not what the build means. Each is granted in a
+/// call of its own, so a stack the game reports full refuses alone.
+#[cfg(windows)]
+pub(crate) fn stack_items(build: &ds2_build_import_core::Build) -> Vec<game::ItemSpawn> {
+    let mut out: Vec<game::ItemSpawn> = Vec::new();
+    for name in build
+        .items
+        .iter()
+        .filter(|name| stacks(name))
+        .chain(&build.ammo)
+    {
+        let Some(item_id) = grant_id(name) else {
+            continue;
+        };
+        if out.iter().any(|spawn| spawn.item_id == item_id) {
+            continue;
+        }
+        out.push(game::ItemSpawn {
+            mode: ds2_rva::ITEM_SPAWN_MODE_NORMAL,
+            item_id,
+            durability: ds2_rva::ITEM_SPAWN_DURABILITY_MAX,
+            quantity: STACK_QUANTITY,
+            reinforce: 0,
+            infusion: 0,
+        });
+    }
+    out
+}
+
+/// The id a build's `name` is granted as, or `None` (logged) when it names nothing grantable.
+#[cfg(windows)]
+fn grant_id(name: &str) -> Option<i32> {
+    use ds2_build_import_core::{ItemError, id_for};
+
+    match id_for(name) {
+        Ok(item_id) => Some(item_id),
+        Err(ItemError::EmptySlot) => None,
+        // A name carried by several ids still gets the player an item.
+        //
+        // `id_for` refuses, and it is right to: the question "which id is this name" has no single
+        // answer. The question the build asks is different. soulsplanner only ever names a display
+        // name, and the seven collisions in the catalogue are all one item appearing more than
+        // once -- three Estus Flasks, and two complete armour sets whose ids differ by 1000 while
+        // every piece keeps its name. Refusing means a player who asked for an Estus Flask gets
+        // nothing, which is a worse answer than getting one of the three things called Estus
+        // Flask.
+        //
+        // The lowest id, because the two variant sets are laid out base-then-variant and the lower
+        // run is the one the game's own item lists start from. That is a reading of the
+        // catalogue, not a fact about the game, so the line below names every candidate and a
+        // wrong pick is visible instead of silent.
+        Err(ItemError::Ambiguous { ref ids, .. }) => {
+            let chosen = ids.iter().copied().min()?;
+            log_line(format_args!(
+                "{LOG_PREFIX} {name:?} names {} items {ids:?} -- granting {chosen}",
+                ids.len()
+            ));
+            Some(chosen)
+        }
+        Err(error) => {
+            log_line(format_args!("{LOG_PREFIX} skipping {name:?}: {error}"));
+            None
+        }
+    }
 }
 
 #[cfg(windows)]

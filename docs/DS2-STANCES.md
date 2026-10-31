@@ -76,13 +76,20 @@ stance that swings its right weapon (1H, 2H or PS); a family may take another st
 at `STANCE_SWAP` more seconds, again only where it raises the rate. So a build's stance rate is
 never under its primary's best grip alone.
 
-`choose_offhand` tries nothing, the primary's twin, the lightest shield when the primary attacks out
-of a guard, the build's ten best melee weapons at its stats (each at its best infusion there) and
-the next five that power stance with the primary, and keeps the highest stance rate. A generated
-build only tries left hands no heavier than `offhand_room`: what still leaves its lightest full set
-of armour under 70% load beside the heaviest listed weapon and the rings (before it, a second
-great hammer left a SL 100 build no armour at all). It reports the best-ranked power stance partner
-the stats fall short of, with the STR and DEX it needs. Poison and bleed build-up is kept per
+`choose_offhand` only tries left hands that fit: wieldable at the build's stats, two-handed at
+least (one only two-handable still swaps to L2H; a shield must be one-handable), and, for a
+generated build, no heavier than `offhand_room` -- what still leaves its lightest full set of armour
+under 70% load beside the heaviest listed weapon and the rings (before it, a second great hammer
+left a SL 100 build no armour at all). Of those it tries the primary's twin, the lightest shield when
+the primary attacks out of a guard, the build's ten best melee weapons at its stats (each at its
+best infusion there) and the next five that power stance with the primary, and keeps the highest
+stance rate, a tie going to the higher 1H rate and then the higher L2H rate. It always keeps one:
+the hand is empty only when nothing fits. A two-handed build taps Y to one-hand its weapon and use
+the left hand, so an empty one is a grip swap it cannot make; before 2026-10-30 an empty hand won
+every tie, and a Fume Ultra Greatsword build at SL 100, whose ten best melee weapons were all over
+the load left, came with nothing. The slot pane and the loader log say why it was picked
+(`offhand_why`). It reports the best-ranked power stance partner the stats fall short of, with the
+STR and DEX it needs. Poison and bleed build-up is kept per
 weapon and infusion, so a Dark Uchigatana in the left hand does not bleed because a Bleed one is in
 the right.
 

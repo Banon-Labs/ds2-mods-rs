@@ -6357,6 +6357,13 @@ pub const ITEM_SLOT_WEAPON_FLAT_BASE: usize = 0;
 /// legs` order, position for position.
 pub const ITEM_SLOT_ARMOUR_FLAT_BASE: usize = 6;
 
+/// FLAT slot of the first ammunition: arrows 1, arrows 2, bolts 1, bolts 2.
+///
+/// The planner has no ammunition field; the recommender's generated builds fill these. Flat 12-15
+/// map to internal 14-17 in [`ITEM_SLOT_FLAT_TO_INTERNAL`], the four the save's equip block lists
+/// after the rings.
+pub const ITEM_SLOT_AMMO_FLAT_BASE: usize = 12;
+
 /// FLAT slot of the first ring. Four, matching the planner's `ring-1 .. ring-4`.
 pub const ITEM_SLOT_RING_FLAT_BASE: usize = 16;
 
@@ -11167,6 +11174,29 @@ mod item_warn_tests {
         assert!(
             at[1] + super::FE_ITEM_WARN_SIZE[1] <= super::FE_ITEM_CELL_BAR_TOP,
             "and above the durability bar, which is the edge that actually bounds it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod item_slot_tests {
+    /// Each family's flat base lands on its own run of internal slots: the ammunition's four on
+    /// internal 14-17, between the rings (10-13) and the hotbar (18-27).
+    #[test]
+    fn each_flat_base_maps_to_its_family() {
+        let internal =
+            |flat: usize, n: usize| super::ITEM_SLOT_FLAT_TO_INTERNAL[flat..flat + n].to_vec();
+        assert_eq!(
+            internal(super::ITEM_SLOT_AMMO_FLAT_BASE, 4),
+            [14, 15, 16, 17]
+        );
+        assert_eq!(
+            internal(super::ITEM_SLOT_RING_FLAT_BASE, 4),
+            [10, 11, 12, 13]
+        );
+        assert_eq!(
+            internal(super::ITEM_SLOT_HOTBAR_FLAT_BASE, 10),
+            (18..28).collect::<Vec<_>>()
         );
     }
 }
