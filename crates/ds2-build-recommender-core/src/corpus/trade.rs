@@ -400,7 +400,12 @@ impl CorpusBackend {
     ///
     /// The pieces' stat changes and the rings' (their `ring_effects` adds, uncapped) raise the
     /// stats the defense reads; then each ring's defense changes are added.
-    fn build_defense(&self, stats: &Stats, pieces: &[&Wearable; 4], rings: &[usize]) -> Defense {
+    pub(super) fn build_defense(
+        &self,
+        stats: &Stats,
+        pieces: &[&Wearable],
+        rings: &[usize],
+    ) -> Defense {
         let mut eff = *stats;
         for piece in pieces {
             for (stat, add) in eff.iter_mut().zip(piece.alter) {

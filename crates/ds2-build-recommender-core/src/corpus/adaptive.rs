@@ -23,7 +23,7 @@ pub(super) struct Buff {
     pub(super) name: String,
     /// A consumable anyone can use, rather than a spell.
     pub(super) item: bool,
-    add: [f64; 5],
+    pub(super) add: [f64; 5],
     /// Its changes in the script's key order, what `choose_kit` weighs and names.
     pub(super) change: Change,
     /// How long it lasts.
@@ -53,7 +53,7 @@ fn get(change: &[(usize, f64)], kind: usize) -> f64 {
 
 /// The script's `with_defense`: `defense` plus a change by damage type, a physical one on every
 /// physical type as well.
-fn with_defense(defense: &Defense, add: &[f64; 5]) -> Defense {
+pub(super) fn with_defense(defense: &Defense, add: &[f64; 5]) -> Defense {
     let mut out = *defense;
     for (kind, &value) in add.iter().enumerate() {
         if value == 0.0 {

@@ -208,6 +208,7 @@ class Data:
         # (roll_shape); empty when the regulation is not read, and then nobody rolls.
         self.roll_rate = []
         self.throwables,self.heals, self.item_buffs = {}, {}, {}  # regulation_consumables
+        self.stat_buffs, self.status_guards, self.cures = {}, {}, {}  # regulation_consumables
         self.invader_refused = set()  # regulation_consumables: names whose use an invader is refused
         # weapon class (Dagger, Greatsword, ...): MugenMonkey only, joined by normalized name
         mm_w = {}
@@ -2191,6 +2192,18 @@ def hurts_host(d: dict, rid: int) -> bool:
 #: The buff types an item's BUFF_SCALED/BUFF_FLAT name past DAMAGE_TYPE: Rotten Pine Resin's 5
 #: and Bleeding Serum's 6 (REGULATION; their ids are the order STATUS_TERMS gives the two).
 BUFF_STATUS = {5: "poison", 6: "bleed"}
+#: `1000[0] [kind, seconds f32, value]` adds `value` to a stat (docs/DS2-BUILD-MECHANICS.md section 2:
+#: the kinds matched against the Strength/Dexterity/Knowledge/Prayer/Simpleton's rings, VERIFIED).
+#: On an item it lasts `seconds`: the four balms (60235000-60238000) carry kinds 10-13, +5 for 45 s.
+STAT_ADD = (1000, 0)
+STAT_KINDS = {6: "vigor", 7: "endurance", 8: "vitality", 10: "strength", 11: "dexterity", 12: "intelligence",
+              13: "faith", 14: "adaptability"}
+#: `100070[0] [1, 871, category]` ends a status category; 872 in the same word starts one (the
+#: SpEffectAbnormalState.emevd procs, STATUS_PERIODIC). INFERRED from the items that carry 871:
+#: Poison Moss (categories 0 and 8), Monastery and Dragon Charm (0, 8) and Divine Blessing (0-11),
+#: whose text says they cure. Category 0 is poison and 8 toxic (EXE, regulation_status_procs).
+STATUS_END = 871
+STATUS_CATEGORY = {0: "poison", 1: "bleed", 8: "toxic"}
 
 
 def regulation_consumables(data: Data, emevd, members: dict, d: dict, names: dict) -> str:
@@ -2211,6 +2224,7 @@ def regulation_consumables(data: Data, emevd, members: dict, d: dict, names: dic
                                            members["SpEffectActiveItem.emevd"]).events}
     pdp, bullets, items = d["PlayerDamageParam"], d["BulletParam"], d["ItemParam"]
     data.throwables, data.heals, data.item_buffs = {}, {}, {}
+    data.stat_buffs, data.status_guards, data.cures = {}, {}, {}
     usage = d["ItemUsageParam"]
     data.invader_refused = {names[eid] for eid, row in items.items()
                             if int(eid) not in INVADER_CHECK_EXEMPT and eid in names
@@ -2241,6 +2255,14 @@ def regulation_consumables(data: Data, emevd, members: dict, d: dict, names: dic
                 t = w[1][2] & 0xFFFF
                 buff.setdefault("type", DAMAGE_TYPE.get(t) or BUFF_STATUS.get(t))
                 buff.update(flat=w[1][2] >> 16, seconds=w[0][1])
+            elif op == STAT_ADD and len(w) >= 3 and w[0][0] in STAT_KINDS and w[1][1] > 0:
+                sb = data.stat_buffs.setdefault(name, {"add": {}, "seconds": w[1][1]})
+                sb["add"][STAT_KINDS[w[0][0]]] = sb["add"].get(STAT_KINDS[w[0][0]], 0) + w[2][0]
+            elif op == DEF_ADD and len(w) >= 2 and BUFF_STATUS.get(w[1][2] & 0xFF):
+                sg = data.status_guards.setdefault(name, {"add": {}, "seconds": w[0][1]})
+                sg["add"][BUFF_STATUS[w[1][2] & 0xFF]] = w[1][2] >> 16
+            elif op == STATUS_PERIODIC and len(w) >= 3 and w[1][0] == STATUS_END and w[2][0] in STATUS_CATEGORY:
+                data.cures.setdefault(name, set()).add(STATUS_CATEGORY[w[2][0]])
         if buff.get("type"):
             data.item_buffs[name] = {"scale": 0.0, "flat": 0, **buff}
     return (f"{len(data.throwables)} thrown items, {len(data.heals)} heals and {len(data.item_buffs)} weapon "
@@ -6494,6 +6516,229 @@ def thrown_value(data: Data, item: dict, dfn: dict) -> tuple[float, dict]:
     return best
 
 
+def bracket_status(data: Data, corpus: list[Build], sl: int) -> dict[str, list[tuple[float, float]]]:
+    """Per STATUS_PROC status, the build-up per hit before resistance that each build of `sl`'s
+    bracket (bracket_builds) lands with its melee weapon -- the first usable one in MELEE_ORDER, as
+    threat_opponents takes it -- as (weight, build-up) pairs whose weights sum to 1 per build: a
+    recorded infusion is one pair, a MugenMonkey weapon ('?') one per infusion at InfusionModel's
+    probability, as threat_opponents weighs its attack. Not the mean build-up: a 10% chance of a
+    Poison infusion is a tenth of a poisoner, not a tenth of a poisoner's build-up. Spells, throws
+    and resins build up nothing here: their status build-up is not read. Cached on `data`."""
+    cache = data.__dict__.setdefault("_bracket_status", {})
+    key = (id(corpus), sl_bracket(sl))
+    if key in cache:
+        return cache[key]
+    builds = bracket_builds(data, corpus, sl)
+    mm = [b for b in builds if any(inf == "?" for _, inf in b.hands)]
+    dist = {}
+    if mm:
+        model = data.__dict__.get("_infusion_model")
+        if model is None:
+            model = data.__dict__.setdefault("_infusion_model", InfusionModel(infusion_cases(data, corpus)))
+        for c in infusion_cases(data, corpus, recorded=False, builds=mm):
+            dist[(id(mm[c["build"]]), c["weapon"])] = {f: p for p, f in model.predict(c)}
+    out = {s: [] for s in STATUS_PROC}
+    for b in builds:
+        eff = gear_stats(data, effective(data, b), [r for r in b.rings if r in data.rings])
+        per = {s: [(1.0, 0.0)] for s in STATUS_PROC}
+        for slot in MELEE_ORDER:
+            w, inf = b.hands[HAND_SLOTS.index(slot)]
+            if (w in EMPTY or w not in data.weapons or data.weapons[w].get("isShield") or CATALYST.search(w)
+                    or not weapon_ok(data, w, eff, two_hand=(b.grip == 1 and slot == "rh1"))):
+                continue
+            infs = data.weapons[w]["infusions"]
+            ps = ({inf: 1.0} if inf != "?" else dist.get((id(b), w))
+                  or {("No_Infusion" if "No_Infusion" in infs else next(iter(infs))): 1.0})
+            for s in STATUS_PROC:
+                per[s] = [(p, objective_value(data, w, f, eff, s, {})) for f, p in ps.items()]
+            break
+        for s in STATUS_PROC:
+            out[s].append(per[s])
+    cache[key] = out
+    return out
+
+
+def status_taken(buildup: list[list[tuple[float, float]]], cut: float, hits: float,
+                 proc: dict | None) -> tuple[float, float]:
+    """What a build that resists `cut` of a status takes from it in a fight of `hits` hits taken,
+    against opponents whose hits carry the build-ups bracket_status gives: the proc's damage from
+    every opponent whose hits_to_proc, ceil(100 / (build-up x (1 - cut))), is within `hits`, at its
+    weight, averaged over the opponents. One proc a fight at most: after one the status is locked out
+    for proc["lockout"] seconds (regulation_status_procs) and how long a fight runs is not known.
+    (HP, procs per fight)."""
+    if not proc or not buildup:
+        return 0.0, 0.0
+    procs = 0.0
+    for pairs in buildup:
+        for w, p in pairs:
+            b = p * (1 - min(1.0, max(0.0, cut)))
+            if b > 0 and math.ceil(100 / b - 1e-9) <= hits:
+                procs += w
+    share = procs / len(buildup)
+    return share * proc["damage"], share
+
+
+#: How much the status_guards' type 5-9 defense change adds to a status cut: INFERRED. The
+#: SpEffect defense reader adds 0.01 x each status entry to the caller's array as it does an
+#: element's (ChrGameParamCalculator slot +0x250, docs/DS2-DPS-MECHANICS.md "Defense from a
+#: SpEffect"), and the status cut is resistance x 0.01 (status_cut); that the status entries reach
+#: the cut status_cut models was not read.
+STATUS_GUARD_UNIT = 0.01
+
+
+def buff_edges(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, stats: dict, rings: list[str],
+               armor: list[str], dfn, usable) -> list[tuple[float, str, str, str, float]]:
+    """The eaten buffs choose_kit ranks for its buff slot, valued in kit_edge's unit, ln(R' / R)
+    while the buff lasts: a build at levelled `stats` wearing `rings` and `armor` (keys) whose
+    primary is weapon+inf, an invader at `sl` hitting the defender `dfn`. (edge, name, why, kind,
+    seconds) for every item `usable` allows whose edge is above 0, best first.
+
+    * guard: data.defense_buffs from an item (the burrs and Dark Troches), ln(T / T'): T the
+      bracket's mean hit taken (hit_taken_at) at the build's own defense (build_defense: armour,
+      stats and rings), T' with the item's defense added (with_defense).
+    * stat: data.stat_buffs (the balms), every term at the raised stats (each capped at 99):
+      ln(HP' / HP) + ln(T / T') + ln(D' / D), HP hit_points at the rings' stats, D the primary's
+      hit on `dfn` (objective_value "damage") -- STR and DEX raise HP and physical defense, INT and
+      FTH HP and the elemental bases, as well as the attack.
+
+    Why these two and nothing else (2026-10-30, scripts/ds2-consumables.py values): every one is used with
+    the same ItemTypeParam row (300) and the same ItemParam.motionSpeedRate (0.7), so whatever
+    their use takes -- the animation's length is not read -- it is the same for each, and they
+    differ only in what they do and how long (90 s, the balms 45 s). A cure or a status
+    resistance item (Poison Moss, Common Fruit, Red Leech Troches) is valued by kit_edge but not
+    ranked: what Common Fruit's poison +20 does to the gauge is INFERRED (STATUS_GUARD_UNIT), and
+    a cure's worth turns on how soon after a proc it is eaten, which nothing read gives."""
+    eff = gear_stats(data, stats, rings)
+
+    def at(st: dict) -> tuple[float, float, float, dict]:
+        e = gear_stats(data, st, rings)
+        mine = build_defense(data, Build("", st, armor, [], 0, rings, []))
+        return (hit_points(data, e), hit_taken_at(data, corpus, sl, e, mine),
+                max(objective_value(data, weapon, inf, e, "damage", dfn, rings), 1e-9), mine)
+
+    hp, taken, dealt, mine = at(stats)
+    out = []
+    for n, b in data.defense_buffs.items():
+        if b["source"] != "item" or not usable(n):
+            continue
+        v = math.log(taken / hit_taken_at(data, corpus, sl, eff, with_defense(mine, b["add"])))
+        if v > 0:
+            out.append((v, n, " ".join(f"{k} +{x}" for k, x in b["add"].items())
+                        + f" for {b['seconds']:g} s: exchange +{100 * v:.2f}%", "guard", b["seconds"]))
+    for n, b in data.stat_buffs.items():
+        if not usable(n):
+            continue
+        h2, t2, d2, _ = at({s: min(99, x + b["add"].get(s, 0)) for s, x in stats.items()})
+        v = math.log(h2 / hp) + math.log(taken / t2) + math.log(d2 / dealt)
+        if v > 0:
+            out.append((v, n, " ".join(f"{LABEL[s]} +{x}" for s, x in b["add"].items())
+                        + f" for {b['seconds']:g} s: exchange +{100 * v:.2f}%", "stat", b["seconds"]))
+    return sorted(out, key=lambda x: (x[0], x[1], x[2]), reverse=True)
+
+
+def kit_edge(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, sl: int, defender=None) -> dict:
+    """Every quick item an invader may use, valued for generated build `g` in one unit: how much
+    using it moves the fight's exchange, ln(R' / R), where R = (my max HP / their mean hit on me) /
+    (their max HP / my hit on them) -- the hits they need to kill me over the hits I need to kill
+    them, the product SPEND "ehp" spends stat points by. A buff that cuts their hit by 10% and one
+    that raises mine by 10% score alike, as do a heal and a throw of the same share of a life.
+    scripts/ds2-consumables.py `values` prints it; choose_kit ranks only buff_edges' part of it.
+
+    * guard and stat: buff_edges (only those above 0).
+    * resin (data.item_buffs, an element, the primary buffable): ln((d + gain) / d) on an MV-1 hit,
+      as choose_kit's gain.
+    * status (data.status_guards) and cure (data.cures): the status HP a fight takes
+      (status_taken: bracket_status's build-up, the build's status_cut, a fight of max HP / T hits)
+      comes off max HP, and the item gives some back: a guard by raising the cut (STATUS_GUARD_UNIT,
+      INFERRED), a cure all of it (an upper bound: the ticks before it is used, and its use time,
+      are not counted).
+    These four last while active: per fight when the fight is no longer than the item's seconds,
+    which choose_kit cannot know (no fight length is read).
+    * heal (data.heals): one use, ln(1 + healed / max HP).
+    * throw (data.throwables): one throw, -ln(1 - thrown_value / their max HP), their max HP the
+      bracket builds' mean.
+    Use time is not counted for any: the use animations are not read (UNKNOWN).
+
+    Returns hp, taken, dealt, their_hp, hits (max HP / taken), status {status: share, n, cut, procs,
+    damage}, items [(edge, name, kind, seconds, why)] best first, refused [(name, why)]."""
+    stats = g["stats"]
+    rings = [k for k in (data.sp_key.get(norm(n)) for n in dict.fromkeys(g["rings"])) if k in data.rings][:4]
+    armor = armor_keys(data, g["armor"])
+    gear = ring_gear(data)
+    factor = math.prod(gear[r]["hp"] for r in rings if r in gear)
+    dfn, _ = defender_defense(data, corpus, sl, defender)
+    usable = lambda n: (HELD_ITEMS is None or norm(n) in HELD_ITEMS) and n not in data.invader_refused
+
+    eff = gear_stats(data, stats, rings)
+    hp = hit_points(data, eff) * factor
+    taken = hit_taken_at(data, corpus, sl, eff, build_defense(data, Build("", stats, armor, [], 0, rings, [])))
+    dealt = objective_value(data, weapon, inf, eff, "damage", dfn, rings)
+    hits = hp / taken
+    theirs = [hit_points(data, gear_stats(data, effective(data, b), [r for r in b.rings if r in data.rings]))
+              * math.prod(gear[r]["hp"] for r in b.rings if r in gear) for b in bracket_builds(data, corpus, sl)]
+    their_hp = float(np.mean(theirs)) if theirs else float(hp)
+    me = Build("", stats, armor, [], 0, rings, [])
+    threat = bracket_status(data, corpus, sl)
+    cuts = {s: status_cut(data, me, s) for s in STATUS_PROC}
+    status = {}
+    for s in STATUS_PROC:
+        dmg, share = status_taken(threat[s], cuts[s], hits, data.status_procs.get(s))
+        status[s] = {"share": sum(w for pairs in threat[s] for w, p in pairs if p > 0) / max(len(threat[s]), 1), "n": len(threat[s]),
+                     "cut": cuts[s], "procs": share, "damage": dmg}
+    lost = sum(t["damage"] for t in status.values())
+    items = [(v, n, kind, sec, why) for v, n, why, kind, sec
+             in buff_edges(data, corpus, weapon, inf, sl, stats, rings, armor, dfn, usable)]
+    refused = []
+    for n in sorted(set(data.defense_buffs) | set(data.stat_buffs) | set(data.item_buffs) | set(data.status_guards)
+                    | set(data.cures) | set(data.heals) | set(data.throwables)):
+        if not usable(n):
+            if n in data.invader_refused:
+                refused.append((n, "an invader may not use it (data.invader_refused)"))
+            continue
+        rb = data.item_buffs.get(n)
+        ar = attack_rating(data, weapon, inf, eff, rings)
+        if rb and rb["type"] in ELEMENTS:
+            if buffable(ar):
+                base = hit_damage(ar, respond(dfn, ar), 1.0)
+                add = dict(ar)
+                add[rb["type"]] = add.get(rb["type"], 0) + buff_attack(data, rb, weapon, eff)
+                gain = hit_damage(add, respond(dfn, add), 1.0) - base
+                items.append((math.log((base + gain) / base), n, "resin", rb["seconds"],
+                              f"+{gain:.0f} on an MV-1 hit of {base:.0f}"))
+            else:
+                items.append((0.0, n, "resin", rb["seconds"], "the primary has an element: no resin coats it"))
+        elif rb:
+            items.append((0.0, n, "resin", rb["seconds"], f"{rb['type']} build-up: its gauge points are not read"))
+        sg = data.status_guards.get(n)
+        if sg:
+            before, after = lost, 0.0
+            for s in STATUS_PROC:
+                c = cuts[s] + sg["add"].get(s, 0) * STATUS_GUARD_UNIT
+                after += status_taken(threat[s], c, hits, data.status_procs.get(s))[0]
+            items.append((math.log((hp - after) / (hp - before)), n, "status", sg["seconds"],
+                          " ".join(f"{s} +{x}" for s, x in sg["add"].items())
+                          + f" (INFERRED: cut +{STATUS_GUARD_UNIT:g} a point): status HP a fight "
+                          f"{before:.0f} -> {after:.0f}"))
+        cu = data.cures.get(n)
+        if cu:
+            cured = sum(status[s]["damage"] for s in cu if s in status)
+            items.append((math.log(hp / (hp - cured)), n, "cure", 0.0,
+                          f"ends {', '.join(sorted(cu))}: {cured:.0f} HP a fight at most"))
+        h = data.heals.get(n)
+        if h:
+            got = min(h["hp"], hp)
+            items.append((math.log(1 + got / hp), n, "heal", 0.0, f"{got} of {hp:.0f} HP in {h['seconds']:g} s, one use"))
+        t = data.throwables.get(n)
+        if t:
+            v = thrown_value(data, t, dfn)[0]
+            items.append((-math.log(1 - min(v, their_hp - 1) / their_hp) if v > 0 else 0.0, n, "throw", 0.0,
+                          f"{v:.0f} of their {their_hp:.0f} HP a throw (flat, unscaled)" if v > 0
+                          else "its status build-up is not read"))
+    items.sort(key=lambda x: -x[0])
+    return {"hp": hp, "taken": taken, "dealt": dealt, "their_hp": their_hp, "hits": hits, "status": status,
+            "items": items, "refused": refused}
+
+
 def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, sl: int,
                defender=None) -> dict:
     """What a generated build `g` (generate_build, for `weapon`+`inf` at `sl`) carries beyond its
@@ -6503,11 +6748,15 @@ def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, 
       second, its HP capped at the build's max HP (hit_points x the rings' HP factor), is highest
       -- an overheal is wasted; the resin (data.item_buffs, an element) that adds the most damage
       to one MV-1 hit of the primary against the bracket defender, when the primary is buffable;
-      the best throw of each THROWN_GROUPS group by thrown_value; and the defensive item
-      (data.defense_buffs, source "item") whose defense is worth most under threat_mix, the corpus's
-      damage-type mix. er-mods-rs's pouch keeps a pick only if it raises the kit's score; here a
-      pick with a value of 0 is left out. Short of QUICK_MIN, the runners-up of the heal, throw,
-      defensive item and resin pools fill the rest in turn; then ALWAYS_ITEMS. Only HELD_ITEMS, and only what an
+      the best throw of each THROWN_GROUPS group by thrown_value; and the eaten buff -- a burr, the
+      Dark Troches or a balm -- that moves the fight's exchange most (buff_edges, kit_edge's unit:
+      a burr by the bracket's hit it cuts at the build's own defense, a balm by the HP, defense and
+      damage its stat adds). er-mods-rs's pouch keeps a pick only if it raises the kit's score;
+      here a pick with a value of 0 is left out. Short of QUICK_MIN, the runners-up of the heal,
+      throw, eaten buff and resin pools fill the rest in turn; then ALWAYS_ITEMS. The heal, resin,
+      throws and buff keep a slot each: a throw or a heal is worth something per use and a buff
+      per fight, and how many uses a fight has, or how long each takes, is not read, so the four
+      are not ranked against each other. Only HELD_ITEMS, and only what an
       invader may use: nothing in data.invader_refused, the Estus Flask included unless
       INVADER_CHECK_EXEMPT names it. Every heal the regulation has but the Estus is refused, so
       an invader's kit has no other heal.
@@ -6558,16 +6807,13 @@ def choose_kit(data: Data, corpus: list[Build], g: dict, weapon: str, inf: str, 
                              for v, n in ((thrown_value(data, t, dfn)[0], n) for n, t in data.throwables.items()
                                           if any(w in n for w in words) and usable(n)) if v > 0), reverse=True)
               for group, words in THROWN_GROUPS.items()}
-    mix = threat_mix(data, corpus, sl)
-    guards = sorted(((v, n, " ".join(f"{k} +{x}" for k, x in b["add"].items()) + f" for {b['seconds']:g} s")
-                     for v, n, b in ((sum(mix.get(k, 0) * x for k, x in b["add"].items()), n, b)
-                                     for n, b in data.defense_buffs.items() if b["source"] == "item" and usable(n))
-                     if v > 0), reverse=True)
-    for pool in (heals, resins, *throws.values(), guards):
+    buffs = [x[:3] for x in buff_edges(data, corpus, weapon, inf, sl, stats, rings, armor_keys(data, g["armor"]),
+                                       dfn, usable)]
+    for pool in (heals, resins, *throws.values(), buffs):
         if pool:
             items.append(pool[0][1:])
-    # QUICK_MIN: the next-best heal, throw (either group), defensive item and resin in turn
-    spare = [heals[1:], sorted((x for t in throws.values() for x in t[1:]), reverse=True), guards[1:], resins[1:]]
+    # QUICK_MIN: the next-best heal, throw (either group), eaten buff and resin in turn
+    spare = [heals[1:], sorted((x for t in throws.values() for x in t[1:]), reverse=True), buffs[1:], resins[1:]]
     while len(items) < QUICK_MIN and any(spare):
         for pool in spare:
             if pool and len(items) < QUICK_MIN:
@@ -6982,10 +7228,12 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             of its hits, flat comma-separated
 #                                                             in DMG order
 #   IR name                                                   data.invader_refused, sorted
+#   SB name seconds stat:value,..                             data.stat_buffs, in its order: stat a
+#                                                             STATS index
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 25"
+BACKEND_FORMAT = "ds2-build-recommender-data 26"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -7262,6 +7510,9 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                                              for h in t["hits"])]))
     for name in sorted(data.invader_refused):
         out.append("\t".join(["IR", name]))
+    for name, b in data.stat_buffs.items():
+        out.append("\t".join(["SB", name, _num(float(b["seconds"])),
+                              ",".join(f"{STATS.index(s)}:{_num(v)}" for s, v in b["add"].items())]))
     floors = bracket_floors(data, corpus, r1)
     for i, (lo, _) in enumerate(SL_BRACKETS):
         dfn, _ = bracket_defense(data, corpus, lo)
@@ -8376,6 +8627,14 @@ def status_selftest_cases() -> list:
         ("status cut: poison stat row + armour", round(status_cut(cut_data, hat, "poison"), 6), 0.32),
         # bleed row trunc((60 + 4) / 4) = 16 -> 36 %, plus 90 % from the coat: clamped to 1
         ("status cut: clamped to 1", status_cut(cut_data, coat, "bleed"), 1.0),
+        # three opponents: a sure poisoner (40 a hit), a 30% one (MugenMonkey), none. At cut 0.2 the
+        # 40 needs ceil(100 / 32) = 4 hits; a 5-hit fight takes 1.3 procs over 3 opponents
+        ("status taken: weights, not mean build-up",
+         tuple(round(x, 6) for x in status_taken([[(1.0, 40.0)], [(0.3, 40.0), (0.7, 0.0)], [(1.0, 0.0)]],
+                                                 0.2, 5, bleed)), (round(1.3 / 3 * 200, 6), round(1.3 / 3, 6))),
+        ("status taken: one proc a fight, however many hits",
+         status_taken([[(1.0, 100.0)]], 0.0, 50, bleed), (200.0, 1.0)),
+        ("status taken: a fight too short to proc", status_taken([[(1.0, 40.0)]], 0.2, 3, bleed), (0.0, 0.0)),
     ]
 
 

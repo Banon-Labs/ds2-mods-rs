@@ -60,7 +60,7 @@ mod trade;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 25";
+pub const FORMAT: &str = "ds2-build-recommender-data 26";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -806,10 +806,11 @@ pub struct CorpusBackend {
     ring_defense: Vec<(usize, adaptive::Change)>,
     /// The script's `data.defense_buffs`, in its order.
     buffs: Vec<adaptive::Buff>,
-    /// What a build's quick slots can carry: the script's `data.heals`, `data.item_buffs` and
-    /// `data.throwables`, each in its order.
+    /// What a build's quick slots can carry: the script's `data.heals`, `data.item_buffs`,
+    /// `data.stat_buffs` and `data.throwables`, each in its order.
     heals: Vec<kit::Heal>,
     item_buffs: Vec<kit::ItemBuff>,
+    stat_buffs: Vec<kit::StatBuff>,
     throwables: Vec<kit::Throwable>,
     /// The script's `data.invader_refused`: the items whose use check refuses an invader.
     invader_refused: Vec<String>,
@@ -1055,7 +1056,7 @@ impl CorpusBackend {
                 });
             }
             "SC" => self.parse_stamina(line, &mut fields)?,
-            "EL" | "HL" | "IB" | "TH" | "IR" => self.parse_kit(tag, line, &mut fields)?,
+            "EL" | "HL" | "IB" | "TH" | "IR" | "SB" => self.parse_kit(tag, line, &mut fields)?,
             "CH" => self.parse_chain(line, &mut fields)?,
             "PO" => self.parse_poise(line, &mut fields)?,
             "FS" | "XT" => self.parse_trade(tag, line, &mut fields)?,
@@ -4921,6 +4922,48 @@ mod tests {
                 &Limits::NONE,
             )
             .unwrap_or_else(|| panic!("{weapon}: no build"))
+    }
+
+    /// The balms are read (`SB`: `SpEffectActiveItem.emevd` `1000[0]` kinds 10-13, +5 for 45 s)
+    /// and ranked with the burrs on one measure: the buff a generated build carries is the one
+    /// whose `exchange` share is highest, and every runner-up that fills a quick slot names a
+    /// smaller share.
+    #[test]
+    fn the_buff_slot_ranks_burrs_and_balms_on_one_measure() {
+        let (backend, _) = with_and_without_trades();
+        let balms: Vec<String> = backend
+            .stat_buffs
+            .iter()
+            .map(|b| format!("{} {:?} {}", b.name, b.add, b.seconds))
+            .collect();
+        assert_eq!(
+            balms,
+            [
+                format!("Old Growth Balm {:?} 45", [(STR, 5)]),
+                format!("Vine Balm {:?} 45", [(DEX, 5)]),
+                format!("Blackweed Balm {:?} 45", [(INT, 5)]),
+                format!("Goldenfruit Balm {:?} 45", [(FTH, 5)]),
+            ]
+        );
+        let share = |why: &str| -> Option<f64> {
+            let (_, rest) = why.split_once(": exchange +")?;
+            rest.split('%').next()?.parse().ok()
+        };
+        let build = generated(backend, "Fume_Ultra_Greatsword");
+        let buffs: Vec<(bool, f64)> = build
+            .kit
+            .items
+            .iter()
+            .filter_map(|pick| Some((pick.why.ends_with(kit::FILLS), share(&pick.why)?)))
+            .collect();
+        let Some(&(false, best)) = buffs.first() else {
+            panic!("no buff slot: {:?}", build.kit.items);
+        };
+        assert!(best > 0.0);
+        assert!(
+            buffs[1..].iter().all(|&(fill, x)| fill && x <= best),
+            "{buffs:?}"
+        );
     }
 
     /// The report: a Dark Fume Ultra Greatsword at SL 100 came out VIT 6, its load leaving about

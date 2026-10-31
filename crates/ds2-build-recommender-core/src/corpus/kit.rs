@@ -4,7 +4,8 @@
 //!
 //! The quick items are the Estus Flask, the fastest heal (its HP capped at the build's max HP), the
 //! resin that adds the most to one hit of the primary, the best knife and the best urn by flat
-//! damage on the defender, and the defensive item worth most under the bracket's damage mix; short
+//! damage on the defender, and the eaten buff -- a burr, the Dark Troches or a balm -- that moves
+//! the fight's exchange most ([`CorpusBackend::buff_edges`]); short
 //! of [`QUICK_MIN`], the runners-up fill the rest; then a Green Blossom and Repair Powder
 //! ([`ALWAYS_ITEMS`]). None is an item the game refuses an invader
 //! ([`CorpusBackend::invader_refuses`]), which today leaves every heal but the Estus Flask out.
@@ -16,10 +17,11 @@ use ds2_build_import_core::Infusion;
 
 use super::ranged::Kind;
 use super::{
-    Against, Ar, CorpusBackend, Defending, FTH, Factor, Hit, INT, Stats, Weapon, bad, float, py_sum,
+    Against, Ar, CorpusBackend, Defending, FTH, Factor, Hit, INT, Stats, Weapon, bad, float,
+    py_max, py_sum,
 };
 use crate::backend::{AMMO_SLOTS, Kit, KitPick, LauncherPick, QUICK_MIN, QUICK_SLOTS};
-use crate::model::Objective;
+use crate::model::{Objective, STAT_LABELS};
 
 /// The script's `EQUIP_CAP`: the share of max load a build is kept under.
 const EQUIP_CAP: f64 = 0.70;
@@ -31,7 +33,7 @@ const THROWN_GROUPS: [&[&str]; 2] = [&["Knife"], &["Urn", "Firebomb"]];
 const DAMAGE_NAMES: [&str; 5] = ["physical", "magic", "fire", "lightning", "dark"];
 
 /// What every quick item filling [`QUICK_MIN`] adds to the reason it was picked on.
-const FILLS: &str = "; fills the quick slots";
+pub(super) const FILLS: &str = "; fills the quick slots";
 
 /// The script's `ALWAYS_ITEMS`: quick items every kit carries after its picks and the
 /// [`QUICK_MIN`] fill, as (name, why). Green Blossom (60310000) is the only consumable whose text
@@ -61,6 +63,15 @@ pub(super) struct ItemBuff {
     scale: f64,
     flat: f64,
     seconds: f64,
+}
+
+/// A stat a consumable raises for a while (the balms): the script's `data.stat_buffs` row.
+#[derive(Clone, Debug)]
+pub(super) struct StatBuff {
+    pub(super) name: String,
+    pub(super) seconds: f64,
+    /// (stat, an index into [`Stats`]; how much), in the script's key order.
+    pub(super) add: Vec<(usize, i32)>,
 }
 
 /// A thrown item: the script's `data.throwables` row.
@@ -109,7 +120,7 @@ impl CorpusBackend {
         self.invader_refused.iter().any(|name| name == item)
     }
 
-    /// Read an `EL`, `HL`, `IB`, `TH` or `IR` record.
+    /// Read an `EL`, `HL`, `IB`, `TH`, `IR` or `SB` record.
     pub(super) fn parse_kit<'a>(
         &mut self,
         tag: &str,
@@ -149,6 +160,24 @@ impl CorpusBackend {
             "IR" => {
                 let name = name()?;
                 self.invader_refused.push(name);
+            }
+            "SB" => {
+                let name = name()?;
+                let seconds = float(fields.next(), line)?;
+                let mut add = Vec::new();
+                for pair in fields.next().unwrap_or("").split(',') {
+                    let (stat, value) = pair
+                        .split_once(':')
+                        .and_then(|(stat, value)| {
+                            Some((
+                                stat.parse::<usize>().ok().filter(|&stat| stat < 9)?,
+                                value.parse::<i32>().ok()?,
+                            ))
+                        })
+                        .ok_or_else(|| bad(line, "stat:value"))?;
+                    add.push((stat, value));
+                }
+                self.stat_buffs.push(StatBuff { name, seconds, add });
             }
             "IB" => {
                 let name = name()?;
@@ -235,6 +264,113 @@ impl CorpusBackend {
             }
         }
         best
+    }
+
+    /// The script's `buff_edges`: the eaten buffs `choose_kit` ranks for its buff slot -- the
+    /// burrs and Dark Troches (`data.defense_buffs` from an item) and the balms
+    /// (`data.stat_buffs`) -- each valued as `ln(R' / R)` while it lasts, `R` the hits the
+    /// bracket needs to kill the build over the hits it needs to kill them. A defense buff is
+    /// `ln(T / T')`, `T` the bracket's mean hit taken at the build's own defense (armour, stats
+    /// and rings) and `T'` with the buff added; a balm adds `ln` of the max HP, hit-taken and
+    /// damage ratios at the stats it raises (each capped at 99). Above 0 only, best first. The
+    /// script's docstring holds why these and only these are ranked against each other.
+    // DEBT: ds2-mods-rs-59p7 -- the script's own argument list; bundle the build's question.
+    #[allow(clippy::too_many_arguments)]
+    fn buff_edges(
+        &self,
+        primary: &Weapon,
+        infusion: Infusion,
+        stats: &Stats,
+        rings: &[usize],
+        armor: &[String],
+        sl: u32,
+        defending: &Defending<'_>,
+    ) -> Vec<Ranked> {
+        // The script's `armor_keys`: the first piece of each slot with the name, else `Naked`. A
+        // build generated with no armour names none, and then wears no piece at all, as the
+        // script's `_armor_defense` over an empty list.
+        let pieces: Vec<_> = armor
+            .iter()
+            .zip(&self.wearable)
+            .filter_map(|(name, slot)| {
+                slot.iter()
+                    .find(|piece| piece.name == *name)
+                    .or_else(|| slot.iter().find(|piece| piece.key == "Naked"))
+            })
+            .collect();
+        // The script's `at`: max HP, mean hit taken and damage dealt at levelled stats `st`, and
+        // the build's own defense there.
+        let at = |st: &Stats| {
+            let eff = self.gear_stats(st, rings);
+            let mine = self.build_defense(st, &pieces, rings);
+            let dealt =
+                self.objective_value(primary, infusion, &eff, Objective::Damage, defending, rings);
+            (
+                self.hit_points(&eff),
+                self.hit_taken_at(sl, &eff, &mine),
+                py_max(dealt, 1e-9),
+                mine,
+            )
+        };
+        let eff = self.gear_stats(stats, rings);
+        let (hp, taken, dealt, mine) = at(stats);
+        let mut out: Vec<Ranked> = Vec::new();
+        for buff in self
+            .buffs
+            .iter()
+            .filter(|buff| buff.item && !self.invader_refuses(&buff.name))
+        {
+            let with = super::adaptive::with_defense(&mine, &buff.add);
+            let value = (taken / self.hit_taken_at(sl, &eff, &with)).ln();
+            if value > 0.0 {
+                let adds: Vec<String> = buff
+                    .change
+                    .iter()
+                    .map(|&(kind, x)| format!("{} +{x}", DAMAGE_NAMES[kind]))
+                    .collect();
+                out.push((
+                    value,
+                    buff.name.clone(),
+                    format!(
+                        "{} for {} s: exchange +{:.2}%",
+                        adds.join(" "),
+                        py_g(buff.seconds),
+                        100.0 * value
+                    ),
+                ));
+            }
+        }
+        for buff in self
+            .stat_buffs
+            .iter()
+            .filter(|buff| !self.invader_refuses(&buff.name))
+        {
+            let mut raised = *stats;
+            for &(stat, add) in &buff.add {
+                raised[stat] = (raised[stat] + add).min(99);
+            }
+            let (hp2, taken2, dealt2, _) = at(&raised);
+            let value = (hp2 / hp).ln() + (taken / taken2).ln() + (dealt2 / dealt).ln();
+            if value > 0.0 {
+                let adds: Vec<String> = buff
+                    .add
+                    .iter()
+                    .map(|&(stat, x)| format!("{} +{x}", STAT_LABELS[stat]))
+                    .collect();
+                out.push((
+                    value,
+                    buff.name.clone(),
+                    format!(
+                        "{} for {} s: exchange +{:.2}%",
+                        adds.join(" "),
+                        py_g(buff.seconds),
+                        100.0 * value
+                    ),
+                ));
+            }
+        }
+        sort_desc(&mut out);
+        out
     }
 
     /// The script's `choose_kit`: the quick items, launcher and ammunition of a generated build
@@ -360,35 +496,12 @@ impl CorpusBackend {
             })
             .collect();
 
-        let mix = self.bracket_mix(sl);
-        let mut guards: Vec<Ranked> = self
-            .buffs
-            .iter()
-            .filter(|buff| buff.item && !self.invader_refuses(&buff.name))
-            .map(|buff| {
-                let value = py_sum(buff.change.iter().map(|&(kind, x)| mix[kind] * x));
-                (value, buff)
-            })
-            .filter(|(value, _)| *value > 0.0)
-            .map(|(value, buff)| {
-                let adds: Vec<String> = buff
-                    .change
-                    .iter()
-                    .map(|&(kind, x)| format!("{} +{x}", DAMAGE_NAMES[kind]))
-                    .collect();
-                (
-                    value,
-                    buff.name.clone(),
-                    format!("{} for {} s", adds.join(" "), py_g(buff.seconds)),
-                )
-            })
-            .collect();
-        sort_desc(&mut guards);
+        let buffs = self.buff_edges(primary, infusion, stats, rings, armor, sl, &defending);
 
         for pool in [&heals, &resins]
             .into_iter()
             .chain(throws.iter())
-            .chain([&guards])
+            .chain([&buffs])
         {
             if let Some((_, name, why)) = pool.first() {
                 items.push(KitPick {
@@ -397,7 +510,7 @@ impl CorpusBackend {
                 });
             }
         }
-        // QUICK_MIN: the next-best heal, throw (either group), defensive item and resin in turn.
+        // QUICK_MIN: the next-best heal, throw (either group), eaten buff and resin in turn.
         let mut thrown_rest: Vec<Ranked> = throws
             .iter_mut()
             .flat_map(|pool| pool.drain(..).skip(1))
@@ -406,7 +519,7 @@ impl CorpusBackend {
         let mut spare: Vec<std::collections::VecDeque<Ranked>> = [
             heals.into_iter().skip(1).collect(),
             thrown_rest.into_iter().collect(),
-            guards.into_iter().skip(1).collect(),
+            buffs.into_iter().skip(1).collect(),
             resins.into_iter().skip(1).collect(),
         ]
         .into();
