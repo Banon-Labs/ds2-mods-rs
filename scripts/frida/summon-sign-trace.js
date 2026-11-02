@@ -1353,6 +1353,9 @@ function touchSummonLeave(ctx, ret) {
     }
   } catch (e) { phantomType = e.message; }
   send({ family: 'summon-sign', tag: 'touch_summon.ret', ret: ret.toString(), phantomType, spCtrl, cd38: globalThis.__auraCd });
+  globalThis.__lastSummoned = ret;
+  // Diff the mimic against the player once it has stood in the world for a few seconds.
+  if (summonMode.name === 'mimic' && globalThis.__mimicDiff) setTimeout(() => globalThis.__mimicDiff(), 5000);
   // Copy it: the onLeave return value reads as null after the callback (measured: 0x168 faults).
   if (!ret.isNull()) globalThis.__movedChr = { chr: ptr(ret.toString()), frames: 0 };
 }
@@ -1678,9 +1681,100 @@ globalThis.__asmBuild = Interceptor.attach(at(0x0035a650), {
         playerShaped: d.add(0x11).readU8(), copyFlags: hexOf(d.add(0x12), 52),
         statusRow: row.isNull() ? null : hexOf(row, 32),
       });
+      this.acted = false;
+      if (!MIMIC_WRITE || summonMode.name !== 'mimic' || globalThis.__summoning !== true) return;
+      if (d.readU32() !== 866001 || d.add(0x11).readU8() !== 1 || row.isNull()) return;
+      d.add(0x48).writePointer(mimicRow(row));
+      globalThis.__mimicNpc = args[3];
+      this.acted = true;
+      send({ family: 'summon-sign', tag: 'mimic.row_patched', npc: args[3].toString(), row: hexOf(globalThis.__mimicRow, 0xd4) });
     } catch (e) {
       send({ family: 'summon-sign', tag: 'mimic.asm_build', error: e.message });
     }
+  },
+  onLeave(ret) {
+    if (!this.acted) return;
+    // Step 2: the player's face onto the NPC's model, through the copy the menu model uses.
+    try {
+      const npcModel = ret.add(0x30).readPointer();
+      const playerModel = playerAsmCtrl().add(0x30).readPointer();
+      copyModelFace(npcModel, playerModel);
+      send({ family: 'summon-sign', tag: 'mimic.face_copied', npcModel: npcModel.toString(), playerModel: playerModel.toString() });
+    } catch (e) {
+      send({ family: 'summon-sign', tag: 'mimic.face_copied', error: e.message });
+    }
+  },
+});
+
+// Mimic steps 1, 3 and 4 ($S/mimic.md). The NPC's NpcPlayerStatusParam row (0xd4 bytes) is copied
+// and rewritten from the player: sex/living/body from parts +0x2c/+0x2d/+0x20, faceType 1 (FaceGen),
+// the eleven stat levels from PlayerParam +8 (assignAttributes 0x14038aca0 writes them back there in
+// the same order), and every equipment id from the player's ChrAsmEquip slot entry +4. FUN_14035a3d0
+// then applies that row through the game's own setters, and its onLeave re-equips weapons, armour,
+// ammo and spells with the player's whole entry so reinforcement, infusion and durability carry over.
+const MIMIC_WRITE = true;
+const copyModelFace = new NativeFunction(at(0x00339830), 'void', ['pointer', 'pointer']);
+const setEquipSlot = new NativeFunction(at(0x003463d0), 'void', ['pointer', 'int', 'pointer']);
+const MIMIC_ROW_SLOTS = [
+  [0x6c, 1], [0x70, 3], [0x74, 5], [0x78, 0], [0x7c, 2], [0x80, 4],
+  [0x84, 6], [0x88, 7], [0x8c, 8], [0x90, 9],
+  [0x94, 16], [0x98, 17], [0x9c, 18], [0xa0, 19],
+  [0xa4, 12], [0xa8, 13], [0xac, 14], [0xb0, 15],
+  ...Array.from({ length: 10 }, (_, k) => [0x1c + k * 4, 20 + k]),
+  ...Array.from({ length: 10 }, (_, k) => [0x44 + k * 4, 30 + k]),
+];
+function playerCtrl() {
+  return GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer();
+}
+function asmCtrlOf(chr) {
+  return new NativeFunction(chr.readPointer().add(0x120).readPointer(), 'pointer', ['pointer'])(chr);
+}
+const playerAsmCtrl = () => asmCtrlOf(playerCtrl());
+function mimicRow(row) {
+  const out = globalThis.__mimicRow = globalThis.__mimicRow || Memory.alloc(0xd4);
+  Memory.copy(out, row, 0xd4);
+  const pc = playerCtrl();
+  const asm = playerAsmCtrl();
+  const parts = asm.add(0x28).readPointer();
+  const equip = asm.add(0x20).readPointer().add(8);
+  out.writeU8(parts.add(0x2c).readU8());
+  out.add(1).writeU8(parts.add(0x2d).readU8());
+  out.add(2).writeU8(parts.add(0x20).readU8());
+  out.add(3).writeU8(1);
+  const param = pc.add(0x490).readPointer();
+  for (let k = 0; k < 11; k++) out.add(8 + k).writeU8(Math.min(255, param.add(8 + k * 2).readU16()));
+  for (const [off, slot] of MIMIC_ROW_SLOTS) out.add(off).writeU32(equip.add(slot * 0x14 + 4).readU32());
+  return out;
+}
+const MIMIC_ENTRY_SLOTS = [...Array.from({ length: 16 }, (_, k) => k), ...Array.from({ length: 14 }, (_, k) => 30 + k)];
+if (globalThis.__mimicApply) globalThis.__mimicApply.detach();
+globalThis.__mimicApply = Interceptor.attach(at(0x0035a3d0), {
+  onEnter(args) {
+    this.npc = null;
+    if (!MIMIC_WRITE || !globalThis.__mimicNpc || !args[0].equals(globalThis.__mimicNpc)) return;
+    args[1] = globalThis.__mimicRow;
+    this.npc = args[0];
+  },
+  onLeave() {
+    if (!this.npc) return;
+    try {
+      const npcEquip = new NativeFunction(asmCtrlOf(this.npc).readPointer().add(0x60).readPointer(), 'pointer', ['pointer'])(asmCtrlOf(this.npc));
+      const playerEquip = playerAsmCtrl().add(0x20).readPointer().add(8);
+      const entry = globalThis.__mimicEntry = globalThis.__mimicEntry || Memory.alloc(0x14);
+      for (const slot of MIMIC_ENTRY_SLOTS) {
+        Memory.copy(entry, playerEquip.add(slot * 0x14), 0x14);
+        entry.writeU32(0);
+        setEquipSlot(npcEquip, slot, entry);
+      }
+      const table = npcEquip.add(8);
+      const ids = MIMIC_ENTRY_SLOTS.map((s) => [s, table.add(s * 0x14 + 4).readU32(), table.add(s * 0x14 + 0xe).readU8(), table.add(s * 0x14 + 0xf).readU8()])
+        .filter(([, id]) => id !== 0 && id !== 0xffffffff);
+      send({ family: 'summon-sign', tag: 'mimic.equipped', npc: this.npc.toString(), ids,
+        levels: Array.from({ length: 11 }, (_, k) => this.npc.add(0x490).readPointer().add(8 + k * 2).readU16()) });
+    } catch (e) {
+      send({ family: 'summon-sign', tag: 'mimic.equipped', error: e.message });
+    }
+    globalThis.__mimicNpc = null;
   },
 });
 
@@ -1728,3 +1822,38 @@ globalThis.__enemyAttack = Interceptor.attach(at(0x0039d5d0), {
     });
   },
 });
+
+// Read-only, once per load: where the mimic still differs from the player. The NPC is entity 0x3024's
+// character (resolve 0x14017b7e0 -> entry +0x68 -> getGrabCharacterCtrl(entry+0x18)). Diffs the parts
+// state (asm +0x28, 0x638 bytes) and PlayerParam (+0x490, first 0x400 bytes), byte by byte.
+globalThis.__mimicDiff = function mimicDiff() {
+  try {
+    const resolve = new NativeFunction(at(0x0017b7e0), 'pointer', ['pointer']);
+    const id = Memory.alloc(8);
+    id.writeU32(0x3024);
+    const ctrl = resolve(id);
+    const entry = ctrl.isNull() ? NULL : ctrl.add(0x68).readPointer();
+    let npc = entry.isNull() ? NULL : grabChr(entry.add(0x18));
+    // The touch-summoned phantom is not held by the generator entry; fall back to the last character
+    // the touch summon returned (0x7fffeb7b9e60 on 2026-11-02), accepted only with PlayerCtrl's vtable.
+    if (npc.isNull()) npc = globalThis.__lastSummoned || ptr('0x7fffeb7b9e60');
+    let vt = NULL;
+    try { vt = npc.readPointer(); } catch (e) { /* freed */ }
+    if (!vt.equals(at(0x010e4bb8))) { send({ family: 'summon-sign', tag: 'mimic.diff', refused: 'not a PlayerCtrl', npc: npc.toString(), vt: vt.toString() }); return; }
+    const pc = playerCtrl();
+    const diff = (a, b, n) => {
+      const x = new Uint8Array(a.readByteArray(n)), y = new Uint8Array(b.readByteArray(n)), out = [];
+      for (let i = 0; i < n; i++) if (x[i] !== y[i]) out.push('+' + i.toString(16) + ' ' + x[i].toString(16) + '/' + y[i].toString(16));
+      return out;
+    };
+    send({
+      family: 'summon-sign', tag: 'mimic.diff', npc: npc.toString(),
+      parts: diff(asmCtrlOf(pc).add(0x28).readPointer(), asmCtrlOf(npc).add(0x28).readPointer(), 0x638).slice(0, 120),
+      param: diff(pc.add(0x490).readPointer(), npc.add(0x490).readPointer(), 0x400).slice(0, 160),
+      equipDirty: [asmCtrlOf(pc).add(0x20).readPointer().add(0x4f0).readU8(), asmCtrlOf(npc).add(0x20).readPointer().add(0x4f0).readU8()],
+    });
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'mimic.diff', error: e.message });
+  }
+};
+globalThis.__mimicDiff();
