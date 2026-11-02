@@ -100,6 +100,53 @@ REDIRECT_MARKERS = ("cd", "pushd", "-C", "--git-dir", "--work-tree", "GIT_DIR")
 # or may not apply to a push that follows it.
 UNRESOLVABLE_MARKERS = ("(", ")", "<<")
 
+
+def has_live_marker(command: str, markers: tuple[str, ...]) -> bool:
+    """Whether any of `markers` appears where the shell acts on it, rather than as quoted data.
+
+    The markers used to be matched as raw substrings, so a parenthesis inside a quoted commit
+    message refused the walk. On 2026-11-02 `cd <repo>; git commit -q -m "feat(scripts): ...
+    (62040000, ...)" && git push -q -u origin feat/frida-summon-sign-trace` resolved to UNKNOWN,
+    DS2-MODS-BLOCK-MAIN-PUSH fell to its unresolved branch, and `-q` kept the `-u` text exception
+    from vouching for the branch: a feature push was refused as a push to main.
+
+    A single-quoted span is inert. Inside double quotes only command substitution runs: `$(`
+    stands for both `(` and `)`, and a backtick for itself. Outside quotes every marker counts.
+    It errs toward True: an unterminated quote or any `$'...'` (whose backslash escapes this scan
+    does not model) falls back to the raw substring test.
+    """
+    if "$'" in command:
+        return any(marker in command for marker in markers)
+    quote = ""
+    escaped = False
+    for index, character in enumerate(command):
+        if escaped:
+            escaped = False
+            continue
+        if quote == "'":
+            if character == "'":
+                quote = ""
+            continue
+        if character == "\\":
+            escaped = True
+            continue
+        if quote == '"':
+            if character == '"':
+                quote = ""
+            elif character == "`" and "`" in markers:
+                return True
+            elif command.startswith("$(", index) and ("(" in markers or ")" in markers):
+                return True
+            continue
+        if character in "'\"":
+            quote = character
+            continue
+        if any(command.startswith(marker, index) for marker in markers):
+            return True
+    if quote:
+        return any(marker in command for marker in markers)
+    return False
+
 # Wrappers whose argument after `-c` is itself a command. `commands.executed_texts` in
 # `.cupcake/system/commands.rego` decomposes these before the policy matches a push, so the
 # resolution has to follow them or the two halves disagree about the same command.
@@ -370,7 +417,7 @@ def push_invocations(
     tokens = lex(command)
     if tokens is None:
         raise Unresolvable("the command does not lex")
-    if not allow_hiding and any(marker in command for marker in UNRESOLVABLE_MARKERS):
+    if not allow_hiding and has_live_marker(command, UNRESOLVABLE_MARKERS):
         raise Unresolvable("a subshell or heredoc hides which directory a push inherits")
 
     current = cwd

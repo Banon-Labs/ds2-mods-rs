@@ -774,3 +774,43 @@ test_allow_feature_push_with_redirection_resolved if {
 	denials := guard.deny with input as push_event("git push -q origin feat/x 2>&1 | tail -1", "DEST feat/x\n")
 	count(denials) == 0
 }
+
+# --- 2026-11-02: parentheses inside a quoted commit message before a feature push ---
+#
+# Refused as one command, allowed when `git push -u origin feat/frida-summon-sign-trace`
+# ran alone. The `(` in "feat(scripts): ..." sits inside a double-quoted -m
+# argument and runs nothing, but the resolver matched its subshell markers as raw
+# substrings next to the `cd`, printed UNKNOWN, and the rule fell to its
+# unresolved branch, where `-q` before `-u` kept the explicit-branch exception
+# from vouching for the destination. The resolver now ignores markers in quoted
+# data (scripts/cupcake_push_target_repo.py, has_live_marker) and names the
+# destination; these pin the policy half.
+quoted_paren_commit_push_command := concat("", [
+	"cd /home/banon/projects/ds2-mods-rs; git add scripts/frida/summon-sign-trace.js && git commit -q -m \"",
+	"feat(scripts): summon-sign-trace picks a friendly or hostile NPC summon by the soapstone Used\n\n",
+	"Using the Small White Sign Soapstone (62040000, net requirement 1) places Pate's native white\n",
+	"sign under the player and spawns him chrType 2 (friendly). The sign is placed on the Use\n",
+	"(0x140500c40) instead of on every agent load.\n\n",
+	"Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>",
+	"\" && git push -q -u origin feat/frida-summon-sign-trace 2>&1 | tail -3; git status -sb | head -2",
+])
+
+test_allow_quoted_paren_commit_then_feature_push_resolved if {
+	denials := guard.deny with input as push_event(quoted_paren_commit_push_command, "DEST feat/frida-summon-sign-trace\n")
+	not "DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_quoted_paren_commit_message_is_not_a_main_target if {
+	texts := guard.executed_texts with input as push_event(quoted_paren_commit_push_command, "")
+	count(texts) > 0
+	every text in texts {
+		not guard.push_targets_main(lower(text))
+	}
+}
+
+# An UNKNOWN signal still fails closed for this shape: the text exceptions do not
+# read `-q -u`, and are not widened here.
+test_deny_quoted_paren_commit_then_feature_push_when_signal_unknown if {
+	denials := guard.deny with input as push_event(quoted_paren_commit_push_command, "UNKNOWN a subshell or heredoc hides which directory a push inherits\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
