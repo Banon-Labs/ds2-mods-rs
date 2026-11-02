@@ -375,9 +375,141 @@ function npcSignTest() {
   out.writeU32(0);
   const slot3 = new NativeFunction(iface.readPointer().add(0x18).readPointer(), 'pointer', ['pointer', 'pointer', 'pointer']);
   globalThis.__signStage = 'slot3 entity 0x' + pick.entity.toString(16);
+  // The position is taken AT CREATION: slot 3 reads the chr's world matrix from 0x1404123c0 (a 0x40
+  // byte out-buffer, translation at +0x30) and 0x1402122b0 makes it map-area-local before the
+  // record is stored -- rewriting the record afterwards moved nothing on screen (measured). So the
+  // matrix's translation is replaced by the player's position (PlayerCtrl +0x90) + 1.5 on x, for
+  // this one call only.
+  const here = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer().add(0x90);
+  const matrixHook = Interceptor.attach(at(0x004123c0), {
+    onLeave(ret) {
+      if (!this.returnAddress.equals(at(0x002132ca))) return;
+      const before = [ret.add(0x30).readFloat(), ret.add(0x34).readFloat(), ret.add(0x38).readFloat()];
+      ret.add(0x30).writeFloat(here.readFloat() + 1.5);
+      ret.add(0x34).writeFloat(here.add(4).readFloat());
+      ret.add(0x38).writeFloat(here.add(8).readFloat());
+      send({ family: 'summon-sign', tag: 'npc_sign_test.matrix', before: before.map((v) => v.toFixed(2)),
+        after: [0x30, 0x34, 0x38].map((o) => ret.add(o).readFloat().toFixed(2)) });
+    },
+  });
   slot3(iface, out, entity);
+  matrixHook.detach();
   send({ family: 'summon-sign', tag: 'npc_sign_test', ctrl: pick.ctrl.toString(), kind: pick.kind, chrType: pick.chrType,
     signType: pick.signType, entity: '0x' + pick.entity.toString(16), handle: '0x' + out.readU32().toString(16) });
+  // Where it went: find the sign by handle (vtable +0x98, as 0x140412aa0 does) and dump it beside
+  // the player's position (PlayerCtrl +0x90, scripts/frida/arrow.js).
+  const find = new NativeFunction(iface.readPointer().add(0x98).readPointer(), 'pointer', ['pointer', 'pointer']);
+  const sign = find(iface, out);
+  const player = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer();
+  const floats = (p, n) => Array.from({ length: n }, (_, k) => p.add(k * 4).readFloat().toFixed(2));
+  send({ family: 'summon-sign', tag: 'npc_sign_test.where', sign: sign.toString(),
+    sign_words: sign.isNull() ? null : Array.from({ length: 0x20 }, (_, k) => '0x' + (sign.add(k * 4).readU32() >>> 0).toString(16)),
+    sign_floats: sign.isNull() ? null : floats(sign, 0x20),
+    point: '0x' + (pick.ctrl.add(0x50).readPointer().add(0x30).readU32() >>> 0).toString(16),
+    player: floats(player.add(0x90), 3) });
+  globalThis.__watchSign = sign;
+  globalThis.__visSign = sign;
+  // Drawn only when rec+0x18 bits 9 AND 10 are set: 9 is the per-frame distance test, 10 is set by
+  // ISummonSignSetCtrl slot 7 (0x1402139b0 -> 0x14020d0e0(rec, 1, 1)) and cleared by slot 5
+  // (0x140213930). A new record starts with 10 clear (measured: d0e0(rec, 1, 0) at creation).
+  if (!sign.isNull()) {
+    const show = new NativeFunction(iface.readPointer().add(7 * 8).readPointer(), 'pointer', ['pointer', 'pointer']);
+    show(iface, sign);
+    send({ family: 'summon-sign', tag: 'npc_sign_test.shown', w18: '0x' + (sign.add(0x18).readU32() >>> 0).toString(16) });
+  }
+}
+// WHY A SIGN IS NOT DRAWN. The per-set loop 0x14020e8c0 hides a record while
+// (rec+0x18 & 0xff000) >= 0xfe000 (0x14020eb50), and for 0xff000 it first runs 0x14020cb50, which
+// checks map area (rec+0x14 >> 8) & 0x3f through [GameManagerImp+0x38] (0x1403bcf60, then
+// 0x1403bcfa0) and casts down from rec+0x4 (0x140bc1950) to place it. Report the watched record's
+// two words on change, and both area checks' answers for it.
+const areaCheckA = at(0x003bcf60);
+const areaCheckB = at(0x003bcfa0);
+for (const [name, fn] of [['area_a', areaCheckA], ['area_b', areaCheckB]]) {
+  Interceptor.attach(fn, {
+    onEnter(args) {
+      this.area = args[1].toInt32();
+      this.mine = globalThis.__inCellAssign === true;
+    },
+    onLeave(ret) {
+      if (this.mine) send({ family: 'summon-sign', tag: 'sign.' + name, area: this.area, result: ret.toInt32() & 0xff });
+    },
+  });
+}
+Interceptor.attach(at(0x0020cb50), {
+  onEnter(args) {
+    globalThis.__inCellAssign = globalThis.__watchSign !== undefined && args[0].equals(globalThis.__watchSign);
+    this.rec = args[0];
+  },
+  onLeave() {
+    if (globalThis.__inCellAssign) {
+      send({ family: 'summon-sign', tag: 'sign.cell_assign', w18: '0x' + (this.rec.add(0x18).readU32() >>> 0).toString(16) });
+      globalThis.__inCellAssign = false;
+      globalThis.__cellAssignSeen = (globalThis.__cellAssignSeen || 0) + 1;
+      if (globalThis.__cellAssignSeen > 3) globalThis.__watchSign = undefined;
+    }
+  },
+});
+// Kind-3 records (handle top bits 0xc0000000) are visible when the sign type's range
+// (0x1402127c0) squared exceeds the squared distance to the player (0x14020cdb0); the answer goes to
+// 0x14020d0e0(rec, 0, visible). Log that answer for the watched record on change.
+let lastVisible = -1;
+Interceptor.attach(at(0x0020d0e0), {
+  onEnter(args) {
+    const s = globalThis.__visSign;
+    if (s === undefined || !args[0].equals(s)) return;
+    const v = args[2].toInt32() & 0xff;
+    if (v === lastVisible) return;
+    lastVisible = v;
+    send({ family: 'summon-sign', tag: 'sign.visible', visible: v, mode: args[1].toInt32() & 0xff,
+      backtrace: Thread.backtrace(this.context, Backtracer.ACCURATE).slice(0, 8).map(rel) });
+  },
+});
+for (const [name, rva] of [['hide_slot5', 0x00213930], ['flag_207a60', 0x00207a60], ['flag_thunk_204f10', 0x00204f10]]) {
+  Interceptor.attach(at(rva), {
+    onEnter(args) {
+      const s = globalThis.__visSign;
+      if (s === undefined) return;
+      if (!args[1].equals(s) && !args[0].equals(s)) return;
+      send({ family: 'summon-sign', tag: 'sign.flag_caller', name, ret: rel(this.returnAddress),
+        backtrace: Thread.backtrace(this.context, Backtracer.FUZZY).slice(0, 8).map(rel) });
+    },
+  });
+}
+// WHO HIDES IT (measured): the net sign tick walks the NPC signs (iface slot +0xa8) and, offline,
+// asks 0x1402a1980(mgr, typeByte, 0, &info, 3) at 0x1402a48cc; false -> slot 5 hide (+0x28), true
+// -> slot 7 show (+0x38). `[rbx]` there is the record both receive. Force true for the watched
+// record only, logging the native answer once.
+const SIGN_RULE_RET = at(0x002a48d1);
+let ruleLogged = false;
+Interceptor.attach(at(0x002a1980), {
+  onEnter(args) {
+    this.mine = false;
+    const s = globalThis.__visSign;
+    if (s === undefined || !this.returnAddress.equals(SIGN_RULE_RET)) return;
+    this.mine = this.context.rbx.readPointer().equals(s);
+    this.type = args[1].toInt32() & 0xff;
+  },
+  onLeave(ret) {
+    if (!this.mine) return;
+    const native = ret.toInt32() & 0xff;
+    if (!ruleLogged) {
+      ruleLogged = true;
+      send({ family: 'summon-sign', tag: 'sign.rule', type: this.type, native });
+    }
+    if (native === 0) ret.replace(ptr(1));
+  },
+});
+let lastSignWords = '';
+function watchSign() {
+  const s = globalThis.__watchSign;
+  if (s === undefined) return;
+  const words = '0x' + (s.add(0x14).readU32() >>> 0).toString(16) + ' 0x' + (s.add(0x18).readU32() >>> 0).toString(16);
+  if (words === lastSignWords) return;
+  lastSignWords = words;
+  send({ family: 'summon-sign', tag: 'sign.words', words });
+}
+{
 }
 // false = only watch, so a use the player makes by hand is the positive control.
 const AUTO_USE = false;
@@ -450,6 +582,11 @@ globalThis.__useNavCb = new NativeCallback((self, dt) => {
     watchItemUse();
   } catch (e) {
     send({ family: 'summon-sign', tag: 'item_use.semaphore.error', error: e.message });
+  }
+  try {
+    watchSign();
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'sign.words.error', error: e.message });
   }
   try {
     npcSignTest();
