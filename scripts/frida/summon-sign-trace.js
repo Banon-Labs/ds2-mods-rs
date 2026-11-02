@@ -371,6 +371,26 @@ function npcSignTest() {
   }
   const entity = globalThis.__signBuf;
   const out = globalThis.__signBuf.add(8);
+  // Every reload left its sign in the world (handles 0xc00000N1 white, 0xc00000N2), all near the
+  // player, so the old white ones hid the new one. Handle = (counter << 4) | type with 0xc0000000
+  // set (FUN_14020e4e0). Hide each one found (slot 5 clears rec+0x18 bit 10) before making a new one.
+  {
+    const findOld = new NativeFunction(iface.readPointer().add(0x98).readPointer(), 'pointer', ['pointer', 'pointer']);
+    const hide = new NativeFunction(iface.readPointer().add(5 * 8).readPointer(), 'pointer', ['pointer', 'pointer']);
+    const h = Memory.alloc(8);
+    let hidden = 0;
+    for (let n = 0; n < 0x80; n++) {
+      for (const t of [1, 2, 3, 4, 5, 6]) {
+        h.writeU32((0xc0000000 | (n << 4) | t) >>> 0);
+        const rec = findOld(iface, h);
+        if (!rec.isNull()) {
+          hide(iface, rec);
+          hidden += 1;
+        }
+      }
+    }
+    send({ family: 'summon-sign', tag: 'npc_sign_test.hid_old', hidden });
+  }
   entity.writeU32(pick.entity);
   out.writeU32(0);
   const slot3 = new NativeFunction(iface.readPointer().add(0x18).readPointer(), 'pointer', ['pointer', 'pointer', 'pointer']);
@@ -378,14 +398,15 @@ function npcSignTest() {
   // The position is taken AT CREATION: slot 3 reads the chr's world matrix from 0x1404123c0 (a 0x40
   // byte out-buffer, translation at +0x30) and 0x1402122b0 makes it map-area-local before the
   // record is stored -- rewriting the record afterwards moved nothing on screen (measured). So the
-  // matrix's translation is replaced by the player's position (PlayerCtrl +0x90) + 1.5 on x, for
+  // matrix's translation is replaced by the player's position (PlayerCtrl +0x90) (under them), for
   // this one call only.
   const here = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer().add(0x90);
   const matrixHook = Interceptor.attach(at(0x004123c0), {
     onLeave(ret) {
       if (!this.returnAddress.equals(at(0x002132ca))) return;
       const before = [ret.add(0x30).readFloat(), ret.add(0x34).readFloat(), ret.add(0x38).readFloat()];
-      ret.add(0x30).writeFloat(here.readFloat() + 1.5);
+      // Under the player, exactly (user directive 2026-11-02: never in front or elsewhere).
+      ret.add(0x30).writeFloat(here.readFloat());
       ret.add(0x34).writeFloat(here.add(4).readFloat());
       ret.add(0x38).writeFloat(here.add(8).readFloat());
       send({ family: 'summon-sign', tag: 'npc_sign_test.matrix', before: before.map((v) => v.toFixed(2)),
@@ -395,14 +416,28 @@ function npcSignTest() {
   // Sign colour: 0x140212950(chrType) -> table 0x1410cb5c4 (chrType 1 -> 1 white, 2 -> 2 red, 16 ->
   // 0, no sign). Pate's chrType is 1, so his sign is white; the summon behind it is forced to 16
   // (hostile) at spawn regardless. Make the sign red for this creation only.
-  const SIGN_TYPE = 2;
+  // Measured by the user 2026-11-02: 1 mini white, 2 not red (0x451), 4 intense gold (0x455). 5 is
+  // what chrTypes 7/9/14/15 map to (0x1410cb5c4) -- the red-phantom candidates.
+  const SIGN_TYPE = 5;
   const signTypeHook = Interceptor.attach(at(0x00212950), {
     onLeave(ret) {
       send({ family: 'summon-sign', tag: 'npc_sign_test.sign_type', from: rel(this.returnAddress), native: ret.toInt32(), forced: SIGN_TYPE });
       ret.replace(ptr(SIGN_TYPE));
     },
   });
+  // Measured 2026-11-02: forcing the sign type alone left the sign white. Slot 3 also stores
+  // FUN_1404124f0(gen)'s chrType in the record at +0x20 (0x140213344), and that is what the sign and
+  // the touch's NetNpcPhantom slot carry (the slot read type 1). Hand slot 3 chrType 2 (red row).
+  const SIGN_CHR_TYPE = 2;
+  const signChrHook = Interceptor.attach(at(0x004124f0), {
+    onLeave(ret) {
+      if (!this.returnAddress.equals(at(0x002132e4))) return;
+      send({ family: 'summon-sign', tag: 'npc_sign_test.chr_type', native: ret.toInt32() & 0xff, forced: SIGN_CHR_TYPE });
+      ret.replace(ptr(SIGN_CHR_TYPE));
+    },
+  });
   slot3(iface, out, entity);
+  signChrHook.detach();
   signTypeHook.detach();
   matrixHook.detach();
   send({ family: 'summon-sign', tag: 'npc_sign_test', ctrl: pick.ctrl.toString(), kind: pick.kind, chrType: pick.chrType,
@@ -423,6 +458,16 @@ function npcSignTest() {
   // Drawn only when rec+0x18 bits 9 AND 10 are set: 9 is the per-frame distance test, 10 is set by
   // ISummonSignSetCtrl slot 7 (0x1402139b0 -> 0x14020d0e0(rec, 1, 1)) and cleared by slot 5
   // (0x140213930). A new record starts with 10 clear (measured: d0e0(rec, 1, 0) at creation).
+  // Still white with type 2 in the handle and chrType 2 at +0x20 (user, 2026-11-02). Slot 3 passes
+  // 2 as FUN_14020cf00's 4th argument, which lands in rec+0x14 bits 29-31 as (v | ~3) << 29: the
+  // sign's source. Try a player-style source (0) before the sign is shown.
+  const SIGN_SOURCE = null;
+  if (!sign.isNull() && SIGN_SOURCE !== null) {
+    const w = sign.add(0x14).readU32() >>> 0;
+    const now = ((w & 0x1fffffff) | (((SIGN_SOURCE | 0xfffffffc) << 29) >>> 0)) >>> 0;
+    sign.add(0x14).writeU32(now);
+    send({ family: 'summon-sign', tag: 'npc_sign_test.source', was: '0x' + w.toString(16), now: '0x' + now.toString(16) });
+  }
   if (!sign.isNull()) {
     const show = new NativeFunction(iface.readPointer().add(7 * 8).readPointer(), 'pointer', ['pointer', 'pointer']);
     show(iface, sign);
@@ -577,12 +622,29 @@ for (const [name, rva, site] of [['keep_session', 0x002d8650, 0x002522f7], ['kee
 // With both held, he was still despawned (measured 2026-11-02): the slot still went 3 -> 0. Log
 // every state change FUN_140252620(slot, ?, state) with the slot's fields and caller, and remember
 // the slot so watchSlot() can report its state/timers every time they change.
+// The sign's effect: FUN_14020a5d0(set, &handle, x, y, z, ...) spawns 0x140212730(handle & 0xf)
+// (type 1 -> 0x44e, 2 -> 0x451, 3 -> 0x453, 4 -> 0x455). Log each spawn for our sign.
+Interceptor.attach(at(0x0020a5d0), {
+  onEnter(args) {
+    const handle = args[1].readU32() >>> 0;
+    if (globalThis.__watchSign && handle === (globalThis.__watchSign.readU32() >>> 0))
+      send({ family: 'summon-sign', tag: 'sign.sfx', handle: '0x' + handle.toString(16), type: handle & 0xf });
+  },
+});
+const SLOT_CHR_TYPE = 16;
 const slotFields = (s) => ({ cur: s.add(0x14).readS32(), next: s.add(0x18).readS32(), t1c: s.add(0x1c).readFloat().toFixed(2),
   t20: s.add(0x20).readFloat().toFixed(2), r34: s.add(0x34).readS32(), r38: s.add(0x38).readS32(), type: s.add(8).readU8(), ent: '0x' + (s.add(4).readU32() >>> 0).toString(16) });
 Interceptor.attach(at(0x00252620), {
   onEnter(args) {
     // FUN_140252270 passes its own slot (rbx) as the first argument; the decomp shows param_1.
     globalThis.__npcSlot = args[0];
+    // Entering "summoning" (1): FUN_140252620 hands slot+8 (the phantom type) to the phantom
+    // director (vtable +8). Pate came in blue with type 1; make it the invader row.
+    if (SLOT_CHR_TYPE !== null && args[2].toInt32() === 1 && args[0].add(4).readU32() === SUMMON_ENTITY) {
+      const was = args[0].add(8).readU8();
+      args[0].add(8).writeU8(SLOT_CHR_TYPE);
+      send({ family: 'summon-sign', tag: 'phantom.slot_type', was, now: SLOT_CHR_TYPE });
+    }
     send({ family: 'summon-sign', tag: 'phantom.slot_state', state: args[2].toInt32(), slot: args[0].toString(), fields: slotFields(args[0]),
       backtrace: Thread.backtrace(this.context, Backtracer.ACCURATE).slice(0, 6).map(rel) });
   },
