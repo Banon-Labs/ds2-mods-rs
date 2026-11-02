@@ -703,7 +703,7 @@ function prepareThenSummon() {
 }
 // Where a spawned NPC is: 0x14041e870(handle) -> CharacterCtrl (FUN_140415b20 uses it on the
 // spawn's handle), position at +0x90 as for the player. Reported once per load.
-const WATCH_SPAWN_HANDLE = 0x2820e02; // Pate, spawned 2026-11-02
+const WATCH_SPAWN_HANDLE = 0x3021002; // chr 866001 (entry 0x3024), spawned 2026-11-02; Pate was 0x2820e02
 const MOVE_SPAWN_TO_PLAYER = false;
 function watchMoved() {
   const m = globalThis.__movedChr;
