@@ -317,6 +317,68 @@ Interceptor.attach(SIGN_EFFECT_GATE, {
     if (this.returnAddress.equals(SIGN_EFFECT_GATE_RET)) send({ family: 'summon-sign', tag: 'use.effect_gate', result: ret.toInt32() & 0xff });
   },
 });
+// NPC SIGN, offline, once per load: ISummonSignSetCtrl slot 3 (vtable +0x18) the way
+// 0x140412aa0 calls it -- iface from the getter 0x1402128d0 (no arguments), the chr's entity
+// handle from 0x14017b5b0(&out, chr). Slot 3 maps chrType (0x1404124f0) to a sign type with
+// 0x140212950 and returns handle 0 when that is 0. The PlayerCtrl at GameManagerImp+0xd0 is not
+// one (measured: its +0x50 is not a pointer, so 0x14017b5b0 faults), so the candidates come from
+// the table the resolver 0x14017b7e0 reads: block = [[GameManagerImp+0x40]+0x170+b*8] (b < 0x2a),
+// ctrl = [[block+0x20]+i*8] (i < [block+0x28]), entity id = (i<<10)|(b<<4)|4. chrType is
+// [[ctrl+0x58]+0x84], mapped through the u8 pair table 0x1410ed318 by 0x1404124f0.
+const NPC_SIGN_TEST = true;
+function listCharacters() {
+  const mgr = GAME_MANAGER_IMP.readPointer().add(0x40).readPointer();
+  const found = [];
+  if (mgr.isNull()) return found;
+  for (let b = 0; b < 0x2a; b++) {
+    const block = mgr.add(0x170 + b * 8).readPointer();
+    if (block.isNull()) continue;
+    const arr = block.add(0x20).readPointer();
+    const count = block.add(0x28).readU32();
+    if (arr.isNull()) continue;
+    for (let i = 0; i < count && i < 512; i++) {
+      const ctrl = arr.add(i * 8).readPointer();
+      if (ctrl.isNull()) continue;
+      try {
+        const kind = ctrl.add(0x58).readPointer().add(0x84).readU8();
+        const chrType = at(0x010ed318).add(kind * 2).readU8();
+        found.push({ b, i, ctrl, kind, chrType, entity: (i << 10) | (b << 4) | 4 });
+      } catch (e) {
+        found.push({ b, i, ctrl, error: e.message });
+      }
+    }
+  }
+  return found;
+}
+const signIface = new NativeFunction(at(0x002128d0), 'pointer', []);
+const entityOf = new NativeFunction(at(0x0017b5b0), 'pointer', ['pointer', 'pointer']);
+const chrTypeOf = new NativeFunction(at(0x004124f0), 'uint8', ['pointer']);
+const signTypeOf = new NativeFunction(at(0x00212950), 'uint32', ['uint32']);
+globalThis.__signBuf = Memory.alloc(0x10);
+let signTested = false;
+function npcSignTest() {
+  if (!NPC_SIGN_TEST || signTested || !granted) return;
+  signTested = true;
+  const iface = signIface();
+  const chars = listCharacters();
+  for (const c of chars) if (c.chrType !== undefined && c.chrType < 0x14) c.signType = signTypeOf(c.chrType);
+  send({ family: 'summon-sign', tag: 'npc_sign_test.characters', count: chars.length,
+    chars: chars.slice(0, 80).map((c) => ({ b: c.b, i: c.i, ctrl: c.ctrl.toString(), kind: c.kind, chrType: c.chrType, signType: c.signType, error: c.error })) });
+  const pick = chars.find((c) => c.signType);
+  if (iface.isNull() || !pick) {
+    send({ family: 'summon-sign', tag: 'npc_sign_test.refused', iface: iface.toString(), why: pick ? 'no iface' : 'no character with a sign type' });
+    return;
+  }
+  const entity = globalThis.__signBuf;
+  const out = globalThis.__signBuf.add(8);
+  entity.writeU32(pick.entity);
+  out.writeU32(0);
+  const slot3 = new NativeFunction(iface.readPointer().add(0x18).readPointer(), 'pointer', ['pointer', 'pointer', 'pointer']);
+  globalThis.__signStage = 'slot3 entity 0x' + pick.entity.toString(16);
+  slot3(iface, out, entity);
+  send({ family: 'summon-sign', tag: 'npc_sign_test', ctrl: pick.ctrl.toString(), kind: pick.kind, chrType: pick.chrType,
+    signType: pick.signType, entity: '0x' + pick.entity.toString(16), handle: '0x' + out.readU32().toString(16) });
+}
 // false = only watch, so a use the player makes by hand is the positive control.
 const AUTO_USE = false;
 function useSoapstone() {
@@ -388,6 +450,11 @@ globalThis.__useNavCb = new NativeCallback((self, dt) => {
     watchItemUse();
   } catch (e) {
     send({ family: 'summon-sign', tag: 'item_use.semaphore.error', error: e.message });
+  }
+  try {
+    npcSignTest();
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'npc_sign_test.refused', why: 'threw ' + e.message, stage: globalThis.__signStage });
   }
   try {
     useSoapstone();
