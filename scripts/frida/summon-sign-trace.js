@@ -111,8 +111,9 @@ const SMALL_WHITE_SIGN_SOAPSTONE = 62040000;
 // type 1, "mini white", user 2026-11-02) and spawns him chrType 2, measured to fight on the
 // player's side (user 2026-11-02: "chrType 2 is friendly").
 const SUMMON_MODES = {
-  [RED_SIGN_SOAPSTONE]: { name: 'hostile', netReq: 2, signType: 5, signChrType: 2, slotChrType: 16, spawnChrType: 16, aura: 3 },
-  [SMALL_WHITE_SIGN_SOAPSTONE]: { name: 'friendly', netReq: 1, signType: null, signChrType: null, slotChrType: null, spawnChrType: 2, aura: null },
+  [RED_SIGN_SOAPSTONE]: { name: 'hostile', entity: 0x2824, netReq: 2, signType: 5, signChrType: 2, slotChrType: 16, spawnChrType: 16, aura: 3 },
+  // The mimic base: entity 0x3024, Ruined Aflis (chr 866001), a player-model NPC ($S/mimic.md).
+  [SMALL_WHITE_SIGN_SOAPSTONE]: { name: 'mimic', entity: 0x3024, netReq: 1, signType: 1, signChrType: null, slotChrType: null, spawnChrType: 2, aura: null },
 };
 let summonMode = SUMMON_MODES[RED_SIGN_SOAPSTONE];
 
@@ -382,7 +383,8 @@ function npcSignTest() {
   for (const c of chars) if (c.chrType !== undefined && c.chrType < 0x14) c.signType = signTypeOf(c.chrType);
   send({ family: 'summon-sign', tag: 'npc_sign_test.characters', count: chars.length,
     chars: chars.slice(0, 80).map((c) => ({ b: c.b, i: c.i, ctrl: c.ctrl.toString(), kind: c.kind, chrType: c.chrType, signType: c.signType, error: c.error })) });
-  const pick = chars.find((c) => c.signType);
+  const pick = chars.find((c) => c.entity === summonMode.entity) || chars.find((c) => c.signType);
+  send({ family: 'summon-sign', tag: 'npc_sign_test.pick', mode: summonMode.name, want: '0x' + summonMode.entity.toString(16), got: pick ? '0x' + pick.entity.toString(16) : null });
   if (iface.isNull() || !pick) {
     send({ family: 'summon-sign', tag: 'npc_sign_test.refused', iface: iface.toString(), why: pick ? 'no iface' : 'no character with a sign type' });
     return;
@@ -831,7 +833,7 @@ Interceptor.attach(at(0x00252620), {
     // Entering "summoning" (1): FUN_140252620 hands slot+8 (the phantom type) to the phantom
     // director (vtable +8). Pate came in blue with type 1; make it the invader row.
     const SLOT_CHR_TYPE = summonMode.slotChrType;
-    if (SLOT_CHR_TYPE !== null && args[2].toInt32() === 1 && args[0].add(4).readU32() === SUMMON_ENTITY) {
+    if (SLOT_CHR_TYPE !== null && args[2].toInt32() === 1 && args[0].add(4).readU32() === summonEntity()) {
       const was = args[0].add(8).readU8();
       args[0].add(8).writeU8(SLOT_CHR_TYPE);
       send({ family: 'summon-sign', tag: 'phantom.slot_type', was, now: SLOT_CHR_TYPE });
@@ -869,9 +871,9 @@ Interceptor.attach(at(0x00254780), {
     const key = this.entity + ':' + reason;
     if (globalThis.__lastLeave !== key) {
       globalThis.__lastLeave = key;
-      send({ family: 'summon-sign', tag: 'phantom.leave_reason', entity: '0x' + (this.entity >>> 0).toString(16), reason, kept: KEEP_FROM_DEAD_QUEUE && this.entity === SUMMON_ENTITY });
+      send({ family: 'summon-sign', tag: 'phantom.leave_reason', entity: '0x' + (this.entity >>> 0).toString(16), reason, kept: KEEP_FROM_DEAD_QUEUE && this.entity === summonEntity() });
     }
-    if (KEEP_FROM_DEAD_QUEUE && this.entity === SUMMON_ENTITY) ret.replace(ptr(0));
+    if (KEEP_FROM_DEAD_QUEUE && this.entity === summonEntity()) ret.replace(ptr(0));
   },
 });
 // WHY THE SUMMON FAILS (measured: FUN_140415b20 got handle -1 back, so 0x14041e870 returned 0).
@@ -1025,7 +1027,8 @@ const SPAWN_TEAM = null;
 // 0x2824 = Mild-Mannered Pate (measured: the sign named him; spawned 2026-11-02 at his generator,
 // 210 m away). 0x2c24 = block 2 index 11, chrType 2 / sign type 2 (red): chr 891000, spawned
 // 2026-11-02 at (90.4, -40.4, -148.4) despite gen+0x30 set beside the player. 0x3024 = index 12.
-const SUMMON_ENTITY = 0x2824;
+// The entity the touch summons follows the Used soapstone's mode (SUMMON_MODES[].entity).
+const summonEntity = () => summonMode.entity;
 // Pate's generator already holds the character the forced spawn made at his MSB point, and
 // FUN_140418d50 returns that one instead of spawning. 0x1404193f0(mgr, entry) is the native despawn
 // FUN_14041abf0's eviction uses: it removes the entry's character and decrements mgr+0x368.
@@ -1064,7 +1067,7 @@ function prepareThenSummon() {
   if (!SUMMON_TEST || summoned || !granted) return;
   const gm = GAME_MANAGER_IMP.readPointer();
   const resolve = new NativeFunction(at(0x0017b7e0), 'pointer', ['pointer']);
-  globalThis.__summonId.writeU32(SUMMON_ENTITY);
+  globalThis.__summonId.writeU32(summonEntity());
   const ctrl = resolve(globalThis.__summonId);
   if (ctrl.isNull()) return;
   const chrId = ctrl.add(0x60).readPointer().readU32();
@@ -1174,7 +1177,7 @@ function summonTest() {
     send({ family: 'summon-sign', tag: 'summon_test.refused', why: 'no manager' });
     return;
   }
-  globalThis.__summonId.writeU32(SUMMON_ENTITY);
+  globalThis.__summonId.writeU32(summonEntity());
   // FUN_140418d50 spawns only when the generator entity's +0x8c is 3/4/5/6/8 (0x1404161d0's jump
   // table); the touch got -1 with it in a refusing state. Log it and set 3 for this attempt.
   const resolve = new NativeFunction(at(0x0017b7e0), 'pointer', ['pointer']);
@@ -1201,7 +1204,7 @@ function summonTest() {
     globalThis.__b302.at.writeU8(globalThis.__b302.was);
     globalThis.__b302 = undefined;
   }
-  send({ family: 'summon-sign', tag: 'summon_test', entity: '0x' + SUMMON_ENTITY.toString(16), ret: ret.toString(),
+  send({ family: 'summon-sign', tag: 'summon_test', entity: '0x' + summonEntity().toString(16), ret: ret.toString(),
     at: ret.isNull() ? null : [0, 4, 8].map((o) => ret.add(0x90 + o).readFloat().toFixed(2)) });
   if (!ret.isNull()) {
     globalThis.__movedChr = { chr: ret, frames: 0 };
@@ -1285,7 +1288,7 @@ const TOUCH_SUMMON = true;
 function touchSummonEnter(ctx, args) {
   if (!TOUCH_SUMMON || globalThis.__summoning === true) return;
   const entity = args[1].readU32();
-  if (entity !== SUMMON_ENTITY) return;
+  if (entity !== summonEntity()) return;
   const gm = GAME_MANAGER_IMP.readPointer();
   const ctrl = new NativeFunction(at(0x0017b7e0), 'pointer', ['pointer'])(args[1]);
   if (ctrl.isNull()) return;
@@ -1704,3 +1707,24 @@ globalThis.__asmBuild = Interceptor.attach(at(0x0035a650), {
     send({ family: 'summon-sign', tag: 'mimic.player_asm', error: e.message });
   }
 })();
+
+// The enemy side of an attack ($S/pate-damage.md): hitbox creation FUN_14016d030 zeroes the attack
+// block and calls action-controller slot +0x218, for an enemy 0x14039d5d0 (tail-jumps to
+// 0x1403a79e0), which adds each EnemyDamageParam row's damage0N into its type's slot and scales by
+// ChrParam.damageAdjustRate. edx is the damage id, r8 the block. For Pate (rows 1744xxxxx) block[0]
+// should read 167 / 195 / 149 if the 0.675 scaling holds, 248 / 289 / 220 if it does not.
+if (globalThis.__enemyAttack) globalThis.__enemyAttack.detach();
+globalThis.__enemyAttack = Interceptor.attach(at(0x0039d5d0), {
+  onEnter(args) {
+    const id = args[1].toUInt32();
+    this.block = id >= 174400000 && id < 174500000 ? args[2] : null;
+    this.id = id;
+  },
+  onLeave() {
+    if (!this.block) return;
+    send({
+      family: 'summon-sign', tag: 'enemy.attack', damageId: this.id,
+      block: Array.from({ length: 13 }, (_, i) => +this.block.add(i * 4).readFloat().toFixed(2)),
+    });
+  },
+});
