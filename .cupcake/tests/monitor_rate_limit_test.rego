@@ -196,3 +196,79 @@ test_allow_other_events if {
 		"tool_input": {"command": "tail -f a.log"},
 	})
 }
+
+# --- the reload quiet window flag (2026-11-02) --------------------------------
+
+test_allow_reload_quiet_after_interval if {
+	not denied(monitor_event("tail -f a.log | python3 -u scripts/monitor-throttle.py 10 --reload-quiet 15"))
+}
+
+test_allow_reload_quiet_before_interval_with_equals if {
+	not denied(monitor_event("tail -f a.log | python3 /abs/scripts/monitor-throttle.py --reload-quiet=20 30"))
+}
+
+test_allow_reload_quiet_zero_alone if {
+	not denied(monitor_event("tail -f a.log | python3 scripts/monitor-throttle.py --reload-quiet 0"))
+}
+
+# The flag does not launder a short interval.
+test_deny_reload_quiet_with_short_interval if {
+	denied(monitor_event("tail -f a.log | python3 scripts/monitor-throttle.py --reload-quiet 15 5"))
+}
+
+test_deny_reload_quiet_without_value if {
+	denied(monitor_event("tail -f a.log | python3 scripts/monitor-throttle.py 10 --reload-quiet"))
+}
+
+# --- a Frida log monitor must keep the reload marker (2026-11-02) -------------
+
+RELOAD_RULE := "DS2-MODS-MONITOR-RELOAD-MARKER"
+
+reload_denied(event) if {
+	denials := guard.deny with input as event
+	RELOAD_RULE in rule_ids(denials)
+}
+
+# The exact shape that notified once per hot reload on 2026-11-02.
+test_deny_frida_log_grep_without_reload_marker if {
+	reload_denied(monitor_event(`S=/tmp/claude-1000/x/scratchpad; tail -n0 -F $S/summon-sign.jsonl | grep --line-buffered -E '"player\.hit"|"mode"|error|Error|detached' | python3 -u /home/banon/projects/ds2-mods-rs/scripts/monitor-throttle.py 10`))
+}
+
+test_deny_any_scratchpad_jsonl_without_reload_marker if {
+	reload_denied(monitor_event(`tail -F /tmp/claude-1000/proj/sess/scratchpad/tick.jsonl | grep -E --line-buffered 'Error|detached' | python3 scripts/monitor-throttle.py 10`))
+}
+
+test_deny_default_watch_log_without_reload_marker if {
+	reload_denied(monitor_event(`tail -F /home/banon/.cache/er-frida/hits.jsonl | egrep --line-buffered 'error' | python3 scripts/monitor-throttle.py 10`))
+}
+
+# The deny names the exact pattern to add.
+test_reload_deny_names_the_pattern if {
+	denials := guard.deny with input as monitor_event(`tail -F /tmp/s/scratchpad/a.jsonl | grep -E --line-buffered 'error' | python3 scripts/monitor-throttle.py 10`)
+	some d in denials
+	d.rule_id == RELOAD_RULE
+	contains(d.reason, `grep -E --line-buffered 'agent\.reloaded|<your pattern>'`)
+}
+
+test_allow_frida_log_grep_with_escaped_reload_marker if {
+	not reload_denied(monitor_event(`S=/tmp/claude-1000/x/scratchpad; tail -n0 -F $S/summon-sign.jsonl | grep --line-buffered -E 'agent\.reloaded|"player\.hit"|error|detached' | python3 -u /abs/scripts/monitor-throttle.py 10`))
+}
+
+test_allow_frida_log_grep_with_unescaped_reload_marker if {
+	not reload_denied(monitor_event(`tail -F /tmp/s/scratchpad/a.jsonl | grep -E --line-buffered 'error|agent.reloaded' | python3 scripts/monitor-throttle.py 10`))
+}
+
+# No grep, so the marker reaches the throttle by construction.
+test_allow_frida_log_without_grep if {
+	not reload_denied(monitor_event(`tail -n0 -F /tmp/s/scratchpad/summon-sign.jsonl | python3 -u scripts/monitor-throttle.py 10`))
+	not denied(monitor_event(`tail -n0 -F /tmp/s/scratchpad/summon-sign.jsonl | python3 -u scripts/monitor-throttle.py 10`))
+}
+
+# A game log that is not a Frida jsonl is not this rule's business.
+test_allow_non_frida_log_grep if {
+	not reload_denied(monitor_event(`tail -F /home/x/run.log | grep -E --line-buffered 'error' | python3 scripts/monitor-throttle.py 10`))
+}
+
+test_allow_repo_jsonl_outside_scratchpad if {
+	not reload_denied(monitor_event(`tail -F /home/x/proj/target/events.jsonl | grep -E --line-buffered 'error' | python3 scripts/monitor-throttle.py 10`))
+}

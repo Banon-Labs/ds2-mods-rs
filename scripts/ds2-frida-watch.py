@@ -20,7 +20,9 @@ such mismatch.
     uv run --with frida python3 scripts/ds2-frida-watch.py --selftest
 
 Every message the agent sends is appended to the log as JSON, one per line, so the transcript
-survives the watcher and can be read while it is still running.
+survives the watcher and can be read while it is still running. Before every load of the agent the
+watcher writes its own line, tagged `agent.reloaded`, which `scripts/monitor-throttle.py` uses to
+keep a reload's load-time chatter out of a Monitor; see `RELOAD_TAG`.
 
 # What the exit writes down
 
@@ -41,6 +43,7 @@ import pathlib
 import select
 import signal
 import sys
+import threading
 import time
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -252,6 +255,35 @@ def find_pid_bounded(dev, pid: int, timeout_seconds: float = 6.0):
     return result[0]
 
 
+# The watcher's own log lines. `RELOAD_TAG` is written before every load of the agent, the first
+# included, and `scripts/monitor-throttle.py` opens its reload quiet window on it: an agent re-runs
+# its load-time one-shots on every reload, and on 2026-11-02 one of them (the soapstone `give` loop
+# in `scripts/frida/summon-sign-trace.js`) sent an `error` line on every load, so a monitor whose
+# grep matched `error` notified once per edit. There is no matching "load settled" line: frida's
+# `script.load()` returns once the agent's top level has run, but `send()` calls made during it are
+# delivered on Frida's own thread with no ordering against that return, and one-shots an agent
+# schedules for later are not part of it at all. A settle line would claim a quiet the log cannot
+# show, so the throttle's window runs on the clock instead.
+WATCH_FAMILY = "frida-watch"
+RELOAD_TAG = "agent.reloaded"
+RELOAD_FAILED_TAG = "agent.reload_failed"
+THROTTLE_SCRIPT = pathlib.Path(__file__).resolve().parent / "monitor-throttle.py"
+
+
+def watch_record(tag: str, role: str, endpoint: str, pid: int, agent_path: pathlib.Path, **fields) -> dict:
+    """One line the watcher writes to its own log, beside the agent's messages."""
+    return {
+        "at": time.time(),
+        "role": role,
+        "endpoint": endpoint,
+        "pid": pid,
+        "family": WATCH_FAMILY,
+        "tag": tag,
+        "agent": agent_path.name,
+        **fields,
+    }
+
+
 def agent_prelude(role: str, endpoint: str, pid: int, config: dict | None = None) -> str:
     expected = {"role": role, "endpoint": endpoint, "windows_pid": pid}
     encoded_expected = json.dumps(expected, sort_keys=True)
@@ -392,6 +424,14 @@ def run(
     attached_at = time.monotonic()
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = open(log_path, "a", buffering=1, encoding="utf-8")
+    # The agent's messages arrive on Frida's thread and the reload markers are written from this
+    # one, so every line goes through one lock and no two records can interleave mid-line.
+    log_lock = threading.Lock()
+
+    def write_record(record: dict) -> None:
+        with log_lock:
+            log.write(json.dumps(record) + "\n")
+
     # How many messages the agent sent back. This is the number the evidence gate reads, and it is
     # counted here rather than by anyone reading the transcript afterwards: a watch that attached
     # and received nothing observed nothing, and a zero licenses no edit.
@@ -399,24 +439,27 @@ def run(
 
     def on_message(message, _data):
         seen["messages"] += 1
-        record = {"at": time.time(), "role": role, "endpoint": endpoint, "pid": pid, "message": message}
-        log.write(json.dumps(record) + "\n")
+        write_record({"at": time.time(), "role": role, "endpoint": endpoint, "pid": pid, "message": message})
         payload = message.get("payload", message)
         print(f"AGENT {payload}", flush=True)
 
     def on_log(level, text):
         seen["messages"] += 1
-        record = {"at": time.time(), "role": role, "endpoint": endpoint, "pid": pid,
-                  "message": {"type": "log", "level": level, "payload": text}}
-        log.write(json.dumps(record) + "\n")
+        write_record({"at": time.time(), "role": role, "endpoint": endpoint, "pid": pid,
+                      "message": {"type": "log", "level": level, "payload": text}})
         print(text, flush=True)
 
     try:
         script = None
         stamp = None
+        loads = {"count": 0}
 
         def load() -> None:
             nonlocal script, stamp
+            # Written before the agent runs, so every line its load-time one-shots send lands after
+            # it in the log. Not counted in `seen`: the evidence gate counts what the agent said.
+            write_record(watch_record(RELOAD_TAG, role, endpoint, pid, agent_path, load=loads["count"]))
+            loads["count"] += 1
             if script is not None:
                 script.unload()
             source = agent_prelude(role, endpoint, pid, config) + "\n" + agent_path.read_text(encoding="utf-8")
@@ -496,6 +539,10 @@ def run(
                             load()
                         except Exception as exc:  # a bad edit must not end the session
                             print(f"reload failed, keeping the previous agent: {exc}", flush=True)
+                            # Into the log as well, with an `error` key: it lands inside the reload
+                            # quiet window, so the throttle's one summary line is what reports it.
+                            write_record(watch_record(RELOAD_FAILED_TAG, role, endpoint, pid, agent_path,
+                                                      error=str(exc)))
                             stamp = current
         except KeyboardInterrupt:
             # Ending a watch by hand is an ordinary way for it to finish, not a fault. Caught so it
@@ -538,6 +585,34 @@ def crash_logger_selftest_checks() -> list[tuple[str, bool]]:
             "the gate runs before the attach, with no flag to skip it",
             source.index("refusal = crash_logger_verdict(") < source.index("session = dev.attach(pid)"),
         ),
+    ]
+
+
+def reload_marker_selftest_checks() -> list[tuple[str, bool]]:
+    """The reload marker, checked against the throttle that has to recognise it."""
+    import importlib.util
+
+    line = json.dumps(watch_record(RELOAD_TAG, "default", DEFAULT_ENDPOINT, 1, pathlib.Path("x.js"), load=1))
+    failed = json.dumps(watch_record(RELOAD_FAILED_TAG, "default", DEFAULT_ENDPOINT, 1, pathlib.Path("x.js"),
+                                     error="SyntaxError"))
+    spec = importlib.util.spec_from_file_location("monitor_throttle", THROTTLE_SCRIPT)
+    throttle = importlib.util.module_from_spec(spec) if spec is not None else None
+    if spec is not None and spec.loader is not None:
+        spec.loader.exec_module(throttle)
+    marker = getattr(throttle, "RELOAD_MARKER", None)
+    failure_words = getattr(throttle, "FAILURE_WORDS", None)
+    source = pathlib.Path(__file__).read_text(encoding="utf-8")
+    body = source[source.index("        def load() -> None:"):source.index("        load()\n")]
+    return [
+        ("the reload marker carries the substring the throttle opens its quiet window on",
+         marker is not None and marker in line),
+        ("a failed reload is a line the throttle's summary counts as a failure",
+         failure_words is not None and failure_words.search(failed) is not None
+         and (marker is None or marker not in failed)),
+        ("the marker is written before the agent loads, so its one-shots follow it in the log",
+         0 <= body.find("RELOAD_TAG") < body.find("script.load()")),
+        ("the marker is not counted as an agent message",
+         'seen["messages"]' not in body),
     ]
 
 
@@ -595,6 +670,7 @@ def selftest() -> int:
             "def record(" in EVIDENCE_SCRIPT.read_text(encoding="utf-8"),
         ),
         *crash_logger_selftest_checks(),
+        *reload_marker_selftest_checks(),
     ]
     failed = 0
     for label, ok in checks:
