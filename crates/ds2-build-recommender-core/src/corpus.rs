@@ -1601,30 +1601,7 @@ impl CorpusBackend {
                 *stat += add;
             }
         }
-        let tables = &self.tables.defense;
-        let pb = tables[0].at(eff[END] + eff[VIT] + eff[STR] + eff[DEX]);
-        let mut out = [0.0; 8];
-        out[0] = pieces.iter().fold(0.0, |sum, piece| {
-            sum + (piece.defense[0] + piece.bonus * pb)
-        });
-        for (typed, value) in out[5..].iter_mut().enumerate() {
-            *value = pieces.iter().fold(0.0, |sum, piece| {
-                sum + (piece.typed[typed] + piece.bonus * pb)
-            });
-        }
-        let base = [
-            eff[INT],
-            eff[INT] + eff[FTH],
-            eff[FTH],
-            eff[INT].min(eff[FTH]),
-        ];
-        for (element, index) in base.into_iter().enumerate() {
-            let flat = pieces
-                .iter()
-                .fold(0.0, |sum, piece| sum + piece.defense[1 + element]);
-            out[1 + element] = tables[1 + element].at(index) + flat;
-        }
-        out
+        self.armor_defense(&eff, &pieces)
     }
 
     /// [`Self::defense_at`] as the scoring reads it: the script's `defender_defense`. An adaptive

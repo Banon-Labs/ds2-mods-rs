@@ -154,7 +154,7 @@ name; PvE from Heirs of the Sun, Pilgrims of Dark, Company of Champions, or its 
 
 | intent | model agrees | uninfused or Raw | elemental |
 |---|---|---|---|
-| PvP | 38.5% | 52.6% | 36.3% |
+| PvP | 38.6% | 52.6% | 36.3% |
 | PvE | 48.7% | 41.9% | 54.6% |
 | unmarked | 42.6% | 56.6% | 37.9% |
 
@@ -285,12 +285,18 @@ against a ringed defender, or PvP logs of what defenders actually wear against w
 
 ### The lack-of-stats factor
 
-**Claim.** Slot 58 and slot 59 scale each piece by a lack-of-stats factor the model leaves out.
+**Claim.** Slot 58 and slot 59 scale each piece by a lack-of-stats factor. The model now applies it.
 
-**Evidence.** Both multiply each piece by `0x140381c20`'s result. A defender short of a piece's
-requirement loses armour defense, which lowers the elemental cut and so helps split, not Raw.
+**Evidence.** Both multiply each piece by `0x140381c20`'s result, `1 - (30 + 20 v) / 100` for a
+shortfall `v > 0` and 1 when the requirements are met (PlayerLackOfStatsParam rows 15-17, all
+`[30, 50]`; docs/DS2-DPS-MECHANICS.md "The lack-of-stats factor on armour"). A defender short of a
+piece's requirement keeps 0.7 down to 0.5 of that piece's defense and cut. That lowers the
+elemental cut and so helps split, not Raw.
 
-**Strength.** `EXE`, effect `INFERRED`. **Verdict.** If it moves anything it moves toward the model.
+**Strength.** `EXE` + `REGULATION`. **Verdict.** It moves toward the model, and only for defenders
+who wear armour without the stats for it. Measured 2026-11-02 (`scripts/ds2-infusion-evidence.py`,
+all sections): top-1 agreement stays 42.3%, PvP agreement 38.5% -> 38.6%, and the No_Infusion
+choosers the model sends to Dark fall from 975 to 971. It does not change the verdict.
 
 ### NPC defenders
 

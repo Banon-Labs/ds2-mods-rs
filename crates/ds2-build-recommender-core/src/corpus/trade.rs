@@ -257,9 +257,9 @@ fn exchange_value(table: &Exchange<'_>, poise: f64, defense: &Defense) -> (f64, 
     )
 }
 
-/// The script's `lack_of_stats`: the share of a piece's poise lost to unmet requirements.
-fn lack_of_stats(require: &[(usize, i32)], stats: &Stats) -> f64 {
-    let v = py_min(
+/// The script's `lack_shortfall`: how far `stats` fall short of a piece's requirements.
+fn lack_shortfall(require: &[(usize, i32)], stats: &Stats) -> f64 {
+    py_min(
         1.0,
         py_sum(
             require
@@ -267,11 +267,27 @@ fn lack_of_stats(require: &[(usize, i32)], stats: &Stats) -> f64 {
                 .filter(|&&(_, need)| need > 0)
                 .map(|&(stat, need)| py_max(0.0, 1.0 - f64::from(stats[stat]) / f64::from(need))),
         ),
-    );
+    )
+}
+
+/// The script's `lack_of_stats`: the share of a piece's poise lost to unmet requirements.
+fn lack_of_stats(require: &[(usize, i32)], stats: &Stats) -> f64 {
+    let v = lack_shortfall(require, stats);
     if v > 0.0 {
         py_min(1.0, py_max(0.0, (30.0 + 50.0 * v) * 0.01))
     } else {
         0.0
+    }
+}
+
+/// The script's `defense_lack_factor`: what a piece's own defenses are multiplied by when its
+/// requirements are unmet (`PlayerLackOfStatsParam` rows 15-17, `0x140381c20`).
+fn defense_lack_factor(require: &[(usize, i32)], stats: &Stats) -> f64 {
+    let v = lack_shortfall(require, stats);
+    if v > 0.0 {
+        1.0 - (30.0 + 20.0 * v) * 0.01
+    } else {
+        1.0
     }
 }
 
@@ -425,21 +441,26 @@ impl CorpusBackend {
     }
 
     /// The script's `_armor_defense`: the armour and stat part of a defense, `pieces` worn at
-    /// effective stats `eff`.
+    /// effective stats `eff`. Each piece's own values are scaled by [`defense_lack_factor`]; the
+    /// stat bonus is not.
     pub(super) fn armor_defense(&self, eff: &Stats, pieces: &[&Wearable]) -> Defense {
         let tables = &self.tables.defense;
+        let lack: Vec<f64> = pieces
+            .iter()
+            .map(|piece| defense_lack_factor(&piece.require, eff))
+            .collect();
         let pb = tables[0].at(eff[END] + eff[VIT] + eff[STR] + eff[DEX]);
         let mut out = [0.0; 8];
         out[0] = py_sum(
-            pieces
-                .iter()
-                .map(|piece| piece.defense[0] + piece.bonus * pb),
+            lack.iter()
+                .zip(pieces)
+                .map(|(f, piece)| f * piece.defense[0] + piece.bonus * pb),
         );
         for (typed, value) in out[5..].iter_mut().enumerate() {
             *value = py_sum(
-                pieces
-                    .iter()
-                    .map(|piece| piece.typed[typed] + piece.bonus * pb),
+                lack.iter()
+                    .zip(pieces)
+                    .map(|(f, piece)| f * piece.typed[typed] + piece.bonus * pb),
             );
         }
         let base = [
@@ -450,7 +471,11 @@ impl CorpusBackend {
         ];
         for (element, index) in base.into_iter().enumerate() {
             out[1 + element] = tables[1 + element].at(index)
-                + py_sum(pieces.iter().map(|piece| piece.defense[1 + element]));
+                + py_sum(
+                    lack.iter()
+                        .zip(pieces)
+                        .map(|(f, piece)| f * piece.defense[1 + element]),
+                );
         }
         out
     }
@@ -887,6 +912,19 @@ mod tests {
         assert!((lack_of_stats(&[(STR, 20)], &stats) - 0.55).abs() < 1e-12);
         stats[STR] = 0;
         assert!((lack_of_stats(&[(STR, 20), (DEX, 20)], &stats) - 0.8).abs() < 1e-12);
+    }
+
+    /// The script's defense lack cases: all of it when met, 70% less 20% per unit short, half
+    /// past a full unit.
+    #[test]
+    fn defense_lack_factor_is_the_scripts() {
+        let mut stats = [0; 9];
+        stats[STR] = 20;
+        assert!((defense_lack_factor(&[(STR, 20)], &stats) - 1.0).abs() < f64::EPSILON);
+        stats[STR] = 10;
+        assert!((defense_lack_factor(&[(STR, 20)], &stats) - 0.6).abs() < 1e-12);
+        stats[STR] = 0;
+        assert!((defense_lack_factor(&[(STR, 20), (DEX, 20)], &stats) - 0.5).abs() < 1e-12);
     }
 
     /// One weapon, one counter, by hand: mine 100 AR into 200 DEF, theirs 120 AR into 300 DEF
