@@ -559,6 +559,7 @@ Interceptor.attach(at(0x00418fa8), function () {
   }
 });
 const FORCE_SPAWN = true;
+const SPAWN_AT_PLAYER = true;
 // Measured with Stalker: the spawn gives up after 0x1404160f0(mgr, desc), whose 0x14041edc0(desc,
 // state) returns bit (state-1) of the u16 at desc+0xe; state = (s8)[mgr+0x2fc], desc = [gen-ish+0x60].
 // Log both, and with FORCE_SPAWN answer true for this call.
@@ -591,8 +592,21 @@ Interceptor.attach(at(0x00418690), {
   onEnter(args) {
     if (globalThis.__summoning !== true) return;
     const gen = args[1];
+    const fl = (q) => { try { return [0, 4, 8].map((o) => q.add(o).readFloat().toFixed(2)); } catch (e) { return 'unreadable'; } };
+    const sp = this.context.rsp;
     send({ family: 'summon-sign', tag: 'phantom.spawn_gen', gen: gen.toString(), b76: gen.add(0x76).readU8(), b7a: gen.add(0x7a).readU8(),
-      r8: args[2].toString(), r9: args[3].toString() });
+      r8: args[2].toString(), r9: args[3].toString(), at_r9: fl(args[3]),
+      stack: [0x28, 0x30, 0x38, 0x40].map((o) => { const v = sp.add(o).readPointer(); return { o: '0x' + o.toString(16), v: v.toString(), f: fl(v) }; }),
+      gen_floats: [0x20, 0x30, 0x40, 0x50].map((o) => ({ o: '0x' + o.toString(16), f: fl(gen.add(o)) })) });
+    // Measured 2026-11-02: the spawn position is *r9, copied from the POOLED generator FUN_140418d50
+    // picks (gen+0x1c), not from the entry FUN_140415b20 was given; a position written on that entry
+    // arrives one level up and is dropped. Overwrite *r9 with the player's position + 3 m on x.
+    if (SPAWN_AT_PLAYER) {
+      const me = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer().add(0x90);
+      args[3].writeFloat(me.readFloat() + 3);
+      args[3].add(4).writeFloat(me.add(4).readFloat());
+      args[3].add(8).writeFloat(me.add(8).readFloat());
+    }
     if (FORCE_SPAWN) {
       this.restore = { at: gen.add(0x7a), was: gen.add(0x7a).readU8() };
       this.restore.at.writeU8(this.restore.was & ~2);
@@ -651,8 +665,11 @@ Interceptor.attach(at(0x00422bc0), {
   },
 });
 // The touch, done by the agent: what NetNpcPhantomDirection_HOST (0x1402529c0) calls.
-const SUMMON_TEST = true;
-const SUMMON_ENTITY = 0x2824; // Mild-Mannered Pate's entry in m10_10_00_00 (measured: the sign named him)
+const SUMMON_TEST = false;
+// 0x2824 = Mild-Mannered Pate (measured: the sign named him; spawned 2026-11-02 at his generator,
+// 210 m away). 0x2c24 = block 2 index 11, chrType 2 / sign type 2 (red): chr 891000, spawned
+// 2026-11-02 at (90.4, -40.4, -148.4) despite gen+0x30 set beside the player. 0x3024 = index 12.
+const SUMMON_ENTITY = 0x3024;
 const generate = new NativeFunction(at(0x00415b20), 'pointer', ['pointer', 'pointer', 'uint8']);
 globalThis.__summonId = Memory.alloc(8);
 let summoned = false;
@@ -684,6 +701,48 @@ function prepareThenSummon() {
   send({ family: 'summon-sign', tag: 'summon_test.loaded', chrId, loaded, frames: prepFrames });
   summonTest();
 }
+// Where a spawned NPC is: 0x14041e870(handle) -> CharacterCtrl (FUN_140415b20 uses it on the
+// spawn's handle), position at +0x90 as for the player. Reported once per load.
+const WATCH_SPAWN_HANDLE = 0x2820e02; // Pate, spawned 2026-11-02
+const MOVE_SPAWN_TO_PLAYER = false;
+function watchMoved() {
+  const m = globalThis.__movedChr;
+  if (!m) return;
+  m.frames += 1;
+  if (m.frames === 1 || m.frames === 5 || m.frames === 30 || m.frames === 120) {
+    const q = m.chr.add(0x90);
+    send({ family: 'summon-sign', tag: 'spawn.moved', frames: m.frames, at: [q.readFloat(), q.add(4).readFloat(), q.add(8).readFloat()].map((v) => v.toFixed(2)) });
+  }
+  if (m.frames > 120) globalThis.__movedChr = undefined;
+}
+const ctrlOfHandle = new NativeFunction(at(0x0041e870), 'pointer', ['uint32']);
+let spawnReported = false;
+function reportSpawn() {
+  if (spawnReported || !granted) return;
+  spawnReported = true;
+  const chr = ctrlOfHandle(WATCH_SPAWN_HANDLE);
+  const me = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer().add(0x90);
+  const p = (q) => [q.readFloat(), q.add(4).readFloat(), q.add(8).readFloat()];
+  const mine = p(me);
+  if (chr.isNull()) {
+    send({ family: 'summon-sign', tag: 'spawn.where', handle: '0x' + WATCH_SPAWN_HANDLE.toString(16), chr: null, player: mine.map((v) => v.toFixed(2)) });
+    return;
+  }
+  const his = p(chr.add(0x90));
+  const d = Math.hypot(his[0] - mine[0], his[1] - mine[1], his[2] - mine[2]);
+  // Measured 2026-11-02: he spawned at his generator's point, 210.5 m away. Try the cheapest move:
+  // write the player's position + 2 m on x into his +0x90, then re-read it over the next frames to
+  // see whether the game keeps it or overwrites it from physics.
+  if (MOVE_SPAWN_TO_PLAYER) {
+    chr.add(0x90).writeFloat(mine[0] + 2);
+    chr.add(0x94).writeFloat(mine[1]);
+    chr.add(0x98).writeFloat(mine[2]);
+    globalThis.__movedChr = { chr, frames: 0 };
+  }
+  send({ family: 'summon-sign', tag: 'spawn.where', handle: '0x' + WATCH_SPAWN_HANDLE.toString(16), chr: chr.toString(),
+    vtable: rel(chr.readPointer()), at: his.map((v) => v.toFixed(2)), player: mine.map((v) => v.toFixed(2)), distance: d.toFixed(1),
+    hp: chr.add(0x168).readS32() + '/' + chr.add(0x170).readS32() });
+}
 function summonTest() {
   if (!SUMMON_TEST || summoned || !granted) return;
   summoned = true;
@@ -701,6 +760,15 @@ function summonTest() {
     const state = ctrl.add(0x8c).readU8();
     send({ family: 'summon-sign', tag: 'summon_test.state', ctrl: ctrl.toString(), state, b79: ctrl.add(0x79).readU8(), b7a: ctrl.add(0x7a).readU8() });
     if (![3, 4, 5, 6, 8].includes(state)) ctrl.add(0x8c).writeU8(3);
+    // FUN_140415b20 takes the spawn position from gen+0x30 (rotation +0x20) unless
+    // (gen+0x8e & 0xf0) == 0x30 (static, 0x140415b96). Put it 3 m from the player.
+    const me = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer().add(0x90);
+    const before = [0, 4, 8].map((o) => ctrl.add(0x30 + o).readFloat().toFixed(2));
+    ctrl.add(0x30).writeFloat(me.readFloat() + 3);
+    ctrl.add(0x34).writeFloat(me.add(4).readFloat());
+    ctrl.add(0x38).writeFloat(me.add(8).readFloat());
+    send({ family: 'summon-sign', tag: 'summon_test.position', b8e: '0x' + ctrl.add(0x8e).readU8().toString(16), before,
+      after: [0, 4, 8].map((o) => ctrl.add(0x30 + o).readFloat().toFixed(2)) });
   }
   globalThis.__summoning = true;
   const ret = generate(mgr, globalThis.__summonId, 1);
@@ -709,7 +777,9 @@ function summonTest() {
     globalThis.__b302.at.writeU8(globalThis.__b302.was);
     globalThis.__b302 = undefined;
   }
-  send({ family: 'summon-sign', tag: 'summon_test', entity: '0x' + SUMMON_ENTITY.toString(16), ret: ret.toString() });
+  send({ family: 'summon-sign', tag: 'summon_test', entity: '0x' + SUMMON_ENTITY.toString(16), ret: ret.toString(),
+    at: ret.isNull() ? null : [0, 4, 8].map((o) => ret.add(0x90 + o).readFloat().toFixed(2)) });
+  if (!ret.isNull()) globalThis.__movedChr = { chr: ret, frames: 0 };
 }
 let lastSignWords = '';
 function watchSign() {
@@ -801,6 +871,8 @@ globalThis.__useNavCb = new NativeCallback((self, dt) => {
   }
   try {
     prepareThenSummon();
+    reportSpawn();
+    watchMoved();
   } catch (e) {
     send({ family: 'summon-sign', tag: 'summon_test.refused', why: 'threw ' + e.message });
   }
