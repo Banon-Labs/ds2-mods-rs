@@ -475,6 +475,32 @@ function npcSignTest() {
   }
   // The touch needs the NPC's character loaded (0x140359530), which offline it is not: request it
   // now through the native "prepare generator" 0x140412970, so it is resident by the time of the touch.
+  // A summoned NPC kept alive (the leave reason is suppressed) holds his NetNpcPhantom slot, and the
+  // next touch of his sign then does nothing (measured 2026-11-02). Release it the game's way: set
+  // the slot's next state (+0x18) to 0, so FUN_140252270 runs FUN_140252620(0) -> FUN_140252580
+  // (despawn, clear). The slot is the one FUN_140252620 last reported (stable heap address in a
+  // session; 0x7ffffe5935f0 in this one) -- only touched when its entity matches.
+  // All five slots (manager +0x10, stride 0x4c, FUN_1402540f0) -- assuming 0x7ffffe5935f0 is slot 0.
+  try {
+    const base = ptr('0x7ffffe5935f0');
+    const slots = [];
+    for (let k = -4; k < 5; k++) {
+      const s = base.add(k * 0x4c);
+      slots.push({ k, slot: s.toString(), ent: '0x' + (s.add(4).readU32() >>> 0).toString(16), type: s.add(8).readU8(), cur: s.add(0x14).readS32(), next: s.add(0x18).readS32() });
+    }
+    send({ family: 'summon-sign', tag: 'npc_sign_test.slots', slots });
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'npc_sign_test.slots', error: e.message });
+  }
+  try {
+    const slot = globalThis.__npcSlot || ptr('0x7ffffe5935f0');
+    const ent = slot.add(4).readU32();
+    const cur = slot.add(0x14).readS32();
+    send({ family: 'summon-sign', tag: 'npc_sign_test.slot_before', slot: slot.toString(), ent: '0x' + (ent >>> 0).toString(16), cur, next: slot.add(0x18).readS32() });
+    if (ent === pick.entity && cur !== 0) slot.add(0x18).writeS32(0);
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'npc_sign_test.slot_before', error: e.message });
+  }
   prepareGenerator(pick.ctrl, 0);
   send({ family: 'summon-sign', tag: 'npc_sign_test.prepared', chrId: pick.ctrl.add(0x60).readPointer().readU32() });
 }
@@ -630,6 +656,140 @@ Interceptor.attach(at(0x0020a5d0), {
     if (globalThis.__watchSign && handle === (globalThis.__watchSign.readU32() >>> 0))
       send({ family: 'summon-sign', tag: 'sign.sfx', handle: '0x' + handle.toString(16), type: handle & 0xf });
   },
+});
+// THE REQUEST (OK press stopped summoning, 2026-11-02). FUN_1402524b0(slot, id, ctx, &entity) is
+// what puts a slot into state 1: it takes chrType from the entity, asks FUN_1402c08e0(ctx, &out,
+// &chrType) for an allocation, and refuses when out = (0, <0). Log both.
+Interceptor.attach(at(0x002524b0), {
+  onEnter(args) { this.entity = args[3].readU32(); },
+  onLeave(ret) { send({ family: 'summon-sign', tag: 'phantom.request', entity: '0x' + (this.entity >>> 0).toString(16), ok: ret.toInt32() & 0xff }); },
+});
+// FUN_1402c08e0 refuses (out = 0, -1) whenever [[ctx+8]+0xc] != [[ctx+8]+0x10] -- measured
+// refusing after the earlier summons I kept alive/interrupted. Log both and, with
+// FORCE_OK_CHECKS, make +0x10 equal +0xc so the allocation (FUN_1402d3110) runs.
+Interceptor.attach(at(0x002c08e0), {
+  onEnter(args) {
+    this.out = args[1];
+    this.type = args[2].readU8();
+    const q = args[0].add(8).readPointer();
+    const a = q.add(0xc).readS32();
+    const b = q.add(0x10).readS32();
+    send({ family: 'summon-sign', tag: 'phantom.request_busy', a, b, forced: FORCE_OK_CHECKS && a !== b });
+    if (FORCE_OK_CHECKS && a !== b) q.add(0x10).writeS32(a);
+  },
+  onLeave() { send({ family: 'summon-sign', tag: 'phantom.request_alloc', type: this.type, out: [this.out.readS32(), this.out.add(4).readS32()] }); },
+});
+// THE ALLOCATION ITSELF (busy counters measured equal, 14/14, and it still refused). FUN_1402d3110
+// (ctx) refuses unless FUN_1402d1790 (per-type caps) and FUN_1402d1e00 pass, then FUN_1402d3040
+// marks member entries used. FUN_1402d1e00 wants >= 1 entry free in a 5-entry pool at
+// [ctx+0x70+0x1b0] (stride 0x14, +8 == 0 free); FUN_1402d3040 writes 2 there per summon and nothing
+// frees it offline, so the sixth summon is refused. Log the pool; with none free, free the 2s.
+Interceptor.attach(at(0x002d3110), {
+  onEnter(args) {
+    const pool = args[0].add(0x220).readPointer();
+    const states = [];
+    for (let i = 0; i < 5; i++) states.push(pool.add(i * 0x14 + 8).readS32());
+    const full = !states.includes(0);
+    globalThis.__poolHasFree = !full || FORCE_OK_CHECKS;
+    send({ family: 'summon-sign', tag: 'phantom.alloc_pool', type: args[2].readU8(), states, forced: FORCE_OK_CHECKS && full });
+    if (FORCE_OK_CHECKS && full) {
+      for (let i = 0; i < 5; i++) if (states[i] === 2) pool.add(i * 0x14 + 8).writeS32(0);
+    }
+  },
+});
+// Measured: pool [2,2,2,0,0] (two free) and alloc_free still 0, so its other half refused:
+// FUN_1402d2df0(ctx+0x70, type) wants three per-type records (FUN_1402d26e0 lookups in tables at
+// +0, +0x90, +0x120) whose +8 reads 1, then 1-2, then 1-2. Log those three; while the pool has
+// room, force alloc_free's answer to 1.
+for (const [name, rva] of [['alloc_caps', 0x002d1790], ['alloc_free', 0x002d1e00], ['alloc_mark', 0x002d3040]]) {
+  Interceptor.attach(at(rva), {
+    onEnter() { this.mine = globalThis.__inAlloc === true; if (this.mine && name === 'alloc_free') globalThis.__typeStates = []; },
+    onLeave(ret) {
+      if (!this.mine) return;
+      const native = ret.toInt32() & 0xff;
+      const forced = FORCE_OK_CHECKS && name === 'alloc_free' && native === 0 && globalThis.__poolHasFree === true;
+      send({ family: 'summon-sign', tag: 'phantom.' + name, result: native, forced, typeStates: name === 'alloc_free' ? globalThis.__typeStates : undefined });
+      if (forced) ret.replace(ptr(1));
+    },
+  });
+}
+Interceptor.attach(at(0x002d2df0), {
+  onEnter() { this.mine = globalThis.__inAlloc === true; if (this.mine) globalThis.__inTypeStates = true; },
+  onLeave() { if (this.mine) globalThis.__inTypeStates = false; },
+});
+// THE MARK STEP FUN_1402d3040 (measured: refuses after alloc_free passes). It needs
+// FUN_1402d20e0(pool, out, id) to find pool entries whose first 8 bytes are the new id (count at
+// out+0x30), and FUN_1402d27c0(ctx+0x70, out, type) to read 1 at out+8 (first table). Log both,
+// and the pool's entries after FUN_1402d3640 assigns them.
+for (const [name, rva, off, wide] of [['mark_entries', 0x002d20e0, 0x30, true], ['mark_state', 0x002d27c0, 8, false]]) {
+  Interceptor.attach(at(rva), {
+    onEnter(args) { this.mine = globalThis.__inAlloc === true; this.out = args[1]; this.id = args[2]; },
+    onLeave() {
+      if (!this.mine) return;
+      const v = wide ? this.out.add(off).readU64().toString() : this.out.add(off).readS32();
+      send({ family: 'summon-sign', tag: 'phantom.' + name, value: v, id: name === 'mark_entries' ? this.id.toString() : undefined });
+    },
+  });
+}
+Interceptor.attach(at(0x002d3640), {
+  onEnter(args) { this.mine = globalThis.__inAlloc === true; this.ctx = args[0]; this.id = args[2]; },
+  onLeave() {
+    if (!this.mine) return;
+    const pool = this.ctx.add(0x1b0).readPointer();
+    const entries = [];
+    for (let i = 0; i < 5; i++) entries.push([pool.add(i * 0x14).readU32(), pool.add(i * 0x14 + 4).readU32(), pool.add(i * 0x14 + 8).readS32()].map((x) => '0x' + (x >>> 0).toString(16)).join(':'));
+    send({ family: 'summon-sign', tag: 'phantom.assign', id: this.id.toString(), entries });
+  },
+});
+Interceptor.attach(at(0x002d26e0), {
+  onLeave(ret) {
+    if (globalThis.__inTypeStates !== true) return;
+    const r = ptr(ret.toString());
+    try {
+      const v = r.add(8).readS32();
+      globalThis.__typeStates.push(v);
+      // Measured [0, 2, 2]: the first table (ctx+0x70 itself, which FUN_1402d3040's FUN_1402d27c0
+      // also reads and wants == 1) left at 0 by the previous summon. Put it back to 1.
+      if (FORCE_OK_CHECKS && globalThis.__typeStates.length === 1 && v === 0) r.add(8).writeS32(1);
+    } catch (e) { globalThis.__typeStates.push(e.message); }
+  },
+});
+Interceptor.attach(at(0x002d3110), {
+  onEnter() { globalThis.__inAlloc = true; },
+  onLeave() { globalThis.__inAlloc = false; },
+});
+// THE OK PRESS (stopped working after several summons, 2026-11-02). The dialog's OK reaches
+// FUN_1402a41b0(mgr, &handle), which summons (FUN_1402a2f00 for an NPC sign) only if three checks
+// pass: 0x140291c30 (net properties), 0x140275ea0 (mgr, chrType, isNpc), 0x1402c6460 (context).
+// Log each result at its call site in FUN_1402a41b0; FORCE_OK_CHECKS makes a refusal pass.
+const FORCE_OK_CHECKS = true;
+for (const [name, rva, site] of [['ok_net_props', 0x00291c30, 0x002a426d], ['ok_mgr', 0x00275ea0, 0x002a4284], ['ok_ctx', 0x002c6460, 0x002a42c1]]) {
+  Interceptor.attach(at(rva), {
+    onEnter() { this.on = this.returnAddress.equals(at(site)); },
+    onLeave(ret) {
+      if (!this.on) return;
+      const native = ret.toInt32() & 0xff;
+      send({ family: 'summon-sign', tag: 'phantom.' + name, native, forced: FORCE_OK_CHECKS && native === 0 });
+      if (FORCE_OK_CHECKS && native === 0) ret.replace(ptr(1));
+    },
+  });
+}
+// After the OK checks, FUN_1402a2f00 -> FUN_140253f60(mgr, &entity) enqueues the NPC summon
+// (FUN_140254b70) only if 0x1402c06c0(ctx, &entity) and 0x140412060(gen) hold. With ok_mgr forced
+// the sign vanished and nothing came (2026-11-02): log both and the enqueue; force the first.
+for (const [name, rva, site] of [['enq_entity', 0x002c06c0, 0x00253f9b], ['enq_gen', 0x00412060, 0x00253fc3]]) {
+  Interceptor.attach(at(rva), {
+    onEnter() { this.on = this.returnAddress.equals(at(site)); },
+    onLeave(ret) {
+      if (!this.on) return;
+      const native = ret.toInt32() & 0xff;
+      send({ family: 'summon-sign', tag: 'phantom.' + name, native, forced: FORCE_OK_CHECKS && native === 0 });
+      if (FORCE_OK_CHECKS && native === 0) ret.replace(ptr(1));
+    },
+  });
+}
+Interceptor.attach(at(0x00254b70), {
+  onEnter(args) { send({ family: 'summon-sign', tag: 'phantom.enqueue', entity: '0x' + (args[1].readU32() >>> 0).toString(16) }); },
 });
 const SLOT_CHR_TYPE = 16;
 const slotFields = (s) => ({ cur: s.add(0x14).readS32(), next: s.add(0x18).readS32(), t1c: s.add(0x1c).readFloat().toFixed(2),
@@ -1108,16 +1268,55 @@ function touchSummonEnter(ctx, args) {
   ctrl.add(0x28).writeFloat(me.add(8).readFloat());
   ctx.touch = true;
   globalThis.__summoning = true;
+  globalThis.__auraUntil = Date.now() + 10000;
   send({ family: 'summon-sign', tag: 'touch_summon', entity: '0x' + entity.toString(16), state, loaded: chrLoaded(gm.add(0x18).readPointer(), ctrl.add(0x60).readPointer().readU32()) });
 }
+// THE AURA (user 2026-11-02: blue, with his phantom type 16). ChrNetworkPhantomParam row 1 (white
+// NPC) carries SpEffect 100015, rows 5/6/16 (red) 100020 -- so the glow may be an applied SpEffect.
+// Log every applySpEffect (0x14014bec0(ctrl, struct)) and addSpEffectToList (0x1402206d0) for ~10 s
+// after a touch, with the struct's first words.
+for (const [name, rva] of [['apply_speffect', 0x0014bec0], ['add_speffect', 0x002206d0]]) {
+  Interceptor.attach(at(rva), {
+    onEnter(args) {
+      if (!globalThis.__auraUntil || Date.now() > globalThis.__auraUntil) return;
+      let words = null;
+      try { words = [0, 4, 8, 12].map((o) => args[1].add(o).readS32()); } catch (e) { words = e.message; }
+      send({ family: 'summon-sign', tag: 'aura.' + name, ctrl: args[0].toString(), words, from: rel(this.returnAddress) });
+    },
+  });
+}
+const AURA_PHANTOM_PARAM = 3; // ChrNetworkPhantomParam row 16's chr_phantom_param_id (red)
 function touchSummonLeave(ctx, ret) {
+  globalThis.__auraUntil = Date.now() + 10000;
   if (!ctx.touch) return;
   globalThis.__summoning = false;
   if (globalThis.__b302) {
     globalThis.__b302.at.writeU8(globalThis.__b302.was);
     globalThis.__b302 = undefined;
   }
-  send({ family: 'summon-sign', tag: 'touch_summon.ret', ret: ret.toString() });
+  // The aura: ChrNetworkPhantomParam is looked up by [chr+0xb0]+0x3c (0x14016f510); row 16 names
+  // the red-invader ChrPhantomParam rows (3; 4, 5, 28), row 1 the white NPC one (2). He came in
+  // blue with chrType 16 forced at spawn (user, 2026-11-02): read what his phantom type really is.
+  let phantomType = null;
+  let spCtrl = null;
+  try {
+    if (!ret.isNull()) {
+      phantomType = ret.add(0xb0).readPointer().add(0x3c).readU8();
+      // His ChrSpEffectCtrl, as FUN_140418690 gets it (vtable +0x130), to match aura.* lines.
+      spCtrl = new NativeFunction(ret.readPointer().add(0x130).readPointer(), 'pointer', ['pointer'])(ret).toString();
+      // No SpEffect reached him (measured), so the glow is not one. setCharacterAppearence
+      // (0x140202e40) writes ChrNetworkPhantomParam's chr_phantom_param_id (row 16: 3; rows 1/2:
+      // 2/1) into character_data+0x38. Read it as int and float, then put the red row's id there.
+      const cd = ret.add(0xb0).readPointer();
+      globalThis.__auraCd = { u32: cd.add(0x38).readU32(), f32: cd.add(0x38).readFloat() };
+      if (AURA_PHANTOM_PARAM !== null) {
+        if (globalThis.__auraCd.f32 > 0.5 && globalThis.__auraCd.f32 < 1000) cd.add(0x38).writeFloat(AURA_PHANTOM_PARAM);
+        else cd.add(0x38).writeU32(AURA_PHANTOM_PARAM);
+      }
+      globalThis.__auraCd.now = { u32: cd.add(0x38).readU32(), f32: cd.add(0x38).readFloat() };
+    }
+  } catch (e) { phantomType = e.message; }
+  send({ family: 'summon-sign', tag: 'touch_summon.ret', ret: ret.toString(), phantomType, spCtrl, cd38: globalThis.__auraCd });
   // Copy it: the onLeave return value reads as null after the callback (measured: 0x168 faults).
   if (!ret.isNull()) globalThis.__movedChr = { chr: ptr(ret.toString()), frames: 0 };
 }
