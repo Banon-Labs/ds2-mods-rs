@@ -68,6 +68,8 @@ jobs:
   # main, which is what publishes, always builds.
   changes:
     runs-on: ubuntu-latest
+    # A checkout and one git diff; the default is six hours.
+    timeout-minutes: 5
     permissions:
       contents: read
     outputs:

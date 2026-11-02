@@ -1,28 +1,37 @@
 #!/usr/bin/env python3
-"""Decide whether a CI run has to build and test the Rust: did the change touch a Rust input?
+"""Decide which CI legs a change needs: did it touch a Rust input, a cupcake policy input, neither?
 
     python3 scripts/ci-rust-inputs.py --event pull_request --base <sha>   # CI, writes $GITHUB_OUTPUT
     python3 scripts/ci-rust-inputs.py --event pull_request --base origin/main
     python3 scripts/ci-rust-inputs.py --selftest
 
 WHAT IT DECIDES. `.github/workflows/gate.yml` runs the `host-tests` leg, and `release.yml` its
-DLL build, only when this prints `rust=true`; the `check` leg always runs and passes check.sh
-`--no-rust` when it prints `rust=false`. A pull request that changes only Python scripts, docs or
-cupcake policies then gets the checks that read those files (commit messages, PR template, cupcake
-suites, script selftests) and not the ~20 runner-minutes of cargo that cannot see them. MEASURED
-2026-11-02 on PR #364 (scripts only): `host-tests` 15:57:34 -> 16:10:10, clippy/rustdoc most of
-`check`'s seven minutes, and no crate reads anything under scripts/.
+DLL build, only when this prints `rust=true`. The `check` leg always runs; it passes check.sh
+`--no-rust` when `rust=false`, and `--no-policy` as well when `policy=false`. So a pull request
+that changes only docs gets commit messages, the PR template and the script selftests, and not the
+~20 runner-minutes of cargo or the cupcake suites, neither of which can see it. MEASURED
+2026-11-02: on PR #364 (scripts only) `host-tests` ran 15:57:34 -> 16:10:10 and clippy/rustdoc
+took most of `check`'s seven minutes; on PR #366 (docs only) `check --no-rust` still took 5m40s,
+189 s of it (local) the cupcake section.
 
-THE SET IS WHAT CARGO READS, checked against the tree rather than guessed: the workspace
+RUST INPUTS ARE WHAT CARGO READS, checked against the tree rather than guessed: the workspace
 (`crates/`, `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `clippy.toml`, `rustfmt.toml`,
 `.cargo/`), `vendor/` (ds2-hook's build.rs compiles `vendor/minhook/src`), and `.github/` (three
 crates `include_str!` `.github/dist-ds2-mods.toml`, release.yml packages the other `dist-*`
-files, and a workflow change must prove itself on every leg). `scripts/check.sh` and this file
-are in it too: a change to the gate or to the decision runs the whole gate.
+files, and a workflow change must prove itself on every leg). No crate reads `scripts/`.
 
-IT FAILS TOWARD RUNNING EVERYTHING. Any event but `pull_request` (a push to main, a dispatch) is
-`rust=true` without looking, so every main commit keeps a full verdict. A base that git cannot
-diff against is `rust=true` too: a skip needs a positive answer, never a missing one.
+POLICY INPUTS ARE WHAT THE CUPCAKE SECTION TESTS: everything under `.cupcake/`, the scripts named
+by the section's own tests (`scripts/cupcake*`, `scripts/test-*`, `scripts/check-cupcake-*`,
+`scripts/monitor-throttle.py`), and every `scripts/...` path that a file under `.cupcake/`
+mentions, read from the tree at decision time, so a signal that starts calling a new script is
+covered without an edit here.
+
+`scripts/check.sh` and this file are inputs to both: a change to the gate or to the decision runs
+the whole gate.
+
+IT FAILS TOWARD RUNNING EVERYTHING. Any event but `pull_request` (a push to main, a dispatch) runs
+every leg without looking, so every main commit keeps a full verdict. A base that git cannot diff
+against runs every leg too: a skip needs a positive answer, never a missing one.
 """
 
 from __future__ import annotations
@@ -30,9 +39,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
+from pathlib import Path
 
+ROOT = Path(__file__).resolve().parent.parent
+GATE_FILES = ("scripts/check.sh", "scripts/ci-rust-inputs.py")
 RUST_INPUT_PREFIXES = ("crates/", "vendor/", ".cargo/", ".github/")
 RUST_INPUT_FILES = (
     "Cargo.toml",
@@ -40,9 +53,15 @@ RUST_INPUT_FILES = (
     "rust-toolchain.toml",
     "clippy.toml",
     "rustfmt.toml",
-    "scripts/check.sh",
-    "scripts/ci-rust-inputs.py",
+    *GATE_FILES,
 )
+POLICY_INPUT_PREFIXES = (
+    ".cupcake/",
+    "scripts/cupcake",
+    "scripts/test-",
+    "scripts/check-cupcake-",
+)
+POLICY_INPUT_FILES = ("scripts/monitor-throttle.py", *GATE_FILES)
 
 
 def rust_inputs(paths: list[str]) -> list[str]:
@@ -50,34 +69,68 @@ def rust_inputs(paths: list[str]) -> list[str]:
     return [p for p in paths if p in RUST_INPUT_FILES or p.startswith(RUST_INPUT_PREFIXES)]
 
 
-def gate_legs(rust: bool) -> list[dict[str, str]]:
-    """gate.yml's matrix: both legs, or `check` alone with its cargo steps skipped."""
+def scripts_named_by_policies(root: Path = ROOT) -> set[str]:
+    """Every `scripts/<file>` a file under `.cupcake/` mentions."""
+    named: set[str] = set()
+    for path in (root / ".cupcake").rglob("*"):
+        if path.is_file():
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            named.update(re.findall(r"scripts/[A-Za-z0-9_.-]+", text))
+    return named
+
+
+def policy_inputs(paths: list[str], named: set[str]) -> list[str]:
+    """The changed paths the cupcake section's suites test."""
+    return [
+        p
+        for p in paths
+        if p in POLICY_INPUT_FILES or p in named or p.startswith(POLICY_INPUT_PREFIXES)
+    ]
+
+
+def gate_legs(rust: bool, policy: bool) -> list[dict[str, str]]:
+    """gate.yml's matrix: both legs, or `check` alone with what the change cannot reach skipped."""
     if rust:
         return [{"leg": "check", "args": ""}, {"leg": "host-tests", "args": "--host-tests"}]
-    return [{"leg": "check", "args": "--no-rust"}]
+    return [{"leg": "check", "args": "--no-rust" if policy else "--no-rust --no-policy"}]
 
 
-def decide(event: str, base: str | None, head: str) -> tuple[bool, str]:
-    """(run the Rust legs, why)."""
+def shown(hits: list[str]) -> str:
+    return ", ".join(hits[:5]) + (f" and {len(hits) - 5} more" if len(hits) > 5 else "")
+
+
+def decide(event: str, base: str | None, head: str) -> tuple[bool, bool, str]:
+    """(run the Rust legs, run the policy suites, why)."""
     if event != "pull_request":
-        return True, f"event {event!r} always runs every leg"
+        return True, True, f"event {event!r} always runs every leg"
     if not base:
-        return True, "no base to diff against"
+        return True, True, "no base to diff against"
     run = subprocess.run(
         ["git", "diff", "--name-only", f"{base}...{head}"], capture_output=True, text=True
     )
     if run.returncode:
-        return True, f"git diff {base}...{head} failed: {run.stderr.strip()}"
+        return True, True, f"git diff {base}...{head} failed: {run.stderr.strip()}"
     paths = [p for p in run.stdout.splitlines() if p]
-    hits = rust_inputs(paths)
-    if hits:
-        shown = ", ".join(hits[:5]) + (f" and {len(hits) - 5} more" if len(hits) > 5 else "")
-        return True, f"Rust inputs changed: {shown}"
-    return False, f"no Rust input among the {len(paths)} changed path(s)"
+    rust = rust_inputs(paths)
+    policy = policy_inputs(paths, scripts_named_by_policies())
+    why = [f"Rust inputs changed: {shown(rust)}" if rust else "no Rust input changed"]
+    why.append(f"policy inputs changed: {shown(policy)}" if policy else "no policy input changed")
+    return bool(rust), bool(policy), f"{'; '.join(why)} ({len(paths)} path(s) in the diff)"
 
 
 def selftest() -> int:
-    cases = [
+    failed = 0
+
+    def expect(what: str, got, want) -> None:
+        nonlocal failed
+        if got != want:
+            print(f"FAIL {what}: got {got!r}, want {want!r}")
+            failed += 1
+
+    rust_cases = [
         (["scripts/ds2-msb.py", "docs/X.md"], []),
         (["crates/ds2-loader/src/lib.rs"], ["crates/ds2-loader/src/lib.rs"]),
         (["Cargo.lock", "README.md"], ["Cargo.lock"]),
@@ -90,29 +143,36 @@ def selftest() -> int:
         (["cratesX/a.rs", "data/a.tsv"], []),
         ([], []),
     ]
-    failed = 0
-    for paths, want in cases:
-        got = rust_inputs(paths)
-        if got != want:
-            print(f"FAIL rust_inputs({paths}) = {got}, want {want}")
-            failed += 1
+    for paths, want in rust_cases:
+        expect(f"rust_inputs({paths})", rust_inputs(paths), want)
+    named = {"scripts/ds2-frida-evidence.py"}
+    policy_cases = [
+        (["docs/X.md", "README.md"], []),
+        (["scripts/ds2-msb.py"], []),
+        ([".cupcake/policies/claude/x.rego"], [".cupcake/policies/claude/x.rego"]),
+        (["scripts/cupcake_game_alive.py"], ["scripts/cupcake_game_alive.py"]),
+        (["scripts/test-run-stamp.py"], ["scripts/test-run-stamp.py"]),
+        (["scripts/ds2-frida-evidence.py"], ["scripts/ds2-frida-evidence.py"]),
+        (["scripts/monitor-throttle.py"], ["scripts/monitor-throttle.py"]),
+        (["scripts/check.sh"], ["scripts/check.sh"]),
+        (["crates/x/src/lib.rs"], []),
+    ]
+    for paths, want in policy_cases:
+        expect(f"policy_inputs({paths})", policy_inputs(paths, named), want)
+    # The tree's own policies name scripts, so the set read from it is not empty.
+    expect("scripts named by .cupcake/ is non-empty", bool(scripts_named_by_policies()), True)
     for event in ("push", "workflow_dispatch"):
-        if decide(event, "anything", "HEAD")[0] is not True:
-            print(f"FAIL {event} must run every leg")
-            failed += 1
-    if decide("pull_request", None, "HEAD")[0] is not True:
-        print("FAIL a pull request with no base must run every leg")
-        failed += 1
-    if decide("pull_request", "no-such-ref-for-the-selftest", "HEAD")[0] is not True:
-        print("FAIL an undiffable base must run every leg")
-        failed += 1
-    if [leg["leg"] for leg in gate_legs(True)] != ["check", "host-tests"]:
-        print("FAIL a Rust change must run both legs")
-        failed += 1
-    if gate_legs(False) != [{"leg": "check", "args": "--no-rust"}]:
-        print("FAIL a change with no Rust input runs check alone, with --no-rust")
-        failed += 1
-    total = len(cases) + 6
+        expect(f"{event} runs every leg", decide(event, "anything", "HEAD")[:2], (True, True))
+    expect("no base runs every leg", decide("pull_request", None, "HEAD")[:2], (True, True))
+    expect(
+        "an undiffable base runs every leg",
+        decide("pull_request", "no-such-ref-for-the-selftest", "HEAD")[:2],
+        (True, True),
+    )
+    expect("Rust: both legs", [leg["leg"] for leg in gate_legs(True, False)], ["check", "host-tests"])
+    expect("policy only", gate_legs(False, True), [{"leg": "check", "args": "--no-rust"}])
+    expect("neither", gate_legs(False, False), [{"leg": "check", "args": "--no-rust --no-policy"}])
+    total = len(rust_cases) + len(policy_cases) + 8
     print(f"ci-rust-inputs selftest: {total - failed}/{total} pass")
     return 1 if failed else 0
 
@@ -126,20 +186,27 @@ def main() -> int:
     a = ap.parse_args()
     if a.selftest:
         return selftest()
-    rust, why = decide(a.event, a.base, a.head)
-    legs = json.dumps(gate_legs(rust), separators=(",", ":"))
-    print(f"rust={'true' if rust else 'false'}")
-    print(f"reason={why}")
-    print(f"legs={legs}")
+    rust, policy, why = decide(a.event, a.base, a.head)
+    legs = json.dumps(gate_legs(rust, policy), separators=(",", ":"))
+    lines = [
+        f"rust={'true' if rust else 'false'}",
+        f"policy={'true' if policy else 'false'}",
+        f"reason={why}",
+        f"legs={legs}",
+    ]
+    print("\n".join(lines))
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
         with open(out, "a", encoding="utf-8") as f:
-            f.write(f"rust={'true' if rust else 'false'}\nreason={why}\nlegs={legs}\n")
+            f.write("\n".join(lines) + "\n")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
+        if rust:
+            said = "every leg runs"
+        else:
+            said = "host-tests and the release build are SKIPPED; check runs " + gate_legs(rust, policy)[0]["args"]
         with open(summary, "a", encoding="utf-8") as f:
-            said = "every leg runs" if rust else "host-tests and the release build are SKIPPED; check runs with --no-rust"
-            f.write(f"### Rust inputs: {'changed' if rust else 'unchanged'}\n\n{why}. {said}.\n")
+            f.write(f"### Which legs this change needs\n\n{why}. {said}.\n")
     return 0
 
 

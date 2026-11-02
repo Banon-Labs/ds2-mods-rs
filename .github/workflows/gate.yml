@@ -24,10 +24,11 @@ name: gate
 # `fail-fast: false` so one leg going red never cancels the other and hides its verdict.
 #
 # A PULL REQUEST THAT TOUCHES NO RUST INPUT gets `check` alone, run as `check.sh --no-rust`: every
-# cargo step prints SKIPPED and every other check runs. The `changes` job decides, with
-# `scripts/ci-rust-inputs.py` (the set and why it is that set are in its docstring), and writes its
-# answer and the reason to the run summary, so the skip is on the run page and never silent. Pushes
-# to main and dispatches always run both legs in full.
+# cargo step prints SKIPPED and every other check runs. If it touches no cupcake policy input either,
+# `--no-policy` skips the policy suites the same way. The `changes` job decides, with
+# `scripts/ci-rust-inputs.py` (the sets and why they are those sets are in its docstring), and writes
+# its answer and the reason to the run summary, so the skip is on the run page and never silent.
+# Pushes to main and dispatches always run both legs in full.
 
 on:
   pull_request:
@@ -65,6 +66,8 @@ env:
 jobs:
   changes:
     runs-on: ubuntu-latest
+    # A checkout and one git diff; the default is six hours.
+    timeout-minutes: 5
     permissions:
       contents: read
     outputs:
@@ -115,7 +118,7 @@ jobs:
       # the host-tests leg; it is installed in both legs so the two legs differ only in check.sh's
       # own argument. Not under --no-rust, which runs no cargo.
       - name: Install the cross-compile toolchain and wine
-        if: matrix.args != '--no-rust'
+        if: ${{ !contains(matrix.args, '--no-rust') }}
         run: |
           sudo apt-get install -y --no-install-recommends clang lld llvm wine \
             || { sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld llvm wine; }
@@ -131,13 +134,13 @@ jobs:
           cargo fmt --version
 
       - name: Install cargo-xwin
-        if: matrix.args != '--no-rust'
+        if: ${{ !contains(matrix.args, '--no-rust') }}
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-xwin@${{ env.CARGO_XWIN_VERSION }}
 
       - name: Cache the Windows CRT and SDK
-        if: matrix.args != '--no-rust'
+        if: ${{ !contains(matrix.args, '--no-rust') }}
         uses: actions/cache@v4
         with:
           path: ~/.cache/cargo-xwin
@@ -145,7 +148,9 @@ jobs:
 
       # From the release asset, pinned, and checked: without `-f` a redirector's error page would be
       # written over the binary and every policy step would then fail to parse.
+      # The OPA and cupcake steps are skipped under --no-policy, which runs no policy suite.
       - name: Install OPA (pinned)
+        if: ${{ !contains(matrix.args, '--no-policy') }}
         run: |
           curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/opa \
             "https://github.com/open-policy-agent/opa/releases/download/${OPA_VERSION}/opa_linux_amd64_static"
@@ -155,6 +160,7 @@ jobs:
       # No release exists for 0.5.2 at all, so it is built from source; the binary is cached on the
       # rev so the build only runs when CUPCAKE_REV moves.
       - name: Cache the cupcake binary
+        if: ${{ !contains(matrix.args, '--no-policy') }}
         id: cache-cupcake
         uses: actions/cache@v4
         with:
@@ -162,10 +168,11 @@ jobs:
           key: cupcake-${{ runner.os }}-${{ env.CUPCAKE_REV }}
 
       - name: Build cupcake (pinned)
-        if: steps.cache-cupcake.outputs.cache-hit != 'true'
+        if: ${{ !contains(matrix.args, '--no-policy') && steps.cache-cupcake.outputs.cache-hit != 'true' }}
         run: cargo install --git "$CUPCAKE_REMOTE" --rev "$CUPCAKE_REV" cupcake-cli --locked
 
       - name: Check cupcake
+        if: ${{ !contains(matrix.args, '--no-policy') }}
         run: cupcake --version | grep -qx 'cupcake 0.5.2'
 
       # scripts/check-allow-debt.py runs `~/.local/bin/bd show <id>` for every `# DEBT: <id>` above an
@@ -184,7 +191,7 @@ jobs:
           "$HOME/.local/bin/bd" count
 
       - uses: Swatinem/rust-cache@v2
-        if: matrix.args != '--no-rust'
+        if: ${{ !contains(matrix.args, '--no-rust') }}
         with:
           key: ${{ matrix.leg }}
 

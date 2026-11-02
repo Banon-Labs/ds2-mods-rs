@@ -18,14 +18,22 @@ cd "$(dirname "$0")/.."
 TARGET=x86_64-pc-windows-msvc
 run_host_tests=0
 run_rust=1
-case "${1:-}" in
-  --host-tests) run_host_tests=1 ;;
-  # Every cargo step is skipped and says so; everything else runs. gate.yml passes this only when
-  # scripts/ci-rust-inputs.py found no Rust input in the pull request -- see that file for the set.
-  --no-rust) run_rust=0 ;;
-  "") ;;
-  *) echo "usage: check.sh [--host-tests | --no-rust]" >&2; exit 2 ;;
-esac
+run_policy=1
+for arg in "$@"; do
+  case "$arg" in
+    --host-tests) run_host_tests=1 ;;
+    # Each skip prints SKIPPED where its steps would have run; everything else runs. gate.yml
+    # passes them only on scripts/ci-rust-inputs.py's answer for the pull request -- see that file
+    # for which paths count as Rust and as policy inputs.
+    --no-rust) run_rust=0 ;;
+    --no-policy) run_policy=0 ;;
+    *) echo "usage: check.sh [--host-tests | --no-rust [--no-policy]]" >&2; exit 2 ;;
+  esac
+done
+if (( run_host_tests && (! run_rust || ! run_policy) )); then
+  echo "check.sh: --host-tests runs everything; it does not combine with --no-rust or --no-policy" >&2
+  exit 2
+fi
 
 # RECORD THE RUN, pass or fail, so `scripts/pr-run-stamp.py --from-last-check` can print the PR
 # footer's `Run-Stamp:` line from what actually ran instead of from what an agent types. One file per
@@ -39,6 +47,7 @@ check_tree=clean
 check_gate=check.sh
 (( run_host_tests )) && check_gate=check.sh+host-tests
 (( run_rust )) || check_gate=check.sh+no-rust
+(( run_policy )) || check_gate=$check_gate+no-policy
 record_check_run() {
   local rc=$? result=fail
   (( rc == 0 )) && result=pass
@@ -238,7 +247,9 @@ echo "== cupcake policies =="
 # anyone noticing (it needs an explicit `enabled: true`; configuring it is not enough in cupcake
 # 0.5.2). So a missing opa is a hard failure with the fix printed, and CUPCAKE_SKIP=1 is the
 # deliberate, visible opt-out.
-if [[ -n "${CUPCAKE_SKIP:-}" ]]; then
+if (( ! run_policy )); then
+  echo "  SKIPPED (--no-policy)"
+elif [[ -n "${CUPCAKE_SKIP:-}" ]]; then
   echo "  SKIPPED (CUPCAKE_SKIP set)"
 else
   command -v opa >/dev/null 2>&1 || {
