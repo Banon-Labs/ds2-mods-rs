@@ -60,10 +60,20 @@ def walk(md, image: bytes, start: int, reg: int, offsets: list[int], window: int
             want += 1
             if want == len(offsets):
                 return hops
-            if ops and ops[0].type == x86.X86_OP_REG and ins.mnemonic == "mov":
+            if ops and ops[0].type == x86.X86_OP_REG and ins.mnemonic in ("mov", "lea"):
                 live = {ops[0].reg}
                 continue
             return []
+        # `add reg, imm` on a live pointer is a hop to an embedded subobject (a secondary base
+        # class's vtable pointer, say) that never touches memory.
+        if (ins.mnemonic == "add" and len(ops) == 2 and ops[0].type == x86.X86_OP_REG
+                and ops[0].reg in live and ops[1].type == x86.X86_OP_IMM and ops[1].imm == offsets[want]):
+            hops.append(ins.address)
+            want += 1
+            if want == len(offsets):
+                return hops
+            live = {ops[0].reg}
+            continue
         # A register-to-register copy keeps the pointer alive under a new name.
         if (ins.mnemonic == "mov" and len(ops) == 2 and ops[0].type == x86.X86_OP_REG
                 and ops[1].type == x86.X86_OP_REG and ops[1].reg in live):
