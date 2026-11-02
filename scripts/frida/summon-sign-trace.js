@@ -626,12 +626,64 @@ Interceptor.attach(at(0x00418690), {
     }
   },
 });
+// Last gate (measured): 0x140359530(chrMgr, chrId) at 0x14041616d is false because chr 744009 is
+// not in the loaded list. FORCE_SPAWN answers true for this call, to see whether a player-shaped
+// NPC spawns without it.
+Interceptor.attach(at(0x00359530), {
+  onEnter() { this.on = globalThis.__summoning === true && this.returnAddress.equals(at(0x0041616d)); },
+  onLeave(ret) {
+    if (!this.on) return;
+    send({ family: 'summon-sign', tag: 'phantom.loaded_gate', native: ret.toInt32() & 0xff });
+    if (FORCE_SPAWN && (ret.toInt32() & 0xff) === 0) ret.replace(ptr(1));
+  },
+});
+// Then the row's two event flags (desc +4 = 810010, +8 = 744000 for Pate) through 0x140422bc0 at
+// 0x14041618f / 0x1404161a1; measured: 810010 is off. FORCE_SPAWN answers true for both.
+Interceptor.attach(at(0x00422bc0), {
+  onEnter(args) {
+    this.on = globalThis.__summoning === true && (this.returnAddress.equals(at(0x0041618f)) || this.returnAddress.equals(at(0x004161a1)));
+    this.flag = args[1].toInt32();
+  },
+  onLeave(ret) {
+    if (!this.on) return;
+    send({ family: 'summon-sign', tag: 'phantom.flag_gate', flag: this.flag, native: ret.toInt32() & 0xff });
+    if (FORCE_SPAWN && (ret.toInt32() & 0xff) === 0) ret.replace(ptr(1));
+  },
+});
 // The touch, done by the agent: what NetNpcPhantomDirection_HOST (0x1402529c0) calls.
 const SUMMON_TEST = true;
 const SUMMON_ENTITY = 0x2824; // Mild-Mannered Pate's entry in m10_10_00_00 (measured: the sign named him)
 const generate = new NativeFunction(at(0x00415b20), 'pointer', ['pointer', 'pointer', 'uint8']);
 globalThis.__summonId = Memory.alloc(8);
 let summoned = false;
+// Pate's character (744009) is not loaded (0x140350fd0). 0x140412970(gen, flag) is the native
+// "prepare generator": it requests the spawn row's chr id through the acquire 0x140359760 and
+// registers its event flags. Call it once, poll the loaded check 0x140359530([GameManagerImp+0x18],
+// id) every frame, and summon only once it says loaded (or after ~10 s, to see that it never did).
+const prepareGenerator = new NativeFunction(at(0x00412970), 'void', ['pointer', 'uint8']);
+const chrLoaded = new NativeFunction(at(0x00359530), 'uint8', ['pointer', 'uint32']);
+let prepStage = 0;
+let prepFrames = 0;
+function prepareThenSummon() {
+  if (!SUMMON_TEST || summoned || !granted) return;
+  const gm = GAME_MANAGER_IMP.readPointer();
+  const resolve = new NativeFunction(at(0x0017b7e0), 'pointer', ['pointer']);
+  globalThis.__summonId.writeU32(SUMMON_ENTITY);
+  const ctrl = resolve(globalThis.__summonId);
+  if (ctrl.isNull()) return;
+  const chrId = ctrl.add(0x60).readPointer().readU32();
+  if (prepStage === 0) {
+    prepStage = 1;
+    send({ family: 'summon-sign', tag: 'summon_test.prepare', chrId, loaded_before: chrLoaded(gm.add(0x18).readPointer(), chrId) });
+    prepareGenerator(ctrl, 0);
+    return;
+  }
+  prepFrames += 1;
+  const loaded = chrLoaded(gm.add(0x18).readPointer(), chrId);
+  if (!loaded && prepFrames < 600) return;
+  send({ family: 'summon-sign', tag: 'summon_test.loaded', chrId, loaded, frames: prepFrames });
+  summonTest();
+}
 function summonTest() {
   if (!SUMMON_TEST || summoned || !granted) return;
   summoned = true;
@@ -748,7 +800,7 @@ globalThis.__useNavCb = new NativeCallback((self, dt) => {
     send({ family: 'summon-sign', tag: 'sign.words.error', error: e.message });
   }
   try {
-    summonTest();
+    prepareThenSummon();
   } catch (e) {
     send({ family: 'summon-sign', tag: 'summon_test.refused', why: 'threw ' + e.message });
   }
