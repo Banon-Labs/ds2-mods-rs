@@ -17,7 +17,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 TARGET=x86_64-pc-windows-msvc
 run_host_tests=0
-[[ "${1:-}" == "--host-tests" ]] && run_host_tests=1
+run_rust=1
+case "${1:-}" in
+  --host-tests) run_host_tests=1 ;;
+  # Every cargo step is skipped and says so; everything else runs. gate.yml passes this only when
+  # scripts/ci-rust-inputs.py found no Rust input in the pull request -- see that file for the set.
+  --no-rust) run_rust=0 ;;
+  "") ;;
+  *) echo "usage: check.sh [--host-tests | --no-rust]" >&2; exit 2 ;;
+esac
 
 # RECORD THE RUN, pass or fail, so `scripts/pr-run-stamp.py --from-last-check` can print the PR
 # footer's `Run-Stamp:` line from what actually ran instead of from what an agent types. One file per
@@ -30,6 +38,7 @@ check_tree=clean
 [[ -n "$(git status --porcelain --untracked-files=no)" ]] && check_tree=dirty
 check_gate=check.sh
 (( run_host_tests )) && check_gate=check.sh+host-tests
+(( run_rust )) || check_gate=check.sh+no-rust
 record_check_run() {
   local rc=$? result=fail
   (( rc == 0 )) && result=pass
@@ -100,6 +109,12 @@ echo "== teardown after an evidence push =="
 python3 scripts/ds2-teardown-after-evidence-push.py --selftest >/dev/null
 echo "  ds2-teardown-after-evidence-push.py: OK"
 
+echo "== which legs a pull request needs =="
+# gate.yml skips host-tests and passes --no-rust on this script's answer, so a wrong answer is a
+# Rust change merged without its tests.
+python3 scripts/ci-rust-inputs.py --selftest >/dev/null
+echo "  ci-rust-inputs.py: OK"
+
 echo "== rustfmt =="
 # NOT `cargo fmt --all`. `--all` is documented as "format all packages, AND ALSO THEIR LOCAL
 # PATH-BASED DEPENDENCIES", so the moment a crate here depended on `../dearxan` the gate started
@@ -107,15 +122,23 @@ echo "== rustfmt =="
 # on the clippy line below: a path dependency outside this workspace does not get a vote on our
 # gate. `cargo metadata --no-deps` lists workspace members only, so this keeps working with the
 # members glob in Cargo.toml -- a new crate needs no edit here.
-members=$(cargo metadata --no-deps --format-version 1 \
-  | python3 -c 'import json,sys; print("\n".join(p["name"] for p in json.load(sys.stdin)["packages"]))')
-# shellcheck disable=SC2086  # deliberate word splitting: one -p per member.
-cargo fmt $(printf -- '-p %s ' $members) -- --check
+if (( run_rust )); then
+  members=$(cargo metadata --no-deps --format-version 1 \
+    | python3 -c 'import json,sys; print("\n".join(p["name"] for p in json.load(sys.stdin)["packages"]))')
+  # shellcheck disable=SC2086  # deliberate word splitting: one -p per member.
+  cargo fmt $(printf -- '-p %s ' $members) -- --check
+else
+  echo "  SKIPPED (--no-rust)"
+fi
 
 echo "== clippy ($TARGET) =="
 # `--all-targets` so tests and examples are linted too, `--no-deps` so a warning in a path
 # dependency outside this workspace does not fail our gate.
-cargo xwin clippy --workspace --all-targets --no-deps --target "$TARGET"
+if (( run_rust )); then
+  cargo xwin clippy --workspace --all-targets --no-deps --target "$TARGET"
+else
+  echo "  SKIPPED (--no-rust)"
+fi
 
 echo "== docs ($TARGET) =="
 # THIS STEP EXISTS FOR ONE LINT. `docs/COMMENTS.md` says a comment naming an address in
@@ -128,7 +151,12 @@ echo "== docs ($TARGET) =="
 # `#![deny(warnings)]`. rustdoc has no lint for a dead relative path, which is why the convention
 # spends a plain-text filename there and checks it below rather than writing a link that rots in
 # silence.
-cargo xwin doc $(printf -- '-p %s ' $members) --no-deps --target "$TARGET" --quiet
+if (( run_rust )); then
+  # shellcheck disable=SC2086  # deliberate word splitting: one -p per member.
+  cargo xwin doc $(printf -- '-p %s ' $members) --no-deps --target "$TARGET" --quiet
+else
+  echo "  SKIPPED (--no-rust)"
+fi
 
 echo "== docs/ references =="
 # Every `docs/<name>.md` named from a comment must name a file that exists. This is the other
@@ -376,8 +404,12 @@ echo "  ds2-run.py: OK"
 # and in what order, and gets exactly one attempt per launch -- a plan that silently came out
 # empty would produce a session with no mods in it and no error saying so. The Windows half
 # cannot run here; this is the planning half, which is the half that can be wrong quietly.
-cargo run --quiet -p ds2-launcher -- --selftest >/dev/null
-echo "  ds2-launcher: OK"
+if (( run_rust )); then
+  cargo run --quiet -p ds2-launcher -- --selftest >/dev/null
+  echo "  ds2-launcher: OK"
+else
+  echo "  ds2-launcher: SKIPPED (--no-rust)"
+fi
 # The live roster reader. `ds2-invasion-path` decides who to draw a path to by reading a name out
 # of a `std::wstring`, and this script reads the same fields the same way -- so a wrong reader
 # here is a wrong reader in the crate, discovered against a fixture instead of against a session.

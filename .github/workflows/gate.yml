@@ -22,6 +22,12 @@ name: gate
 #                  the only mode in which wine runs at all.
 #
 # `fail-fast: false` so one leg going red never cancels the other and hides its verdict.
+#
+# A PULL REQUEST THAT TOUCHES NO RUST INPUT gets `check` alone, run as `check.sh --no-rust`: every
+# cargo step prints SKIPPED and every other check runs. The `changes` job decides, with
+# `scripts/ci-rust-inputs.py` (the set and why it is that set are in its docstring), and writes its
+# answer and the reason to the run summary, so the skip is on the run page and never silent. Pushes
+# to main and dispatches always run both legs in full.
 
 on:
   pull_request:
@@ -57,8 +63,26 @@ env:
   BD_VERSION: 1.0.4
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      rust: ${{ steps.decide.outputs.rust }}
+      legs: ${{ steps.decide.outputs.legs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/ci-rust-inputs.py --event "$EVENT" ${BASE:+--base "$BASE"}
+
   gate:
     name: ${{ matrix.leg }}
+    needs: changes
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -66,11 +90,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - leg: check
-            args: ""
-          - leg: host-tests
-            args: --host-tests
+        include: ${{ fromJSON(needs.changes.outputs.legs) }}
     steps:
       # fetch-depth: 0 because check.sh's first step runs `git merge-base origin/main HEAD` to
       # find the branch's own commits; a shallow clone has no merge base and no origin/main.
@@ -93,8 +113,9 @@ jobs:
 
       # clang/lld/llvm are what cargo-xwin drives. wine executes the cfg(windows) test binaries in
       # the host-tests leg; it is installed in both legs so the two legs differ only in check.sh's
-      # own argument.
+      # own argument. Not under --no-rust, which runs no cargo.
       - name: Install the cross-compile toolchain and wine
+        if: matrix.args != '--no-rust'
         run: |
           sudo apt-get install -y --no-install-recommends clang lld llvm wine \
             || { sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld llvm wine; }
@@ -110,11 +131,13 @@ jobs:
           cargo fmt --version
 
       - name: Install cargo-xwin
+        if: matrix.args != '--no-rust'
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-xwin@${{ env.CARGO_XWIN_VERSION }}
 
       - name: Cache the Windows CRT and SDK
+        if: matrix.args != '--no-rust'
         uses: actions/cache@v4
         with:
           path: ~/.cache/cargo-xwin
@@ -161,6 +184,7 @@ jobs:
           "$HOME/.local/bin/bd" count
 
       - uses: Swatinem/rust-cache@v2
+        if: matrix.args != '--no-rust'
         with:
           key: ${{ matrix.leg }}
 
