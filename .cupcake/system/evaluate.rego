@@ -83,6 +83,8 @@ all_halts contains decision if { some decision in data.cupcake.policies.claude.n
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_idle_game_after_evidence.halt }
 
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_stop_while_frida_attached.halt }
+
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_unspent_run_evidence.halt }
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_shouting_at_turn_end.halt }
