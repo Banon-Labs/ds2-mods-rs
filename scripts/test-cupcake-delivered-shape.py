@@ -108,6 +108,31 @@ DEV_NULL = "/dev/" + "null"
 # git's short no-verify flag as a bare word, for the commit-message heredoc cases.
 SHORT_N = " -" + "n"
 
+
+def _push_target_checkouts() -> tuple[Path, Path]:
+    """Two throwaway checkouts outside this repository, one on a feature branch and one on main.
+
+    The push_target_branches signal reads their branches for real. Outside this repository so the
+    runtime-evidence guard answers FOREIGN for them and the verdict stays about the push target.
+    """
+    scratch = Path(tempfile.mkdtemp(prefix="delivered-shape-push-target-"))
+    checkouts = (scratch / "feature", scratch / "main")
+    for path, branch in zip(checkouts, ("ci/skip-rust-legs", "main")):
+        subprocess.run(["git", "init", "-q", "-b", branch, str(path)], check=True)
+    return checkouts
+
+
+PUSH_FEATURE_CHECKOUT, PUSH_MAIN_CHECKOUT = _push_target_checkouts()
+# The commit message of the 2026-11-02 refusal in shape: a quoted heredoc whose body carries an
+# apostrophe, a double-quoted span across a line break, backticks and parentheses.
+COMMIT_MESSAGE_HEREDOC = (
+    "git commit -q -F - <<'EOF'\n"
+    "ci: run check in full when the `changes` job fails\n\n"
+    "GitHub's \"Troubleshooting\nrequired status checks\" says so, and main's ruleset agrees.\n\n"
+    "Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>\n"
+    "EOF\n"
+)
+
 def _proven_frida_log() -> str:
     """A Frida evidence log that says PROVEN, outside the repo and outside the user's own.
 
@@ -665,6 +690,29 @@ SHIM_CASES = [
     (
         "the line after a commit message heredoc is a command again",
         f"git commit -q -F - <<'EOF'\nfix: print one line with sed{SHORT_N}\nEOF\n{PUSH_MAIN}",
+        False,
+        "Do not push directly to main",
+    ),
+    # 2026-11-02: refused as one command and allowed when the push ran alone. The heredoc beside
+    # the `cd` made push_target_branches print UNKNOWN, and `-q` kept the text exceptions out.
+    (
+        "a commit message heredoc chained in front of a feature push from a cd is allowed",
+        f"cd {PUSH_FEATURE_CHECKOUT} && git add .github && {COMMIT_MESSAGE_HEREDOC}"
+        "git log --oneline -1 | cat; "
+        + " ".join(["git", "push"])
+        + " -q origin ci/skip-rust-legs 2>&1 | grep -v \"^remote:\" | tail -1; git status -sb",
+        True,
+        "",
+    ),
+    (
+        "the same shape whose bare push runs in a checkout on main is refused",
+        f"cd {PUSH_MAIN_CHECKOUT} && {COMMIT_MESSAGE_HEREDOC}" + " ".join(["git", "push"]) + " -q",
+        False,
+        "Do not push directly to main",
+    ),
+    (
+        "a bare push from main with its stderr redirected is refused",
+        f"cd {PUSH_MAIN_CHECKOUT} && " + " ".join(["git", "push"]) + " 2>&1 | tail -1",
         False,
         "Do not push directly to main",
     ),
