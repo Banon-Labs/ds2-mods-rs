@@ -676,6 +676,23 @@ const SUMMON_ENTITY = 0x2824;
 // FUN_140418d50 returns that one instead of spawning. 0x1404193f0(mgr, entry) is the native despawn
 // FUN_14041abf0's eviction uses: it removes the entry's character and decrements mgr+0x368.
 const DESPAWN_FIRST = true;
+// Measured 2026-11-02: Pate spawned from his kind-1 entity (chrType 1) is an ally the player cannot
+// hurt. FUN_140418690 puts FUN_1404124f0(gen)'s chrType into the spawn descriptor; the chrType
+// table 0x1410c0050 pairs row 1 (02 01 01 02 02 01 ..) with row 2 (02 02 01 02 02 00 ..), the red
+// sign type. Return SPAWN_CHR_TYPE from that one call, inside FUN_140418690 only.
+const SPAWN_CHR_TYPE = 2;
+Interceptor.attach(at(0x004124f0), {
+  onEnter() {
+    const r = this.returnAddress.sub(image.base).toInt32();
+    this.on = globalThis.__summoning === true && r > 0x418690 && r < 0x418d50;
+    this.r = r;
+  },
+  onLeave(ret) {
+    if (!this.on) return;
+    send({ family: 'summon-sign', tag: 'phantom.chr_type', from: '0x' + this.r.toString(16), native: ret.toInt32() & 0xff, forced: SPAWN_CHR_TYPE });
+    if (SPAWN_CHR_TYPE !== null) ret.replace(ptr(SPAWN_CHR_TYPE));
+  },
+});
 const despawn = new NativeFunction(at(0x004193f0), 'void', ['pointer', 'pointer']);
 const grabChr = new NativeFunction(at(0x0014b420), 'pointer', ['pointer']); // getGrabCharacterCtrl(&handle)
 const generate = new NativeFunction(at(0x00415b20), 'pointer', ['pointer', 'pointer', 'uint8']);
@@ -739,7 +756,10 @@ function watchMoved() {
     send({ family: 'summon-sign', tag: 'spawn.moved', frames: m.frames, vtable: rel(m.chr.readPointer()), at: his.map((v) => v.toFixed(2)),
       distance: d.toFixed(1), hp: m.chr.add(0x168).readS32() });
   }
-  if (m.frames > 600) globalThis.__movedChr = undefined;
+  // Damage semaphore: any change of his HP after spawn, so a hit is measured, not reported.
+  const hp = m.chr.add(0x168).readS32();
+  if (m.hp !== undefined && hp !== m.hp) send({ family: 'summon-sign', tag: 'spawn.hp', frames: m.frames, was: m.hp, now: hp });
+  m.hp = hp;
 }
 const ctrlOfHandle = new NativeFunction(at(0x0041e870), 'pointer', ['uint32']);
 let spawnReported = false;
