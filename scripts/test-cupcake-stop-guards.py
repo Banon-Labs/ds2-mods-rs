@@ -176,6 +176,21 @@ CASES = [
         "turn is a pure pause announcing an idle hold while a background task runs",
     ),
     Case(
+        "unwatched_wait.jsonl",
+        "with nothing watching",
+        "the turn ends 'I'm waiting for CI' with no backgrounded command, subagent or Monitor live",
+    ),
+    Case(
+        "unwatched_wait_on_user.jsonl",
+        None,
+        "a wait on the user ('waiting on you to review') needs no watcher and must NOT halt",
+    ),
+    Case(
+        "unwatched_wait_bg_live.jsonl",
+        None,
+        "'Blocked on #368's checks' while a backgrounded poll is still running must NOT halt",
+    ),
+    Case(
         "verbose_answer_after_queued_notification.jsonl",
         None,
         "a long prose answer two turns after a background subagent reported completed -- must NOT "

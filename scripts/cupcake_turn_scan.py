@@ -337,8 +337,8 @@ def prose_paragraphs(text: str) -> list[str]:
 # Phrases that mean the turn is legitimately blocked on the user (awaiting their answer/drive). Kept
 # specific so an incidental "you"/"your" in ordinary prose does not over-exempt.
 USER_WAIT_RE = re.compile(
-    r"\bwait(?:ing)?\s+for\s+(?:the\s+)?(?:user|you)\b"
-    r"|\bblocked\s+on\s+(?:the\s+)?(?:user|you)\b"
+    r"\bwait(?:ing)?\s+(?:for|on)\s+(?:the\s+)?(?:user|you)\b"
+    r"|\bblocked\s+on\s+(?:the\s+)?(?:user|you|your)\b"
     r"|\b(?:awaiting|await)\s+(?:the\s+)?(?:user'?s?|your)\b"
     r"|\bneed\s+(?:the\s+)?(?:user|you)\s+to\b"
     r"|\b(?:for|until)\s+you\s+to\b"
