@@ -325,7 +325,7 @@ Interceptor.attach(SIGN_EFFECT_GATE, {
 // the table the resolver 0x14017b7e0 reads: block = [[GameManagerImp+0x40]+0x170+b*8] (b < 0x2a),
 // ctrl = [[block+0x20]+i*8] (i < [block+0x28]), entity id = (i<<10)|(b<<4)|4. chrType is
 // [[ctrl+0x58]+0x84], mapped through the u8 pair table 0x1410ed318 by 0x1404124f0.
-const NPC_SIGN_TEST = true;
+const NPC_SIGN_TEST = false;
 function listCharacters() {
   const mgr = GAME_MANAGER_IMP.readPointer().add(0x40).readPointer();
   const found = [];
@@ -500,6 +500,165 @@ Interceptor.attach(at(0x002a1980), {
     if (native === 0) ret.replace(ptr(1));
   },
 });
+// AFTER THE TOUCH (measured by the user 2026-11-02: touching the sign summoned Mild-Mannered Pate,
+// then a banner said he was sent home before he appeared). Every call, with a backtrace: the NPC
+// phantom generator FUN_140415b20 and its spawn step FUN_140418d50, EventPhantomReturn
+// 0x14018d8e0. (NetNpcPhantomDeadSync's sender 0x140254c00 runs every frame: not hooked.)
+for (const [name, rva] of [['npc_phantom_generate', 0x00415b20], ['npc_phantom_spawn', 0x00418d50],
+  ['event_phantom_return', 0x0018d8e0]]) {
+  try {
+    Interceptor.attach(at(rva), {
+      onEnter(args) {
+        send({ family: 'summon-sign', tag: 'phantom.' + name, args: [args[0], args[1], args[2]].map((a) => a.toString()),
+          backtrace: Thread.backtrace(this.context, Backtracer.ACCURATE).slice(0, 10).map(rel) });
+      },
+      onLeave(ret) {
+        send({ family: 'summon-sign', tag: 'phantom.' + name + '.ret', ret: ret.toString(),
+          handle: name === 'npc_phantom_spawn' && !ret.isNull() ? '0x' + (ret.readU32() >>> 0).toString(16) : undefined });
+      },
+    });
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'phantom.refused', name, error: e.message });
+  }
+}
+// WHY THE SUMMON FAILS (measured: FUN_140415b20 got handle -1 back, so 0x14041e870 returned 0).
+// Each spawn layer's return, and the handle FUN_140418d50 wrote to its out-parameter.
+for (const [name, rva] of [['spawn_418690', 0x00418690], ['spawn_356060', 0x00356060], ['spawn_3560a0', 0x003560a0]]) {
+  Interceptor.attach(at(rva), {
+    onEnter(args) { this.on = globalThis.__summoning === true; },
+    onLeave(ret) { if (this.on) send({ family: 'summon-sign', tag: 'phantom.' + name + '.ret', ret: ret.toString() }); },
+  });
+}
+// FUN_140418d50's first three gates: 0x140412060 false -> exit; 0x14014b420 non-null -> 0x140419171;
+// 0x1404161d0 false -> 0x14041910d (which sets ctrl+0x7a bit 0).
+for (const [name, rva, site] of [['gate_412060', 0x00412060, 0x00418da4], ['gate_14b420', 0x0014b420, 0x00418dd9],
+  ['gate_4161d0', 0x004161d0, 0x00418dee], ['spawn_gate_14b420', 0x0014b420, 0x004186df]]) {
+  Interceptor.attach(at(rva), {
+    onLeave(ret) {
+      if (globalThis.__summoning === true && this.returnAddress.equals(at(site))) {
+        send({ family: 'summon-sign', tag: 'phantom.' + name, ret: ret.toString() });
+      }
+    },
+  });
+}
+// The spawn itself (0x140418690 at 0x140418ffd) needs r13b = 1 (the map-area compare at 0x140418e6e
+// failed to match), [mgr+0x301] bit 0 clear and [mgr+0x302] bit 1 clear; else 0x1404190c2 runs
+// 0x1402d55c0 and leaves. 0x140418fa8 is reached on every path to that test.
+Interceptor.attach(at(0x00418fa8), function () {
+  if (globalThis.__summoning !== true) return;
+  const c = this.context;
+  send({ family: 'summon-sign', tag: 'phantom.spawn_test', r13b: c.r13.toInt32() & 0xff,
+    b301: c.rbx.add(0x301).readU8(), b302: c.rbx.add(0x302).readU8(), mgr: c.rbx.toString(),
+    area_global: Array.from(new Uint8Array(at(0x01614c20).readByteArray(16))).map((b) => b.toString(16).padStart(2, '0')).join('') });
+  // Measured blockers (2026-11-02, Pate in m10_10_00_00): r13b = 0 and [mgr+0x302] = 0xfc (bit 1
+  // set). FORCE_SPAWN overrides both for this one call; the flag byte is restored after it.
+  if (FORCE_SPAWN) {
+    c.r13 = c.r13.and(ptr('0xffffffffffffff00')).or(1);
+    globalThis.__b302 = { at: c.rbx.add(0x302), was: c.rbx.add(0x302).readU8() };
+    globalThis.__b302.at.writeU8(globalThis.__b302.was & ~2);
+  }
+});
+const FORCE_SPAWN = true;
+// Measured with Stalker: the spawn gives up after 0x1404160f0(mgr, desc), whose 0x14041edc0(desc,
+// state) returns bit (state-1) of the u16 at desc+0xe; state = (s8)[mgr+0x2fc], desc = [gen-ish+0x60].
+// Log both, and with FORCE_SPAWN answer true for this call.
+Interceptor.attach(at(0x0041edc0), {
+  onEnter(args) {
+    this.on = globalThis.__summoning === true && this.returnAddress.equals(at(0x00416127));
+    if (!this.on) return;
+    // desc +0 chr id checked against the loaded-resource list, +4/+8 event flags (0x1404160f0).
+    // The loaded list: [[GameManagerImp+0x18]+0x830]+0x10, node +0x14 id, +0x60 next (0x140350fd0).
+    const loaded = [];
+    try {
+      let node = GAME_MANAGER_IMP.readPointer().add(0x18).readPointer().add(0x830).readPointer().add(0x10).readPointer();
+      for (let k = 0; k < 400 && !node.isNull(); k++) {
+        loaded.push(node.add(0x14).readS32());
+        node = node.add(0x60).readPointer();
+      }
+    } catch (e) {
+      loaded.push('error ' + e.message);
+    }
+    send({ family: 'summon-sign', tag: 'phantom.state_mask', state: args[1].toInt32(), mask: '0x' + args[0].add(0xe).readU16().toString(16),
+      desc: args[0].toString(), chr: args[0].readS32(), flag1: args[0].add(4).readS32(), flag2: args[0].add(8).readS32(), loaded });
+  },
+  onLeave(ret) {
+    if (this.on && FORCE_SPAWN && (ret.toInt32() & 0xff) === 0) ret.replace(ptr(1));
+  },
+});
+// 0x140418690(mgr, gen, ...) refuses when gen+0x7a bit 1 is set and gen+0x76 has bits 0-1 set
+// with bits 2 and 3 clear. Log both on entry, and with FORCE_SPAWN clear 0x7a bit 1 for this call.
+Interceptor.attach(at(0x00418690), {
+  onEnter(args) {
+    if (globalThis.__summoning !== true) return;
+    const gen = args[1];
+    send({ family: 'summon-sign', tag: 'phantom.spawn_gen', gen: gen.toString(), b76: gen.add(0x76).readU8(), b7a: gen.add(0x7a).readU8(),
+      r8: args[2].toString(), r9: args[3].toString() });
+    if (FORCE_SPAWN) {
+      this.restore = { at: gen.add(0x7a), was: gen.add(0x7a).readU8() };
+      this.restore.at.writeU8(this.restore.was & ~2);
+    }
+    // Every call made inside this one spawn attempt, to find where it gives up.
+    this.tid = this.threadId;
+    const lo = image.base;
+    const hi = image.base.add(image.size);
+    globalThis.__spawnCalls = [];
+    Stalker.follow(this.tid, {
+      events: { call: true },
+      onReceive(events) {
+        for (const e of Stalker.parse(events, { annotate: false, stringify: false })) {
+          const target = e[1];
+          if (target.compare(lo) >= 0 && target.compare(hi) < 0) globalThis.__spawnCalls.push(rel(e[0]) + '>' + rel(target));
+        }
+      },
+    });
+  },
+  onLeave(ret) {
+    if (this.restore) this.restore.at.writeU8(this.restore.was);
+    if (this.tid !== undefined) {
+      Stalker.unfollow(this.tid);
+      Stalker.flush();
+      const tid = this.tid;
+      setTimeout(() => {
+        const calls = globalThis.__spawnCalls || [];
+        send({ family: 'summon-sign', tag: 'phantom.spawn_calls', count: calls.length, tail: calls.slice(-60), head: calls.slice(0, 40) });
+        Stalker.garbageCollect();
+      }, 500);
+    }
+  },
+});
+// The touch, done by the agent: what NetNpcPhantomDirection_HOST (0x1402529c0) calls.
+const SUMMON_TEST = true;
+const SUMMON_ENTITY = 0x2824; // Mild-Mannered Pate's entry in m10_10_00_00 (measured: the sign named him)
+const generate = new NativeFunction(at(0x00415b20), 'pointer', ['pointer', 'pointer', 'uint8']);
+globalThis.__summonId = Memory.alloc(8);
+let summoned = false;
+function summonTest() {
+  if (!SUMMON_TEST || summoned || !granted) return;
+  summoned = true;
+  const mgr = GAME_MANAGER_IMP.readPointer().add(0x40).readPointer();
+  if (mgr.isNull()) {
+    send({ family: 'summon-sign', tag: 'summon_test.refused', why: 'no manager' });
+    return;
+  }
+  globalThis.__summonId.writeU32(SUMMON_ENTITY);
+  // FUN_140418d50 spawns only when the generator entity's +0x8c is 3/4/5/6/8 (0x1404161d0's jump
+  // table); the touch got -1 with it in a refusing state. Log it and set 3 for this attempt.
+  const resolve = new NativeFunction(at(0x0017b7e0), 'pointer', ['pointer']);
+  const ctrl = resolve(globalThis.__summonId);
+  if (!ctrl.isNull()) {
+    const state = ctrl.add(0x8c).readU8();
+    send({ family: 'summon-sign', tag: 'summon_test.state', ctrl: ctrl.toString(), state, b79: ctrl.add(0x79).readU8(), b7a: ctrl.add(0x7a).readU8() });
+    if (![3, 4, 5, 6, 8].includes(state)) ctrl.add(0x8c).writeU8(3);
+  }
+  globalThis.__summoning = true;
+  const ret = generate(mgr, globalThis.__summonId, 1);
+  globalThis.__summoning = false;
+  if (globalThis.__b302) {
+    globalThis.__b302.at.writeU8(globalThis.__b302.was);
+    globalThis.__b302 = undefined;
+  }
+  send({ family: 'summon-sign', tag: 'summon_test', entity: '0x' + SUMMON_ENTITY.toString(16), ret: ret.toString() });
+}
 let lastSignWords = '';
 function watchSign() {
   const s = globalThis.__watchSign;
@@ -587,6 +746,11 @@ globalThis.__useNavCb = new NativeCallback((self, dt) => {
     watchSign();
   } catch (e) {
     send({ family: 'summon-sign', tag: 'sign.words.error', error: e.message });
+  }
+  try {
+    summonTest();
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'summon_test.refused', why: 'threw ' + e.message });
   }
   try {
     npcSignTest();
