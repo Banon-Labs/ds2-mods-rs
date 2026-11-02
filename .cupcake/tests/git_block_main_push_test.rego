@@ -722,3 +722,55 @@ test_allow_resolved_feature_destination_from_main_checkout if {
 	denials := guard.deny with input as push_event("git push -u origin feat/x", "DEST feat/x\n")
 	count(denials) == 0
 }
+
+# --- 2026-11-02: a commit message heredoc chained in front of a feature push ---
+#
+# Refused as one command, allowed when the push ran alone. The heredoc next to
+# the `cd` made the push_target_branches signal print UNKNOWN, so the rule fell
+# to its unresolved branch, and `-q` kept the `-u` and `<src>:<dst>` text
+# exceptions from vouching for `origin ci/skip-rust-legs`. The signal now
+# removes a data heredoc before walking (scripts/cupcake_push_target_repo.py,
+# without_data_heredocs) and names the destination; these pin the policy half.
+heredoc_commit_push_command := concat("", [
+	"cd /home/banon/projects/ds2-mods-rs && git add .github && git commit -q -F - <<'EOF'\n",
+	"ci: run check in full when the `changes` job fails\n\n",
+	"GitHub's \"Troubleshooting\nrequired status checks\" says so, and main's ruleset agrees.\n\n",
+	"Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>\n",
+	"EOF\n",
+	"git log --oneline -1 | cat; git push -q origin ci/skip-rust-legs 2>&1 | grep -v \"^remote:\" | tail -1; git status -sb | head -1",
+])
+
+test_allow_heredoc_commit_then_feature_push_resolved if {
+	denials := guard.deny with input as push_event(heredoc_commit_push_command, "DEST ci/skip-rust-legs\n")
+	count(denials) == 0
+}
+
+# The words in the message are not push targets: "main's ruleset" never reaches
+# push_targets_main.
+test_heredoc_commit_message_naming_main_is_not_a_main_target if {
+	texts := guard.executed_texts with input as push_event(heredoc_commit_push_command, "")
+	count(texts) > 0
+	every text in texts {
+		not guard.push_targets_main(lower(text))
+	}
+}
+
+# What the signal printed before the fix still fails closed, so an UNKNOWN from
+# a heredoc the resolver cannot prove is data keeps denying.
+test_deny_heredoc_commit_then_feature_push_when_signal_unknown if {
+	denials := guard.deny with input as push_event(heredoc_commit_push_command, "UNKNOWN a subshell or heredoc hides which directory a push inherits\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+# `git push 2>&1` from main once resolved to `DEST >&` and `DEST 1`. A
+# destination holding a shell operator is not a ref, so it leaves the command
+# unresolved, and the bare push has no text exception to vouch for it.
+test_deny_bare_push_when_signal_reads_a_redirection_as_refspecs if {
+	denials := guard.deny with input as push_event("git push 2>&1 | tail -1", "DEST >&\nDEST 1\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_allow_feature_push_with_redirection_resolved if {
+	denials := guard.deny with input as push_event("git push -q origin feat/x 2>&1 | tail -1", "DEST feat/x\n")
+	count(denials) == 0
+}

@@ -67,7 +67,8 @@ and the caller branches on it:
 
 `UNKNOWN` covers a deliberate list of shapes rather than a guess: a command whose quoting will
 not lex, a `cd` inside a subshell or a heredoc (where a linear walk cannot say whether the push
-inherited it), a target that is not a git working tree, and two pushes aimed at two different
+inherited it; a heredoc that is provably data, such as a commit message, is removed before the
+walk by `without_data_heredocs`), a target that is not a git working tree, and two pushes aimed at two different
 checkouts -- one verdict cannot describe two repositories, and the honest answer to "which
 repository" is then "more than one".
 
@@ -81,6 +82,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -116,6 +118,65 @@ GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--c
 # inside a signal on every Bash tool call, where a git command wedged on a lock would stall the
 # session rather than fail it. A read that reaches it returns `None`, which becomes `UNKNOWN`.
 GIT_TIMEOUT_SECONDS = 10.0
+
+# A heredoc operator and its tag, `<<'EOF'`, `<<"EOF"`, `<<EOF` or `<<-EOF`. Group 1 is the quote,
+# so an empty group 1 is a body the shell expands. `<<<` is a here-string and has no body.
+HEREDOC = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+
+# Readers that turn a heredoc body into commands or into another command's arguments, so their
+# body is not data: a shell reading its program from stdin, `eval`/`source`/`.`, and the
+# argument builders (`xargs git push origin <<EOF` pushes whatever the body names).
+HEREDOC_PROGRAM_READERS = SHELL_WRAPPERS | {"eval", "source", ".", "xargs", "parallel"}
+
+
+def without_data_heredocs(command: str) -> str:
+    """The command with every DATA heredoc removed -- operator, body and terminator -- or unchanged.
+
+    A body is data when the command reading it is not in HEREDOC_PROGRAM_READERS and the shell
+    cannot run anything while expanding it: its tag is quoted, or it holds no `$(` and no backtick.
+    `git commit -F - <<'EOF'` is the shape this exists for. Before it, any heredoc next to a `cd`
+    made the walk refuse, so a commit message chained in front of `git push origin <feature>`
+    denied the push as possibly-main (2026-11-02): DS2-MODS-BLOCK-MAIN-PUSH fell to its unresolved
+    branch, and `-q` kept the text exceptions from vouching for the refspec.
+
+    All or nothing: one heredoc that is not provably data -- a program reader, an expanding body,
+    an operator inside quotes, a terminator that never comes -- returns the command unchanged, and
+    the `<<` in it keeps UNRESOLVABLE_MARKERS refusing as before.
+
+    Not line-based, for the reason scripts/cupcake_ds2_run_presets.py's split_heredocs gives: the
+    hook shim turns the newline after the terminator into `; ` and the engine collapses the rest,
+    so the body can arrive on one line as `<<'EOF' body words EOF; next`. The terminator is the tag
+    as a whole word followed by a separator or the end, in either form.
+    """
+    out: list[str] = []
+    pos = 0
+    while True:
+        match = HEREDOC.search(command, pos)
+        if not match:
+            out.append(command[pos:])
+            return "".join(out)
+        opening = "".join(out) + command[pos : match.start()]
+        # The operator must be in command position: outside quotes (shlex refuses an open one)
+        # and attached to a reader that keeps the body as data.
+        tokens = lex(opening)
+        if tokens is None:
+            return command
+        commands = segments(tokens)
+        segment = commands[-1] if commands else []
+        words = strip_prefixes([word for word in segment if word not in ("(", ")")])
+        if words and Path(words[0]).name in HEREDOC_PROGRAM_READERS:
+            return command
+        tag = match.group(2)
+        end = re.compile(r"(?:^|(?<=[\s;]))" + re.escape(tag) + r"(?=[ \t]*(?:[;&|\n]|$))", re.M)
+        ended = end.search(command, match.end())
+        if not ended:
+            return command
+        body = command[match.end() : ended.start()]
+        if not match.group(1) and ("$(" in body or "`" in body):
+            return command
+        out.append(command[pos : match.start()])
+        out.append("\n")
+        pos = ended.end()
 
 
 def has_redirect_marker(command: str) -> bool:
@@ -256,6 +317,33 @@ def git_c_directories(segment: list[str]) -> tuple[list[str], bool]:
     return directories, False
 
 
+def without_redirections(words: list[str]) -> list[str]:
+    """A command's words with every redirection removed: the operator, its operand, and an fd number.
+
+    shlex keeps the operator as a token of its own, so `git push 2>&1` lexed as the words
+    `git push 2 >& 1`, and scripts/cupcake_push_target_branch.py read `2` as the remote and `>&`
+    and `1` as refspecs. A bare push from main with its stderr redirected therefore resolved to
+    `DEST >&` and `DEST 1`, and DS2-MODS-BLOCK-MAIN-PUSH allowed it (found 2026-11-02).
+
+    A digit word directly before an operator is taken as its fd even when a space separated them
+    (`origin 2 >x`), because the lexer no longer says which it was. That can only drop a numeric
+    refspec, which is never main, and the push then resolves as a bare one -- a wrong answer that
+    can deny, never one that can allow.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word and set(word) <= set("<>&|") and ("<" in word or ">" in word):
+            if out and out[-1].isdigit():
+                out.pop()
+            index += 2
+            continue
+        out.append(word)
+        index += 1
+    return out
+
+
 class Unresolvable(Exception):
     """A redirect is present and the walk cannot say what it means."""
 
@@ -306,6 +394,7 @@ def push_invocations(
             found.extend(push_invocations(payload, current, allow_hiding=allow_hiding))
             continue
         if verb == "git":
+            words = without_redirections(words)
             directories, is_push = git_c_directories(words)
             if not is_push:
                 continue
@@ -334,6 +423,7 @@ def git_read(directory: str, *arguments: str) -> str | None:
 
 def resolve(command: str, cwd: str) -> str:
     """The one line this tool prints. See the module docstring for the contract."""
+    command = without_data_heredocs(command)
     if not has_redirect_marker(command):
         return "SELF"
     try:
@@ -462,8 +552,57 @@ def selftest() -> int:
         ("two pushes at two checkouts answer UNKNOWN", "git push && cd /other && git push"),
         ("a subshell hides what the push inherits", "(cd /other && git push)"),
         ("an unbalanced quote does not lex", "cd '/other && git push"),
+        ("a heredoc a shell reads is a program", "bash <<'EOF'\ncd /x\nEOF\ncd /other && git push"),
     ):
         check(description, resolve(command, cwd), "UNKNOWN")
+
+    # without_data_heredocs. The commit message shape of 2026-11-02, as typed and as delivered.
+    message = "git commit -q -F - <<'EOF'\nfix: GitHub's \"x\" `y` (cd /z)\n\nbody\nEOF\n"
+    check(
+        "a quoted commit message heredoc is removed, apostrophe and parens included",
+        without_data_heredocs(f"cd /other && {message}git push -q origin feat 2>&1"),
+        "cd /other && git commit -q -F - \n\ngit push -q origin feat 2>&1",
+    )
+    check(
+        "the same heredoc collapsed onto one line by the shim and the engine",
+        without_data_heredocs("cd /o && git commit -F - <<'EOF' fix: it's EOF; git push origin f"),
+        "cd /o && git commit -F - \n; git push origin f",
+    )
+    check(
+        "a heredoc next to a cd no longer hides which directory the push runs in",
+        push_directories(without_data_heredocs(f"cd /other && {message}git push origin feat"), cwd),
+        {"/other"},
+    )
+    for description, command in (
+        ("a shell reads its program", "bash <<'EOF'\ngit push\nEOF\n"),
+        ("`bash -s` reads its program", "bash -s <<'EOF'\ngit push\nEOF\n"),
+        ("`source` reads a program", "source /dev/stdin <<'EOF'\ncd /x\nEOF\n"),
+        ("xargs turns the body into arguments", "xargs git push origin <<'EOF'\nmain\nEOF\n"),
+        ("an unquoted body can run a substitution", "cat <<EOF\n$(cd /x)\nEOF\n"),
+        ("an unquoted body can run a backtick", "cat <<EOF\n`cd /x`\nEOF\n"),
+        ("an operator inside quotes is not an operator", "echo \"<<EOF\"; git push; echo EOF"),
+        ("a terminator that never comes", "cat <<'EOF'\ngit push\n"),
+    ):
+        check(f"kept: {description}", without_data_heredocs(command), command)
+    check(
+        "an unquoted body with only a variable is data",
+        without_data_heredocs("cat <<EOF\n$HOME\nEOF\necho"),
+        "cat \n\necho",
+    )
+    check("a here-string is not a heredoc", without_data_heredocs("cat <<<x"), "cat <<<x")
+
+    # without_redirections: `git push 2>&1` once read `2` as the remote and `>&`, `1` as refspecs.
+    check(
+        "an fd redirection is not a refspec",
+        without_redirections(["git", "push", "-q", "origin", "feat", "2", ">&", "1"]),
+        ["git", "push", "-q", "origin", "feat"],
+    )
+    check(
+        "a file redirection and its operand are dropped",
+        without_redirections(["git", "push", ">", "/dev/null", "origin", "feat"]),
+        ["git", "push", "origin", "feat"],
+    )
+    check("`&>` is a redirection", without_redirections(["git", "push", "&>", "f"]), ["git", "push"])
 
     import tempfile
 

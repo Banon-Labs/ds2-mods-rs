@@ -43,7 +43,8 @@ empty signal, as unresolved and denies unless its own text-only exceptions prove
 non-main destination. That is the fail-closed direction: this script only ever lets a push through
 by naming where it goes.
 
-`UNKNOWN` covers: an unlexable command; a `cd` inside a subshell or heredoc; `--git-dir`,
+`UNKNOWN` covers: an unlexable command; a `cd` inside a subshell or a heredoc that is not provably
+data (a commit message heredoc is removed first, see `without_data_heredocs`); `--git-dir`,
 `--work-tree`, `GIT_DIR` or `GIT_WORK_TREE`; a push directory that is not a git checkout; a detached
 HEAD where a branch was needed; `--all`/`--branches`/`--mirror`/`--prune`; a glob refspec; an option
 this parser does not know (it might take a value and shift the remote); `push.default=matching`;
@@ -287,6 +288,9 @@ def resolve(command: str, cwd: str, override: str | None) -> list[str]:
     """The lines to print. See the module docstring."""
     if "push" not in command:
         return []
+    # A commit message heredoc is data: its body runs nothing and moves no directory, so it is
+    # removed before the subshell/heredoc refusal below can see its `<<` (2026-11-02).
+    command = target_repo.without_data_heredocs(command)
     if any(marker in command for marker in UNFOLLOWED_REDIRECTS):
         return ["UNKNOWN the command points git at another tree through a variable or option"]
 
@@ -469,7 +473,49 @@ def selftest() -> int:
             ["DEST loader-build-sha", "DEST loader-build-sha"],
         )
 
+        # 2026-11-02: a commit message heredoc chained in front of a feature push, from a cd. The
+        # `<<` made the whole command UNKNOWN and DS2-MODS-BLOCK-MAIN-PUSH refused the push.
+        message = (
+            "git commit -q -F - <<'EOF'\nci: GitHub's \"Troubleshooting\nrequired\" `changes`"
+            " (1M context)\n\nbody\nEOF\n"
+        )
+        check(
+            "a commit message heredoc before a feature push resolves the push",
+            verdict(f"cd {linked} && git add x && {message}git log -1 | cat; "
+                    "git push -q origin loader-build-sha 2>&1 | tail -1"),
+            ["DEST loader-build-sha"],
+        )
+        check(
+            "the same command as the shim and the engine deliver it, on one line",
+            verdict(f"cd {linked} && git commit -q -F - <<'EOF' ci: it's x EOF; "
+                    "git push -q origin loader-build-sha 2>&1 | tail -1"),
+            ["DEST loader-build-sha"],
+        )
+        check(
+            "a bare push after a commit message heredoc still judges the checkout",
+            verdict(f"cd {onmain} && {message}git push", at=str(linked)),
+            ["DEST main"],
+        )
+        check(
+            "a heredoc naming main as data does not make a feature push main",
+            verdict(f"cd {linked} && git commit -F - <<'EOF'\nmain's ruleset\nEOF\n"
+                    "git push origin loader-build-sha"),
+            ["DEST loader-build-sha"],
+        )
+        # A redirection is not a refspec: `git push 2>&1` from main once resolved to `>&` and `1`.
+        check("a bare push from main with stderr redirected", verdict("git push 2>&1"), ["DEST main"])
+        check(
+            "a remote-only push from main with a file redirection",
+            verdict("git push origin >/dev/null"),
+            ["DEST main"],
+        )
+
         for description, command, at in (
+            ("a heredoc a shell reads beside a cd", f"cd {linked} && bash <<'EOF'\ngit push\nEOF", cwd),
+            ("xargs reading a heredoc beside a cd",
+             f"cd {linked} && xargs git push origin <<'EOF'\nmain\nEOF", cwd),
+            ("an unquoted heredoc with a substitution beside a cd",
+             f"cd {linked} && git commit -F - <<EOF\n$(cd {onmain})\nEOF\ngit push", cwd),
             ("--all", "git push --all origin", cwd),
             ("--mirror", "git push --mirror origin", cwd),
             ("an unknown option", "git push --frobnicate origin feat", cwd),

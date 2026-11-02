@@ -210,7 +210,18 @@ push_target_resolved if {
 	every line in push_target_lines {
 		startswith(line, "DEST ")
 	}
+	every destination in push_destinations {
+		not regex.match(shell_operator_destination_pattern, destination)
+	}
 }
+
+# A destination carrying a shell operator character is a parse of something
+# that is not a refspec, and git refuses `<`, `>` and `|` in a ref name anyway.
+# Measured 2026-11-02: the signal read `git push 2>&1` from main as the refspecs
+# `>&` and `1` and this rule allowed a bare push to main. The resolver no longer
+# does that (scripts/cupcake_push_target_repo.py, without_redirections); this
+# keeps a resolver that regresses from being trusted.
+shell_operator_destination_pattern := `[<>|&;]`
 
 push_destinations := {trim_space(trim_prefix(line, "DEST ")) | some line in push_target_lines}
 
