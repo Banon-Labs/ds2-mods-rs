@@ -44,7 +44,15 @@ norm_command := concat(" ", [word |
 # `monitor-throttle.py` with no argument defaults to the 10s minimum in the script
 # itself. A leading path is allowed (`python3 /abs/path/scripts/monitor-throttle.py`)
 # so the rule does not depend on the working directory.
-throttled_tail_pattern := `\|[[:space:]]*(uv run [^|]*)?python3?[[:space:]]+[^|[:space:]]*scripts/monitor-throttle\.py([[:space:]]+[1-9][0-9]+(\.[0-9]+)?)?[[:space:]]*$`
+#
+# Interpreter flags that take no argument (`-u`, `-I`, `-B`, `-E`, `-O`, `-q`, `-s`,
+# `-S`, alone or clustered) may sit between `python3` and the script path: they
+# change buffering or import isolation, never which program runs. `python3 -u
+# /abs/scripts/monitor-throttle.py 10` was refused on 2026-11-02 because the old
+# pattern required the path to follow `python3` directly. Flags that take an
+# argument stay refused -- `-m <mod>` and `-c <prog>` would run something else with
+# the throttle path as a mere argv entry, and `-X`/`-W` are not needed here.
+throttled_tail_pattern := `\|[[:space:]]*(uv run [^|]*)?python3?([[:space:]]+-[BEIOqsSu]+)*[[:space:]]+([^|[:space:]-][^|[:space:]]*)?scripts/monitor-throttle\.py([[:space:]]+[1-9][0-9]+(\.[0-9]+)?)?[[:space:]]*$`
 
 throttled if {
 	regex.match(throttled_tail_pattern, norm_command)
