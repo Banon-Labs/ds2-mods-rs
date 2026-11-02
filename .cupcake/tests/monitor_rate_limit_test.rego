@@ -127,6 +127,52 @@ test_allow_multiline_command if {
 	not denied(monitor_event("tail -f a.log \\\n  | grep --line-buffered X \\\n  | python3 scripts/monitor-throttle.py 10"))
 }
 
+# --- interpreter flags before the throttle path (2026-11-02) ----------------
+
+# The exact command refused on 2026-11-02: unbuffered python, absolute path.
+test_allow_unbuffered_absolute_throttle if {
+	not denied(monitor_event(`S=/tmp/scratch; tail -n0 -F $S/summon-sign.jsonl | grep --line-buffered -E '"player\.hit"|"mode"|Error|detached' | python3 -u /home/banon/projects/ds2-mods-rs/scripts/monitor-throttle.py 10`))
+}
+
+test_allow_unbuffered_relative_throttle if {
+	not denied(monitor_event("tail -f a.log | python3 -u scripts/monitor-throttle.py 10"))
+}
+
+test_allow_clustered_and_repeated_flags if {
+	not denied(monitor_event("tail -f a.log | python3 -uI -B /abs/scripts/monitor-throttle.py 30"))
+}
+
+test_allow_unbuffered_no_interval if {
+	not denied(monitor_event("tail -f a.log | python3 -u scripts/monitor-throttle.py"))
+}
+
+test_deny_unbuffered_interval_below_minimum if {
+	denied(monitor_event("tail -f a.log | python3 -u /abs/scripts/monitor-throttle.py 9"))
+}
+
+test_deny_unbuffered_throttle_not_final if {
+	denied(monitor_event("tail -f a.log | python3 -u /abs/scripts/monitor-throttle.py 10 | grep --line-buffered ERROR"))
+}
+
+test_deny_unbuffered_lookalike_script if {
+	denied(monitor_event("tail -f a.log | python3 -u /abs/scripts/monitor-throttle-fake.py 10"))
+}
+
+# `-m` runs a different program; the throttle path is only its argv.
+test_deny_module_flag_before_throttle_path if {
+	denied(monitor_event("tail -f a.log | python3 -m http.server scripts/monitor-throttle.py 10"))
+}
+
+# `-c` runs an inline program; same reason.
+test_deny_inline_program_before_throttle_path if {
+	denied(monitor_event(`tail -f a.log | python3 -c 'import sys' scripts/monitor-throttle.py 10`))
+}
+
+# A flag that takes an argument is not in the allowed set.
+test_deny_argument_flag_before_throttle_path if {
+	denied(monitor_event("tail -f a.log | python3 -X dev scripts/monitor-throttle.py 10"))
+}
+
 # --- websocket monitors are DENIED outright ---------------------------------
 
 test_deny_websocket_monitor if {
