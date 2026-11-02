@@ -239,6 +239,7 @@ if (prologueMatches(OFFLINE_STATE_CHECK, OFFLINE_STATE_CHECK_PROLOGUE)) {
   globalThis.__offlineCheck = Interceptor.attach(OFFLINE_STATE_CHECK, {
     onEnter(args) {
       this.item = args[1].toInt32();
+      if (globalThis.__probeHandle) globalThis.__probeItem = this.item;
     },
     onLeave(ret) {
       if (this.item !== RED_SIGN_SOAPSTONE) return;
@@ -271,6 +272,130 @@ if (prologueMatches(CAN_USE_ITEM, CAN_USE_ITEM_PROLOGUE)) {
 } else {
   send({ family: 'summon-sign', tag: 'can_use.refused' });
 }
+
+// USE IT from here, once per load, the way the inventory's Use does. Static chain: the Use command's
+// job 0x140074a30 -> 0x140073d20 -> 0x140049630, which queues 0x140500c40(this, u16 handle,
+// u16 count) with this = [GameManagerImp+0x22e0]. The handle is the bag slot can_use is asked
+// about (measured 0x52d this session); before using it, can_use(bag, handle) is called with the
+// offline-check hook recording which item id it resolves to, and the use is refused unless that is
+// the Red Sign Soapstone.
+const USE_ITEM = at(0x00500c40);
+const USE_ITEM_PROLOGUE = [0x4c, 0x8b, 0xdc, 0x57, 0x41, 0x56];
+const ITEM_USE_OWNER_OFFSET = 0x22e0;
+const SOAPSTONE_HANDLE = 0x52d;
+const canUse = new NativeFunction(CAN_USE_ITEM, 'uint8', ['pointer', 'uint32']);
+const useItem = new NativeFunction(USE_ITEM, 'void', ['pointer', 'uint32', 'uint32']);
+let used = false;
+// Which exit 0x140500c40 took. Every exit through 0xe7a clears the busy bit (+0x3b8 bit 24); the
+// others keep it. 0xe61/0xe46 park the request on the PlayerCtrl (+0x40 handle, +0x42 count,
+// +0xfc |= 0x800); 0xe2e dispatches through [[rsp+0xa8]]+0x68; 0xddc found no matching slot.
+const USE_EXITS = { pending_e61: 0x00500e61, refused_e7a: 0x00500e7a, dispatch_e2e: 0x00500e2e, pending_e46: 0x00500e46, no_slot_ddc: 0x00500ddc };
+for (const [name, rva] of Object.entries(USE_EXITS)) {
+  Interceptor.attach(at(rva), function () {
+    send({ family: 'summon-sign', tag: 'use.path', at: name, rsi: this.context.rsi.toString() });
+  });
+}
+// Not from a listener: Frida does not intercept calls made inside one (memory
+// frida-listener-calls-are-not-intercepted-2026-10-03), which would skip both overrides and every
+// trace hook. NAV_UPDATE is (this in rcx, float dt in xmm1), so it is wrapped with replace, and
+// the use runs after the original returns.
+const navOriginal = new NativeFunction(NAV_UPDATE, 'void', ['pointer', 'float']);
+// The soapstone's ItemParam specialEffectId is 62045000, and SpEffectActiveItem.emevd event
+// 62045000 is one instruction, 100180[0] [2] (White Sign Soapstone 62030000 is 100180[0] [0]). The
+// SpEffect instruction table at 0x1415712e0 maps 100180[0] to 0x14022b960: it asks 0x14022d7e0,
+// then adds an effect entry (0x14022bb60) and stores the argument -- the sign type -- at
+// entry+0x50. Hook both, so a use shows whether the effect runs offline at all.
+const SIGN_EFFECT = at(0x0022b960);
+const SIGN_EFFECT_GATE = at(0x0022d7e0);
+const SIGN_EFFECT_GATE_RET = at(0x0022b994);
+Interceptor.attach(SIGN_EFFECT, function () {
+  send({ family: 'summon-sign', tag: 'use.effect', ctx: this.context.rcx.toString(),
+    backtrace: Thread.backtrace(this.context, Backtracer.ACCURATE).slice(0, 8).map(rel) });
+});
+Interceptor.attach(SIGN_EFFECT_GATE, {
+  onLeave(ret) {
+    if (this.returnAddress.equals(SIGN_EFFECT_GATE_RET)) send({ family: 'summon-sign', tag: 'use.effect_gate', result: ret.toInt32() & 0xff });
+  },
+});
+// false = only watch, so a use the player makes by hand is the positive control.
+const AUTO_USE = false;
+function useSoapstone() {
+    if (!AUTO_USE || used || !granted) return;
+    used = true;
+    const gm = GAME_MANAGER_IMP.readPointer();
+    const owner = gm.add(ITEM_USE_OWNER_OFFSET).readPointer();
+    const bag = gm.add(GAME_DATA_MANAGER_OFFSET).readPointer().add(ITEM_INVENTORY_OFFSET).readPointer();
+    if (owner.isNull() || bag.isNull() || !prologueMatches(USE_ITEM, USE_ITEM_PROLOGUE)) {
+      send({ family: 'summon-sign', tag: 'use.refused', why: 'owner/bag/prologue', owner: owner.toString(), bag: bag.toString() });
+      return;
+    }
+    globalThis.__probeItem = 0;
+    globalThis.__probeHandle = SOAPSTONE_HANDLE;
+    const usable = canUse(bag, SOAPSTONE_HANDLE);
+    globalThis.__probeHandle = 0;
+    const item = globalThis.__probeItem;
+    if (item !== RED_SIGN_SOAPSTONE || !usable) {
+      send({ family: 'summon-sign', tag: 'use.refused', why: 'handle check', handle: '0x' + SOAPSTONE_HANDLE.toString(16), item, usable });
+      return;
+    }
+    const busy = (owner.add(0x3b8).readU32() >>> 24) & 1;
+    send({ family: 'summon-sign', tag: 'use.call', handle: '0x' + SOAPSTONE_HANDLE.toString(16), owner: owner.toString(), busy });
+    useItem(owner, SOAPSTONE_HANDLE, 1);
+    send({ family: 'summon-sign', tag: 'use.returned', busy: (owner.add(0x3b8).readU32() >>> 24) & 1 });
+}
+// THE ITEM-IN-USE SEMAPHORE, the one the inventory's own WaitUsingItemJob (0x1400495d0) polls:
+// 0x1401ac210 -> 0x1401a7050 -> 0x1401b2e70 = `word [inner+0x259e6] > -1`, inner =
+// [[bag+0x10]+0x10], bag = [[GameManagerImp+0xa8]+0x10]. It holds the handle of the item being
+// used, -1 when none. Beside it, the request 0x140500c40 parks on the action ctrl
+// ([PlayerCtrl+0xc8]): +0x40 handle, +0x42 count, +0xfc bit 0x800. A handle is resolved to an item
+// id the way can_use does (0x1401a64e0): 0x1401b87b0 picks the container ([X+0x10] or [X+0x18],
+// X = [bag+0x10]), its vtable slot 1 returns the entry, the item id is at entry+0x14.
+const PLAYER_ACTION_CTRL_OFFSET = 0xc8;
+const ITEM_IN_USE_OFFSET = 0x259e6;
+const handleKind = new NativeFunction(at(0x001b87b0), 'int', ['uint32']);
+function itemOfHandle(x, handle) {
+  if (handle === 0xffff) return -1;
+  const kind = handleKind(handle);
+  if (kind !== 0 && kind !== 1) return 'kind ' + kind;
+  const container = x.add(kind === 0 ? 0x10 : 0x18).readPointer();
+  const get = new NativeFunction(container.readPointer().add(8).readPointer(), 'pointer', ['pointer', 'uint32']);
+  const entry = get(container, handle);
+  return entry.isNull() ? 'no entry' : entry.add(0x14).readS32();
+}
+let lastSemaphore = '';
+function watchItemUse() {
+  const gm = GAME_MANAGER_IMP.readPointer();
+  const data = gm.add(GAME_DATA_MANAGER_OFFSET).readPointer();
+  const player = gm.add(PLAYER_CTRL_OFFSET).readPointer();
+  if (data.isNull() || player.isNull()) return;
+  const x = data.add(ITEM_INVENTORY_OFFSET).readPointer().add(0x10).readPointer();
+  const inUse = x.add(0x10).readPointer().add(ITEM_IN_USE_OFFSET).readU16();
+  const action = player.add(PLAYER_ACTION_CTRL_OFFSET).readPointer();
+  const pending = action.isNull() ? 0 : (action.add(0xfc).readU32() & 0x800) >>> 11;
+  const pendingHandle = action.isNull() ? 0xffff : action.add(0x40).readU16();
+  const key = inUse + ':' + pending + ':' + pendingHandle;
+  if (key === lastSemaphore) return;
+  lastSemaphore = key;
+  send({
+    family: 'summon-sign', tag: 'item_use.semaphore',
+    in_use_handle: '0x' + inUse.toString(16), in_use_item: itemOfHandle(x, inUse),
+    pending, pending_handle: '0x' + pendingHandle.toString(16), pending_item: itemOfHandle(x, pendingHandle),
+  });
+}
+globalThis.__useNavCb = new NativeCallback((self, dt) => {
+  navOriginal(self, dt);
+  try {
+    watchItemUse();
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'item_use.semaphore.error', error: e.message });
+  }
+  try {
+    useSoapstone();
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'use.refused', why: 'threw ' + e.message });
+  }
+}, 'void', ['pointer', 'float']);
+Interceptor.replace(NAV_UPDATE, globalThis.__useNavCb);
 
 // BROAD: with the gate forced, Use animates but none of the five sign hooks fired. So hook every
 // sign-side entry that could be the placement: the SummonSignSetCtrl getter wrapper 0x1402128d0
