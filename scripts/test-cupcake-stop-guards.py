@@ -143,6 +143,44 @@ CASES = [
         env=(("CUPCAKE_IDLE_GAME_MACHINE_OVERRIDE", "760735|1792466500"),),
     ),
     Case(
+        "frida_attached_instance.jsonl",
+        "with the Frida watcher this session started attached (agent summon-sign-trace-frozen.js)",
+        "2026-11-02 19:51: the summon-sign tracer attached by this session, the game up, and the turn "
+        "ended on a finding with no question, request or blocker -- halts with continue-now. Machine "
+        "pinned (game and that watcher alive), transcript read for real",
+        env=(("CUPCAKE_FRIDA_ATTACHED_MACHINE_OVERRIDE", "766429|summon-sign-trace-frozen.js"),),
+    ),
+    Case(
+        "frida_attached_question.jsonl",
+        None,
+        "the same session ending on a question to the user (is the sign on your screen?) must NOT halt",
+        env=(("CUPCAKE_FRIDA_ATTACHED_MACHINE_OVERRIDE", "766429|summon-sign-trace-frozen.js"),),
+    ),
+    Case(
+        "frida_attached_instance.jsonl",
+        None,
+        "the same turn with the game not running must NOT halt",
+        env=(("CUPCAKE_FRIDA_ATTACHED_MACHINE_OVERRIDE", "dead"),),
+    ),
+    Case(
+        "frida_attached_instance.jsonl",
+        None,
+        "the same turn with the game up and no watcher alive must NOT halt",
+        env=(("CUPCAKE_FRIDA_ATTACHED_MACHINE_OVERRIDE", "766429|-"),),
+    ),
+    Case(
+        "frida_attached_instance.jsonl",
+        None,
+        "the same turn while the live watcher runs another session's agent (tick.js) must NOT halt",
+        env=(("CUPCAKE_FRIDA_ATTACHED_MACHINE_OVERRIDE", "766429|tick.js"),),
+    ),
+    Case(
+        "frida_attached_teardown.jsonl",
+        None,
+        "a turn that ran ds2-teardown.py must NOT halt, even with the machine pinned as still up",
+        env=(("CUPCAKE_FRIDA_ATTACHED_MACHINE_OVERRIDE", "766429|summon-sign-trace-frozen.js"),),
+    ),
+    Case(
         "unexecuted_promise.jsonl",
         "promise nothing is going to keep",
         "turn ends on 'I'll re-run the gate...' with no tool call, no background work, no handoff",
@@ -864,6 +902,7 @@ def run_hook(
             # Nor whether a game happens to be running on this machine: set-but-empty is silence.
             "CUPCAKE_UNSPENT_EVIDENCE_OVERRIDE": "",
             "CUPCAKE_IDLE_GAME_MACHINE_OVERRIDE": "dead",
+            "CUPCAKE_FRIDA_ATTACHED_MACHINE_OVERRIDE": "dead",
             **dict(extra_env),
         }
         payload = {

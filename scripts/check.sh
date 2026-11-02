@@ -343,6 +343,10 @@ else
   # (ds2-loader.log read since the last launch) and what keeps it up (the user asked, the user is
   # hand-testing it, the agent said why) is decided in scripts/cupcake_idle_game.py.
   python3 scripts/cupcake_idle_game.py --selftest | tail -1
+  # And for the Frida-attached guard: when a turn end with the game up and this session's watcher
+  # attached is a pause (no handoff, no blocker, nothing torn down, no other work running) is
+  # decided in scripts/cupcake_frida_attached.py.
+  python3 scripts/cupcake_frida_attached.py --selftest | tail -1
   # And for the unwatched-wait guard: which closing prose is a wait, and the carve-outs (a wait on
   # the user, quoted text, narration before the last tool call), in scripts/cupcake_unwatched_wait.py.
   python3 scripts/cupcake_unwatched_wait.py --selftest | tail -1
