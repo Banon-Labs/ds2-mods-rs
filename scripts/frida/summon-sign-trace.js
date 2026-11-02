@@ -1701,7 +1701,12 @@ globalThis.__asmBuild = Interceptor.attach(at(0x0035a650), {
     try {
       const npcModel = ret.add(0x30).readPointer();
       const playerModel = playerAsmCtrl().add(0x30).readPointer();
+      // FUN_140339830 also copies model +0xe70..+0xea0, the held-weapon instance cache ($S/mimic2.md):
+      // with the player's cached id 2880000 at +0xe74, FUN_14033e5b0 never builds the NPC's spear.
+      // Keep the NPC's own cache across the copy so the game builds the weapon itself.
+      const cache = npcModel.add(0xe70).readByteArray(0x30);
       copyModelFace(npcModel, playerModel);
+      npcModel.add(0xe70).writeByteArray(cache);
       send({ family: 'summon-sign', tag: 'mimic.face_copied', npcModel: npcModel.toString(), playerModel: playerModel.toString() });
     } catch (e) {
       send({ family: 'summon-sign', tag: 'mimic.face_copied', error: e.message });
@@ -1718,6 +1723,7 @@ globalThis.__asmBuild = Interceptor.attach(at(0x0035a650), {
 const MIMIC_WRITE = true;
 const copyModelFace = new NativeFunction(at(0x00339830), 'void', ['pointer', 'pointer']);
 const setEquipSlot = new NativeFunction(at(0x003463d0), 'void', ['pointer', 'int', 'pointer']);
+const applyHollowLook = new NativeFunction(at(0x002026e0), 'void', ['pointer']);
 const MIMIC_ROW_SLOTS = [
   [0x6c, 1], [0x70, 3], [0x74, 5], [0x78, 0], [0x7c, 2], [0x80, 4],
   [0x84, 6], [0x88, 7], [0x8c, 8], [0x90, 9],
@@ -1769,6 +1775,11 @@ globalThis.__mimicApply = Interceptor.attach(at(0x0035a3d0), {
         entry.writeU32(0);
         setEquipSlot(npcEquip, slot, entry);
       }
+      // Hollowing ($S/mimic2.md): the look is parts +0x2d, which FUN_1402026e0(ctrl) derives from the
+      // s8 hollow level at PlayerParam +0x1ac (read 0x1402026f9) and which the NPC's first ready frame
+      // recomputes from its own level 0. Give it the player's level, then let the game derive the look.
+      this.npc.add(0x490).readPointer().add(0x1ac).writeS8(playerCtrl().add(0x490).readPointer().add(0x1ac).readS8());
+      applyHollowLook(this.npc);
       const table = npcEquip.add(8);
       const ids = MIMIC_ENTRY_SLOTS.map((s) => [s, table.add(s * 0x14 + 4).readU32(), table.add(s * 0x14 + 0xe).readU8(), table.add(s * 0x14 + 0xf).readU8()])
         .filter(([, id]) => id !== 0 && id !== 0xffffffff);
@@ -1854,6 +1865,10 @@ globalThis.__mimicDiff = function mimicDiff() {
       parts: diff(asmCtrlOf(pc).add(0x28).readPointer(), asmCtrlOf(npc).add(0x28).readPointer(), 0x638).slice(0, 120),
       param: diff(pc.add(0x490).readPointer(), npc.add(0x490).readPointer(), 0x400).slice(0, 160),
       equipDirty: [asmCtrlOf(pc).add(0x20).readPointer().add(0x4f0).readU8(), asmCtrlOf(npc).add(0x20).readPointer().add(0x4f0).readU8()],
+      // The two fixes' confirming reads ($S/mimic2.md): the right-hand weapon cache id and instance
+      // (model +0xe74, [+0xd38] non-null once built), the hollow look parts +0x2d and level PP +0x1ac.
+      weapon: [pc, npc].map((c) => { const m = asmCtrlOf(c).add(0x30).readPointer(); return [m.add(0xe74).readU32(), m.add(0xd38).readPointer().toString()]; }),
+      hollow: [pc, npc].map((c) => [asmCtrlOf(c).add(0x28).readPointer().add(0x2d).readU8(), c.add(0x490).readPointer().add(0x1ac).readS8()]),
     });
   } catch (e) {
     send({ family: 'summon-sign', tag: 'mimic.diff', error: e.message });
