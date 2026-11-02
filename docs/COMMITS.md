@@ -133,3 +133,4 @@ footer. All four are enforced by global policy guards rather than by anything in
 The footer also carries a `Run-Stamp:` line for the head commit's last run, printed by
 `scripts/pr-run-stamp.py`. That one is a repo guard, `pr_requires_run_stamp`; the format and the
 create/ready rules are in `AGENTS.md` under "Opening a PR from this repo".
+
