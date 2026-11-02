@@ -1589,3 +1589,40 @@ if (lookupPrologue.join(',') === PARAM_LOOKUP_PROLOGUE.join(',')) {
 } else {
   send({ family: 'summon-sign', tag: 'row.refused', found: lookupPrologue });
 }
+
+// One shot per load: the player's HP and what the game's own PlayerGameParamCalculator answers for
+// defense, so a mimic summon can be compared against the character it copies. The calculator is
+// `PlayerCtrl +0x398` (the defender's `[chr+0x398]` at 0x140137afc); slot 58 (+0x1d0, 0x140380070)
+// fills a 13-float DEF array whose [0] is physical defense for an attack kind byte (-1 none,
+// 0/1/2 the three physical subtypes 0x14034dbb0 branches on), slot 59 (+0x1d8, 0x140381350) the
+// cut array the damage code multiplies by `1 - cut` (docs/DS2-DPS-MECHANICS.md).
+(function playerDefense() {
+  const PLAYER_GAME_PARAM_CALCULATOR_VTABLE = at(0x010e4ec8);
+  try {
+    const pc = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer();
+    const calc = pc.add(0x398).readPointer();
+    const vt = calc.readPointer();
+    if (!vt.equals(PLAYER_GAME_PARAM_CALCULATOR_VTABLE)) {
+      send({ family: 'summon-sign', tag: 'player.defense', refused: 'vtable ' + vt.sub(image.base) });
+      return;
+    }
+    const def = new NativeFunction(vt.add(0x1d0).readPointer(), 'void', ['pointer', 'pointer', 'int']);
+    const cut = new NativeFunction(vt.add(0x1d8).readPointer(), 'void', ['pointer', 'pointer']);
+    const physical = {};
+    for (const [name, kind] of [['physical', -1], ['kind0', 0], ['kind1', 1], ['kind2', 2]]) {
+      const out = Memory.alloc(0x34);
+      def(calc, out, kind);
+      physical[name] = +out.readFloat().toFixed(2);
+    }
+    const c = Memory.alloc(0x68);
+    cut(calc, c);
+    send({
+      family: 'summon-sign', tag: 'player.defense',
+      hp: [pc.add(0x168).readS32(), pc.add(0x170).readS32()],
+      physical,
+      cut: Array.from({ length: 13 }, (_, i) => +c.add(i * 4).readFloat().toFixed(4)),
+    });
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'player.defense', error: e.message });
+  }
+})();
