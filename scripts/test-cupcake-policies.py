@@ -1102,6 +1102,40 @@ def cases() -> list[PolicyCase]:
             },
             expected_text="relayed user claim with no status marker",
         ),
+        # --- monitor_rate_limit ---------------------------------------------------------------
+        # 2026-11-02: `python3 -u /abs/scripts/monitor-throttle.py 10` was refused because the
+        # pattern wanted the path straight after `python3`. The absolute path was never the cause.
+        PolicyCase(
+            "allow-monitor-unbuffered-absolute-throttle",
+            True,
+            tool_name="Monitor",
+            tool_input={
+                "command": "tail -n0 -F /tmp/s/summon-sign.jsonl"
+                " | grep --line-buffered -E 'Error|detached'"
+                f" | python3 -u {REPO_ROOT}/scripts/monitor-throttle.py 10",
+                "description": "watch",
+            },
+        ),
+        PolicyCase(
+            "deny-monitor-unbuffered-interval-below-minimum",
+            False,
+            tool_name="Monitor",
+            tool_input={
+                "command": "tail -F a.log | python3 -u scripts/monitor-throttle.py 5",
+                "description": "watch",
+            },
+            expected_text="blocked an unthrottled Monitor",
+        ),
+        PolicyCase(
+            "deny-monitor-module-flag-before-throttle",
+            False,
+            tool_name="Monitor",
+            tool_input={
+                "command": "tail -F a.log | python3 -m http.server scripts/monitor-throttle.py 10",
+                "description": "watch",
+            },
+            expected_text="blocked an unthrottled Monitor",
+        ),
     ]
 
 
