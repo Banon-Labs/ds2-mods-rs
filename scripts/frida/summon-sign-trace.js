@@ -325,7 +325,7 @@ Interceptor.attach(SIGN_EFFECT_GATE, {
 // the table the resolver 0x14017b7e0 reads: block = [[GameManagerImp+0x40]+0x170+b*8] (b < 0x2a),
 // ctrl = [[block+0x20]+i*8] (i < [block+0x28]), entity id = (i<<10)|(b<<4)|4. chrType is
 // [[ctrl+0x58]+0x84], mapped through the u8 pair table 0x1410ed318 by 0x1404124f0.
-const NPC_SIGN_TEST = false;
+const NPC_SIGN_TEST = true;
 function listCharacters() {
   const mgr = GAME_MANAGER_IMP.readPointer().add(0x40).readPointer();
   const found = [];
@@ -392,7 +392,18 @@ function npcSignTest() {
         after: [0x30, 0x34, 0x38].map((o) => ret.add(o).readFloat().toFixed(2)) });
     },
   });
+  // Sign colour: 0x140212950(chrType) -> table 0x1410cb5c4 (chrType 1 -> 1 white, 2 -> 2 red, 16 ->
+  // 0, no sign). Pate's chrType is 1, so his sign is white; the summon behind it is forced to 16
+  // (hostile) at spawn regardless. Make the sign red for this creation only.
+  const SIGN_TYPE = 2;
+  const signTypeHook = Interceptor.attach(at(0x00212950), {
+    onLeave(ret) {
+      send({ family: 'summon-sign', tag: 'npc_sign_test.sign_type', from: rel(this.returnAddress), native: ret.toInt32(), forced: SIGN_TYPE });
+      ret.replace(ptr(SIGN_TYPE));
+    },
+  });
   slot3(iface, out, entity);
+  signTypeHook.detach();
   matrixHook.detach();
   send({ family: 'summon-sign', tag: 'npc_sign_test', ctrl: pick.ctrl.toString(), kind: pick.kind, chrType: pick.chrType,
     signType: pick.signType, entity: '0x' + pick.entity.toString(16), handle: '0x' + out.readU32().toString(16) });
@@ -417,6 +428,10 @@ function npcSignTest() {
     show(iface, sign);
     send({ family: 'summon-sign', tag: 'npc_sign_test.shown', w18: '0x' + (sign.add(0x18).readU32() >>> 0).toString(16) });
   }
+  // The touch needs the NPC's character loaded (0x140359530), which offline it is not: request it
+  // now through the native "prepare generator" 0x140412970, so it is resident by the time of the touch.
+  prepareGenerator(pick.ctrl, 0);
+  send({ family: 'summon-sign', tag: 'npc_sign_test.prepared', chrId: pick.ctrl.add(0x60).readPointer().readU32() });
 }
 // WHY A SIGN IS NOT DRAWN. The per-set loop 0x14020e8c0 hides a record while
 // (rec+0x18 & 0xff000) >= 0xfe000 (0x14020eb50), and for 0xff000 it first runs 0x14020cb50, which
@@ -511,8 +526,10 @@ for (const [name, rva] of [['npc_phantom_generate', 0x00415b20], ['npc_phantom_s
       onEnter(args) {
         send({ family: 'summon-sign', tag: 'phantom.' + name, args: [args[0], args[1], args[2]].map((a) => a.toString()),
           backtrace: Thread.backtrace(this.context, Backtracer.ACCURATE).slice(0, 10).map(rel) });
+        if (name === 'npc_phantom_generate') touchSummonEnter(this, args);
       },
       onLeave(ret) {
+        if (name === 'npc_phantom_generate') touchSummonLeave(this, ret);
         send({ family: 'summon-sign', tag: 'phantom.' + name + '.ret', ret: ret.toString(),
           handle: name === 'npc_phantom_spawn' && !ret.isNull() ? '0x' + (ret.readU32() >>> 0).toString(16) : undefined });
       },
@@ -667,7 +684,7 @@ Interceptor.attach(at(0x00422bc0), {
   },
 });
 // The touch, done by the agent: what NetNpcPhantomDirection_HOST (0x1402529c0) calls.
-const SUMMON_TEST = true;
+const SUMMON_TEST = false;
 const SPAWN_TEAM = null;
 // 0x2824 = Mild-Mannered Pate (measured: the sign named him; spawned 2026-11-02 at his generator,
 // 210 m away). 0x2c24 = block 2 index 11, chrType 2 / sign type 2 (red): chr 891000, spawned
@@ -916,6 +933,40 @@ function entityDump() {
     bytes: Array.from(new Uint8Array(pl.readByteArray(0x600))).map((x) => x.toString(16).padStart(2, '0')).join('') });
   for (let k = 0; k < rows.length; k += 8)
     send({ family: 'summon-sign', tag: 'entity.dump', from: k, total: rows.length, rows: rows.slice(k, k + 8) });
+}
+// THE PLAYER'S TOUCH: when the player touches the NPC sign, NetNpcPhantomDirection_HOST calls
+// FUN_140415b20 for the sign's entity. Do for that call what summonTest does for its own: free the
+// generator, allow its state, put the spawn 3 m from the player (gen+0x20), and mark the call as a
+// summon so the forced gates and SPAWN_CHR_TYPE (16 = hostile invader, measured) apply to it.
+const TOUCH_SUMMON = true;
+function touchSummonEnter(ctx, args) {
+  if (!TOUCH_SUMMON || globalThis.__summoning === true) return;
+  const entity = args[1].readU32();
+  if (entity !== SUMMON_ENTITY) return;
+  const gm = GAME_MANAGER_IMP.readPointer();
+  const ctrl = new NativeFunction(at(0x0017b7e0), 'pointer', ['pointer'])(args[1]);
+  if (ctrl.isNull()) return;
+  const entry = ctrl.add(0x68).readPointer();
+  if (!entry.isNull() && !grabChr(entry.add(0x18)).isNull()) despawn(gm.add(0x40).readPointer(), entry);
+  const state = ctrl.add(0x8c).readU8();
+  if (![3, 4, 5, 6, 8].includes(state)) ctrl.add(0x8c).writeU8(3);
+  const me = gm.add(PLAYER_CTRL_OFFSET).readPointer().add(0x90);
+  ctrl.add(0x20).writeFloat(me.readFloat() + 3);
+  ctrl.add(0x24).writeFloat(me.add(4).readFloat());
+  ctrl.add(0x28).writeFloat(me.add(8).readFloat());
+  ctx.touch = true;
+  globalThis.__summoning = true;
+  send({ family: 'summon-sign', tag: 'touch_summon', entity: '0x' + entity.toString(16), state, loaded: chrLoaded(gm.add(0x18).readPointer(), ctrl.add(0x60).readPointer().readU32()) });
+}
+function touchSummonLeave(ctx, ret) {
+  if (!ctx.touch) return;
+  globalThis.__summoning = false;
+  if (globalThis.__b302) {
+    globalThis.__b302.at.writeU8(globalThis.__b302.was);
+    globalThis.__b302 = undefined;
+  }
+  send({ family: 'summon-sign', tag: 'touch_summon.ret', ret: ret.toString() });
+  if (!ret.isNull()) globalThis.__movedChr = { chr: ret, frames: 0 };
 }
 let lastSignWords = '';
 function watchSign() {
