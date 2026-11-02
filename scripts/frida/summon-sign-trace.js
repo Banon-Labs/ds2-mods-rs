@@ -538,6 +538,89 @@ for (const [name, rva] of [['npc_phantom_generate', 0x00415b20], ['npc_phantom_s
     send({ family: 'summon-sign', tag: 'phantom.refused', name, error: e.message });
   }
 }
+// WHO SENDS HIM HOME. Measured 2026-11-02: the touch spawned Pate (chrType 16, 0x140356060 returned
+// a character), then the on-screen banner said he was sent home and he never appeared. Log, with a
+// backtrace, the generator despawn 0x1404193f0(mgr, entry) and the character removal it uses,
+// 0x140316010(chr, ...), for any character -- both are rare.
+for (const [name, rva] of [['despawn_4193f0', 0x004193f0], ['remove_316010', 0x00316010]]) {
+  Interceptor.attach(at(rva), {
+    onEnter(args) {
+      send({ family: 'summon-sign', tag: 'phantom.' + name, args: [args[0], args[1]].map((a) => a.toString()),
+        backtrace: Thread.backtrace(this.context, Backtracer.ACCURATE).slice(0, 12).map(rel) });
+    },
+  });
+}
+// THE SEND-HOME TIMER. Measured 2026-11-02: after the touch spawned Pate, NetNpcPhantom's per-slot
+// update FUN_140252270 despawned him via FUN_140252620 -> FUN_140252580 -> 0x1404193f0. In the
+// active state (+0x14 == 2) the slot's timer +0x1c counts down unless 0x1402d8650() (a session byte,
+// [[0x141616cf8]+0x18]+0xa) AND 0x1402520b0(slot+8) (chrType row byte 0 is 2 or 3) both hold; when
+// it runs out the slot goes to state 3 (leaving) and he is sent home. Hold both true offline.
+const KEEP_PHANTOM = true;
+for (const [name, rva, site] of [['keep_session', 0x002d8650, 0x002522f7], ['keep_chr_type', 0x002520b0, 0x00252304]]) {
+  let logged = 0;
+  Interceptor.attach(at(rva), {
+    onEnter(args) {
+      this.on = this.returnAddress.equals(at(site));
+      if (this.on && name === 'keep_chr_type') this.type = args[0].readU8();
+    },
+    onLeave(ret) {
+      if (!this.on) return;
+      const native = ret.toInt32() & 0xff;
+      if (logged < 3 || native === 0 && logged < 6) {
+        logged += 1;
+        send({ family: 'summon-sign', tag: 'phantom.' + name, native, chrType: this.type, forced: KEEP_PHANTOM });
+      }
+      if (KEEP_PHANTOM && native === 0) ret.replace(ptr(1));
+    },
+  });
+}
+// With both held, he was still despawned (measured 2026-11-02): the slot still went 3 -> 0. Log
+// every state change FUN_140252620(slot, ?, state) with the slot's fields and caller, and remember
+// the slot so watchSlot() can report its state/timers every time they change.
+const slotFields = (s) => ({ cur: s.add(0x14).readS32(), next: s.add(0x18).readS32(), t1c: s.add(0x1c).readFloat().toFixed(2),
+  t20: s.add(0x20).readFloat().toFixed(2), r34: s.add(0x34).readS32(), r38: s.add(0x38).readS32(), type: s.add(8).readU8(), ent: '0x' + (s.add(4).readU32() >>> 0).toString(16) });
+Interceptor.attach(at(0x00252620), {
+  onEnter(args) {
+    // FUN_140252270 passes its own slot (rbx) as the first argument; the decomp shows param_1.
+    globalThis.__npcSlot = args[0];
+    send({ family: 'summon-sign', tag: 'phantom.slot_state', state: args[2].toInt32(), slot: args[0].toString(), fields: slotFields(args[0]),
+      backtrace: Thread.backtrace(this.context, Backtracer.ACCURATE).slice(0, 6).map(rel) });
+  },
+});
+let lastSlot = '';
+function watchSlot() {
+  const s = globalThis.__npcSlot;
+  if (!s) return;
+  const f = slotFields(s);
+  const key = [f.cur, f.next, f.r34, f.r38, f.type].join(',');
+  if (key === lastSlot) return;
+  lastSlot = key;
+  send({ family: 'summon-sign', tag: 'phantom.slot_watch', fields: f });
+}
+// THE LEAVE REQUEST. Measured 2026-11-02 (slot trace): in the active state the slot's +0x20 was set
+// to 0.01 with +0x38 = 2, which expires into state 3 (leaving) and then 0 (despawn). The setter is
+// FUN_1402521b0(slot, reason) (reason 1 -> 3 s, 2 -> 0.01 s), called only by the manager update
+// FUN_1402540f0 with a reason FUN_140254780 pops for the slot's entity from the dead-notification
+// queue at mgr+0x1c8. Pop it as usual, but hand back 0 for the summoned entity.
+const KEEP_FROM_DEAD_QUEUE = true;
+Interceptor.attach(at(0x00254780), {
+  onEnter(args) {
+    this.on = this.returnAddress.equals(at(0x0025436a));
+    if (this.on) this.entity = args[1].readU32();
+  },
+  onLeave(ret) {
+    if (!this.on) return;
+    const reason = ret.toInt32();
+    if (reason === 0) return;
+    // Measured: once he is up the queue reports him every frame -- log only a change.
+    const key = this.entity + ':' + reason;
+    if (globalThis.__lastLeave !== key) {
+      globalThis.__lastLeave = key;
+      send({ family: 'summon-sign', tag: 'phantom.leave_reason', entity: '0x' + (this.entity >>> 0).toString(16), reason, kept: KEEP_FROM_DEAD_QUEUE && this.entity === SUMMON_ENTITY });
+    }
+    if (KEEP_FROM_DEAD_QUEUE && this.entity === SUMMON_ENTITY) ret.replace(ptr(0));
+  },
+});
 // WHY THE SUMMON FAILS (measured: FUN_140415b20 got handle -1 back, so 0x14041e870 returned 0).
 // Each spawn layer's return, and the handle FUN_140418d50 wrote to its out-parameter.
 for (const [name, rva] of [['spawn_418690', 0x00418690], ['spawn_356060', 0x00356060], ['spawn_3560a0', 0x003560a0]]) {
@@ -777,6 +860,13 @@ const MOVE_SPAWN_TO_PLAYER = false;
 function watchMoved() {
   const m = globalThis.__movedChr;
   if (!m) return;
+  // During a load (death, warp) PlayerCtrl is null and the spawned character is freed: stop
+  // watching instead of faulting every frame (measured 2026-11-02: 0x168 access violations).
+  if (GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer().isNull()) {
+    send({ family: 'summon-sign', tag: 'spawn.watch_end', frames: m.frames, why: 'no PlayerCtrl (load)' });
+    globalThis.__movedChr = undefined;
+    return;
+  }
   m.frames += 1;
   if ([1, 5, 30, 120, 300, 600].includes(m.frames)) {
     const q = m.chr.add(0x90);
@@ -966,7 +1056,8 @@ function touchSummonLeave(ctx, ret) {
     globalThis.__b302 = undefined;
   }
   send({ family: 'summon-sign', tag: 'touch_summon.ret', ret: ret.toString() });
-  if (!ret.isNull()) globalThis.__movedChr = { chr: ret, frames: 0 };
+  // Copy it: the onLeave return value reads as null after the callback (measured: 0x168 faults).
+  if (!ret.isNull()) globalThis.__movedChr = { chr: ptr(ret.toString()), frames: 0 };
 }
 let lastSignWords = '';
 function watchSign() {
@@ -1050,6 +1141,12 @@ globalThis.__useNavCb = new NativeCallback((self, dt) => {
     watchItemUse();
   } catch (e) {
     send({ family: 'summon-sign', tag: 'item_use.semaphore.error', error: e.message });
+  }
+  try {
+    watchSlot();
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'phantom.slot_watch.error', error: e.message });
+    globalThis.__npcSlot = undefined;
   }
   try {
     watchSign();
