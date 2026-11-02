@@ -2528,20 +2528,25 @@ def with_defense(dfn: dict, add: dict, times: float = 1.0) -> dict:
 
 
 def _armor_defense(data: Data, b: Build, eff: dict) -> dict:
-    """build_defense's armour and stat part, at effective stats `eff`."""
+    """build_defense's armour and stat part, at effective stats `eff`. Each piece's own values are
+    scaled by defense_lack_factor at `eff`; the stat bonus is not (slot 58 adds the pieces' bonus
+    coefficients times the stat defense after its per-piece loop, EXE 0x140380235)."""
     pieces = [data.armor[s][p] for s, p in zip(ARMOR_SLOTS, b.armor) if p in data.armor[s]]
+    lack = [defense_lack_factor(p.get("require") or {}, eff) for p in pieces]
     pb = _tab(data, "physicalDEFBonus", eff["endurance"] + eff["vitality"] + eff["strength"] + eff["dexterity"])
-    out = {"physical": sum(p.get("physicalDEF", 0) + p.get("physicalDEFBonus", 0) * pb for p in pieces)}
+    out = {"physical": sum(f * p.get("physicalDEF", 0) + p.get("physicalDEFBonus", 0) * pb
+                           for f, p in zip(lack, pieces))}
     # slash/strike/thrust (SITE values; equal ArmorReinforceParam's max values for 422 of 427 pieces,
     # REGULATION) plus the same stat bonus the general physical defense gets (SITE)
     for t in PHYS_TYPES:
-        out[t] = sum(p.get(t + "DEF", p.get("physicalDEF", 0)) + p.get("physicalDEFBonus", 0) * pb for p in pieces)
+        out[t] = sum(f * p.get(t + "DEF", p.get("physicalDEF", 0)) + p.get("physicalDEFBonus", 0) * pb
+                     for f, p in zip(lack, pieces))
     base = {"magic": ("magicDEFBonus", eff["intelligence"]),
             "fire": ("fireDEFBonus", eff["intelligence"] + eff["faith"]),
             "lightning": ("lightningDEFBonus", eff["faith"]),
             "dark": ("darkDEFBonus", min(eff["intelligence"], eff["faith"]))}
     for k, (tab, i) in base.items():
-        out[k] = _tab(data, tab, i) + sum(p.get(k + "DEF", 0) for p in pieces)
+        out[k] = _tab(data, tab, i) + sum(f * p.get(k + "DEF", 0) for f, p in zip(lack, pieces))
     return out
 
 
@@ -3990,13 +3995,28 @@ def ring_poise(data: Data) -> dict:
     return out
 
 
+def lack_shortfall(req: dict, stats: dict) -> float:
+    """How far `stats` fall short of a piece's requirements, the v the game caches per worn piece
+    (EXE 0x14034d150): clamp(sum of max(0, 1 - stat/req) over the requirements, 0, 1)."""
+    return min(1.0, sum(max(0.0, 1 - stats.get(s, 0) / r) for s, r in req.items() if r > 0))
+
+
 def lack_of_stats(req: dict, stats: dict) -> float:
     """The share of a piece's poise lost to unmet requirements (EXE 0x1403811f0 over
-    PlayerLackOfStatsParam row 28 = [30, 80, 0, 30]): v = clamp(sum of max(0, 1 - stat/req) over the
-    piece's requirements, 0, 1) (0x14034d150), then clamp((30 + 50 v) / 100, 0, 1) for v > 0, 0 at
-    v == 0. So a piece worn under its requirements keeps 0.7 down to 0.2 of its poise."""
-    v = min(1.0, sum(max(0.0, 1 - stats.get(s, 0) / r) for s, r in req.items() if r > 0))
+    PlayerLackOfStatsParam row 28 = [30, 80, 0, 30]): v = lack_shortfall, then
+    clamp((30 + 50 v) / 100, 0, 1) for v > 0, 0 at v == 0. So a piece worn under its requirements
+    keeps 0.7 down to 0.2 of its poise."""
+    v = lack_shortfall(req, stats)
     return min(1.0, max(0.0, (30 + 50 * v) * 0.01)) if v > 0 else 0.0
+
+
+def defense_lack_factor(req: dict, stats: dict) -> float:
+    """What a piece's own defenses are multiplied by at `stats` (EXE 0x140381c20, called per piece by
+    PlayerGameParamCalculator slot 58 with PlayerLackOfStatsParam row 15, and by slot 59 with rows 16
+    and 17, all [30, 50, 0, 0]): 1 - (30 + 20 v) / 100 for v = lack_shortfall > 0, 1 at v == 0. So
+    a piece worn under its requirements keeps 0.7 down to 0.5 of its defense and of its cut."""
+    v = lack_shortfall(req, stats)
+    return 1 - (30 + 20 * v) * 0.01 if v > 0 else 1.0
 
 
 def armor_poise(data: Data, armor, rings=(), stats: dict | None = None) -> float:
@@ -8727,6 +8747,12 @@ def selftest() -> int:
         # best-infusion margin: best over runner-up, as a fraction of the runner-up
         # armour poise lost to unmet requirements (PlayerLackOfStatsParam row 28): none when met,
         # 30% + 50% per unit of shortfall, all of it past a full unit
+        # a piece's own defense under unmet requirements (PlayerLackOfStatsParam rows 15-17): all of
+        # it when met, 70% less 20% per unit of shortfall, half past a full unit
+        ("defense lack: requirements met", defense_lack_factor({"strength": 20}, {"strength": 20}), 1.0),
+        ("defense lack: STR 10 of 20", defense_lack_factor({"strength": 20}, {"strength": 10}), 0.6),
+        ("defense lack: floor 0.5", defense_lack_factor({"strength": 20, "dexterity": 20},
+                                                        {"strength": 0, "dexterity": 0}), 0.5),
         ("lack of stats: requirements met", lack_of_stats({"strength": 20}, {"strength": 20}), 0.0),
         ("lack of stats: STR 10 of 20", lack_of_stats({"strength": 20}, {"strength": 10}), 0.55),
         ("lack of stats: capped at 0.8", lack_of_stats({"strength": 20, "dexterity": 20},

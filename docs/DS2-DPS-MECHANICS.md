@@ -690,7 +690,8 @@ for each armor piece (4):                                   loop 0x1403814c0..
     v = lerp(ArmorReinforceParam.min*, max*, reinforceLv / maxLevel)     0x14034dda0 (row +0x0c.. / +0x3c..)
     v = v * 0.01                                                         0x14034f7b0
     v += 0.01 * SpEffect vector (kind 7)                                 0x14038148e, 0x14034c7d0, 0x140381510
-    v *= lack-of-stats factor (PlayerLackOfStatsParam row 0x10 / 0x11)   0x140381c20
+    v[0..5]  *= lack-of-stats factor (PlayerLackOfStatsParam row 0x10)   0x140381558
+    v[5..10] *= lack-of-stats factor (PlayerLackOfStatsParam row 0x11)   0x1403815ac
 cut[magic]     = sum + statblock+0x98 (magicResistance     * 0.01)      FUN_14038d270(.,0)
 cut[lightning] = sum + statblock+0xa0 (lightningResistance * 0.01)      FUN_14038d270(.,2)
 cut[fire]      = sum + statblock+0x9c (flameResistance     * 0.01)      FUN_14038d270(.,1)
@@ -698,6 +699,29 @@ cut[dark]      = sum + statblock+0xa4 (darkResistance      * 0.01)      FUN_1403
 vfunc +0x250 (0x14038179d), clamp every entry to [0, 1] (0x140381824..); cap each element at
 FUN_140164af0 (0x140381871) = PlayerCommonParam+0x18c * 0.01 (99.0 -> 0.99)
 ```
+
+**The lack-of-stats factor on armour** (EXE + REGULATION, read 2026-11-02). `0x140381c20(calc, piece,
+row)` reads the piece's shortfall `v` at equip record `+0x2b8 + 0x30*piece`, the same float the poise
+path uses (`0x14034d150`, max poise above), and returns `1.0` when `v == 0`, otherwise
+`1.0 - (row[0] + (row[1] - row[0]) * v) * 0.01` (constants `0x1410ac698` = 1.0, `0x1410acb08` = 0.01;
+no clamp). The row comes from `0x140358b30(PlayerLackOfStatsParam, id)`:
+
+| caller | row | what it scales |
+|---|---|---|
+| slot 58 `0x140380070` (`0x1403801d2`) | 0xf (15) | the piece's DEF for the type asked: `factor * pieceDef * mult`, summed into `xmm10` |
+| slot 59 `0x140381350` (`0x140381558`) | 0x10 (16) | the piece's cut vector entries 0-4: physical, magic, lightning, fire, dark |
+| slot 59 (`0x1403815ac`) | 0x11 (17) | entries 5-9: the status resistances |
+
+Rows 15, 16 and 17 are all `[30.0, 50.0, 0, 0]` (`ds2-regulation.py param PlayerLackOfStatsParam`).
+So a piece worn under its requirements keeps `0.7 - 0.2 v` of its own defense and cut: 0.7 down to
+0.5, against 0.7 down to 0.2 for its poise (row 28 `[30, 80]`). Slot 58 adds the stat part after its
+loop, unscaled: `(sum of each piece's [0x140348690()+0x1c]) * statblock+0x48` (`0x140380235`), so the
+lost share is the piece's flat value only. That `+0x1c` is the piece's `physicalDEFBonus`
+coefficient is INFERRED from the shape. Slot 59's frame is `rbp = rsp + 0x100` (`0x140381358`,
+`0x140381360`), which puts the piece vector at `rsp+0x78` = `rbp-0x88` and the two passes at
+entries 0-4 and 5-9. Not read: whether the stat block `0x14034d150` reads at `+0x16` holds the levelled
+stats or the stats with ring and armour bonuses. The model uses the effective ones, the same stats
+`build_defense` reads.
 
 The stat terms come from the stats builder `0x14038d790`. It is called with `lea rcx,[rsi+0x2c]`
 (`0x14038d63d`), so its `rdi+X` is the block's `+X+0x2c`. It stores
@@ -1242,8 +1266,8 @@ subtracts from the INT and FTH requirements.
   ("Status bonus per stat", above). The base and coefficient they combine with are the regulation's,
   in gauge points per hit (`regulation_status`, "Status build-up per hit"); the victim's resistance is
   not modelled.
-- Elemental cut `min(0.99, (D+100)/1000)` matches. Not modelled: the lack-of-stats factor on armor, and the
-  cap gate.
+- Elemental cut `min(0.99, (D+100)/1000)` matches. The lack-of-stats factor on armour is modelled
+  (`defense_lack_factor`, "The lack-of-stats factor on armour"). Not modelled: the cap gate.
 - Physical stat defense: the planner's table is off by one at 180 of 393 sums. The game uses
   `row[trunc(sum/4)].defense`.
 - Per hit: the damage row's flat attack (`regulation_hit_flat`, added before the defense) and
