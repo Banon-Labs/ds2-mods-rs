@@ -16,6 +16,8 @@
 //   FUN_1402d7480(u32 code)      shows "Failed to create summon sign." and kin, chosen by code
 // The open question this answers: offline, does using the soapstone reach slot 1 at all?
 'use strict';
+// Dedupe keys live on globalThis; clear them so a hot reload logs its first answers again.
+for (const k of ['__lastCanUse', '__lastOffline', '__lastReq']) globalThis[k] = undefined;
 
 const image = Process.getModuleByName('DarkSoulsII.exe');
 const at = (rva) => image.base.add(rva);
@@ -101,6 +103,18 @@ const ITEM_GIVE = at(0x001ac3d0);
 const ITEM_GIVE_PROLOGUE = [0x48, 0x8b, 0x49, 0x10, 0x45];
 const NAV_UPDATE = at(0x00baeb20);
 const RED_SIGN_SOAPSTONE = 62045000;
+const SMALL_WHITE_SIGN_SOAPSTONE = 62040000;
+// WHICH SUMMON THE NEXT NPC SIGN MAKES, picked by the soapstone the player Uses. The bag's sign
+// table 0x1410c3d70 pairs each soapstone with its net requirement: White 62030000/0, Small White
+// 62040000/1, Red 62045000/2, Dragon Eye 62070000/3 (read from the image 2026-11-02). Hostile is
+// everything measured on the red sign; friendly leaves the sign and the slot native (Pate's sign
+// type 1, "mini white", user 2026-11-02) and spawns him chrType 2, measured to fight on the
+// player's side (user 2026-11-02: "chrType 2 is friendly").
+const SUMMON_MODES = {
+  [RED_SIGN_SOAPSTONE]: { name: 'hostile', netReq: 2, signType: 5, signChrType: 2, slotChrType: 16, spawnChrType: 16, aura: 3 },
+  [SMALL_WHITE_SIGN_SOAPSTONE]: { name: 'friendly', netReq: 1, signType: null, signChrType: null, slotChrType: null, spawnChrType: 2, aura: null },
+};
+let summonMode = SUMMON_MODES[RED_SIGN_SOAPSTONE];
 
 const give = new NativeFunction(ITEM_GIVE, 'bool', ['pointer', 'pointer', 'uint32']);
 globalThis.__spawn = Memory.alloc(0x10);
@@ -117,19 +131,21 @@ const nav = Interceptor.attach(NAV_UPDATE, {
       send({ family: 'summon-sign', tag: 'give.refused', player: player.toString(), inventory: inventory.toString(), prologue });
       return;
     }
-    const s = globalThis.__spawn;
-    s.writeU32(0); // mode 0: grant; mode 1 returned false, which does not prove the item is held
-    s.add(0x04).writeS32(RED_SIGN_SOAPSTONE);
-    s.add(0x08).writeS32(-1);
-    s.add(0x0c).writeU16(1);
-    s.add(0x0e).writeU8(0);
-    s.add(0x0f).writeU8(0);
-    const ok = give(inventory, s, 1);
-    // ds2-rva ITEM_GIVE_ERROR_OFFSET: inner+0x10138, bit 31 = refused, the rest says why.
-    const inner = inventory.add(0x10).readPointer();
-    const error = inner.add(0x10138).readU32() >>> 0;
-    const detail = inner.add(0x1013c).readU32() >>> 0;
-    send({ family: 'summon-sign', tag: 'give', item: RED_SIGN_SOAPSTONE, granted: ok, error: '0x' + error.toString(16), detail, player: player.toString() });
+    for (const item of [RED_SIGN_SOAPSTONE, SMALL_WHITE_SIGN_SOAPSTONE]) {
+      const s = globalThis.__spawn;
+      s.writeU32(0); // mode 0: grant; mode 1 returned false, which does not prove the item is held
+      s.add(0x04).writeS32(item);
+      s.add(0x08).writeS32(-1);
+      s.add(0x0c).writeU16(1);
+      s.add(0x0e).writeU8(0);
+      s.add(0x0f).writeU8(0);
+      const ok = give(inventory, s, 1);
+      // ds2-rva ITEM_GIVE_ERROR_OFFSET: inner+0x10138, bit 31 = refused, the rest says why.
+      const inner = inventory.add(0x10).readPointer();
+      const error = inner.add(0x10138).readU32() >>> 0;
+      const detail = inner.add(0x1013c).readU32() >>> 0;
+      send({ family: 'summon-sign', tag: 'give', item, granted: ok, error: '0x' + error.toString(16), detail, player: player.toString() });
+    }
   },
 });
 globalThis.__nav = nav;
@@ -180,7 +196,7 @@ const cmItem = new CModule(
 extern void on_item (int item, void * retaddr);
 void on_enter (GumInvocationContext * ic) {
   int item = (int) (gsize) gum_invocation_context_get_nth_argument (ic, 1);
-  if (item == 62045000)
+  if (item == 62045000 || item == 62040000)
     on_item (item, gum_invocation_context_get_return_address (ic));
 }
 `,
@@ -216,7 +232,7 @@ if (prologueMatches(NET_REQUIREMENT, NET_REQUIREMENT_PROLOGUE)) {
     },
     onLeave(ret) {
       const native = ret.toInt32() & 0xff;
-      const forced = FORCE_RED_SIGN_REQUIREMENT && this.req === RED_SIGN_REQUIREMENT && native === 0;
+      const forced = FORCE_RED_SIGN_REQUIREMENT && Object.values(SUMMON_MODES).some((m) => m.netReq === this.req) && native === 0;
       if (forced) ret.replace(ptr(1));
       const key = this.req + ':' + native;
       if (globalThis.__lastReq !== key) {
@@ -242,7 +258,7 @@ if (prologueMatches(OFFLINE_STATE_CHECK, OFFLINE_STATE_CHECK_PROLOGUE)) {
       if (globalThis.__probeHandle) globalThis.__probeItem = this.item;
     },
     onLeave(ret) {
-      if (this.item !== RED_SIGN_SOAPSTONE) return;
+      if (!(this.item in SUMMON_MODES)) return;
       const native = ret.toInt32() & 0xff;
       if (native === 0) ret.replace(ptr(1));
       if (globalThis.__lastOffline !== native) {
@@ -326,6 +342,8 @@ Interceptor.attach(SIGN_EFFECT_GATE, {
 // ctrl = [[block+0x20]+i*8] (i < [block+0x28]), entity id = (i<<10)|(b<<4)|4. chrType is
 // [[ctrl+0x58]+0x84], mapped through the u8 pair table 0x1410ed318 by 0x1404124f0.
 const NPC_SIGN_TEST = true;
+// The sign is placed when the player Uses a soapstone (USE_ITEM hook below), not on every load.
+const SIGN_ON_LOAD = false;
 function listCharacters() {
   const mgr = GAME_MANAGER_IMP.readPointer().add(0x40).readPointer();
   const found = [];
@@ -355,7 +373,7 @@ const entityOf = new NativeFunction(at(0x0017b5b0), 'pointer', ['pointer', 'poin
 const chrTypeOf = new NativeFunction(at(0x004124f0), 'uint8', ['pointer']);
 const signTypeOf = new NativeFunction(at(0x00212950), 'uint32', ['uint32']);
 globalThis.__signBuf = Memory.alloc(0x10);
-let signTested = false;
+let signTested = !SIGN_ON_LOAD;
 function npcSignTest() {
   if (!NPC_SIGN_TEST || signTested || !granted) return;
   signTested = true;
@@ -418,22 +436,22 @@ function npcSignTest() {
   // (hostile) at spawn regardless. Make the sign red for this creation only.
   // Measured by the user 2026-11-02: 1 mini white, 2 not red (0x451), 4 intense gold (0x455). 5 is
   // what chrTypes 7/9/14/15 map to (0x1410cb5c4) -- the red-phantom candidates.
-  const SIGN_TYPE = 5;
+  const SIGN_TYPE = summonMode.signType;
   const signTypeHook = Interceptor.attach(at(0x00212950), {
     onLeave(ret) {
-      send({ family: 'summon-sign', tag: 'npc_sign_test.sign_type', from: rel(this.returnAddress), native: ret.toInt32(), forced: SIGN_TYPE });
-      ret.replace(ptr(SIGN_TYPE));
+      send({ family: 'summon-sign', tag: 'npc_sign_test.sign_type', mode: summonMode.name, from: rel(this.returnAddress), native: ret.toInt32(), forced: SIGN_TYPE });
+      if (SIGN_TYPE !== null) ret.replace(ptr(SIGN_TYPE));
     },
   });
   // Measured 2026-11-02: forcing the sign type alone left the sign white. Slot 3 also stores
   // FUN_1404124f0(gen)'s chrType in the record at +0x20 (0x140213344), and that is what the sign and
   // the touch's NetNpcPhantom slot carry (the slot read type 1). Hand slot 3 chrType 2 (red row).
-  const SIGN_CHR_TYPE = 2;
+  const SIGN_CHR_TYPE = summonMode.signChrType;
   const signChrHook = Interceptor.attach(at(0x004124f0), {
     onLeave(ret) {
       if (!this.returnAddress.equals(at(0x002132e4))) return;
       send({ family: 'summon-sign', tag: 'npc_sign_test.chr_type', native: ret.toInt32() & 0xff, forced: SIGN_CHR_TYPE });
-      ret.replace(ptr(SIGN_CHR_TYPE));
+      if (SIGN_CHR_TYPE !== null) ret.replace(ptr(SIGN_CHR_TYPE));
     },
   });
   slot3(iface, out, entity);
@@ -804,7 +822,6 @@ for (const [name, rva, site] of [['enq_entity', 0x002c06c0, 0x00253f9b], ['enq_g
 Interceptor.attach(at(0x00254b70), {
   onEnter(args) { send({ family: 'summon-sign', tag: 'phantom.enqueue', entity: '0x' + (args[1].readU32() >>> 0).toString(16) }); },
 });
-const SLOT_CHR_TYPE = 16;
 const slotFields = (s) => ({ cur: s.add(0x14).readS32(), next: s.add(0x18).readS32(), t1c: s.add(0x1c).readFloat().toFixed(2),
   t20: s.add(0x20).readFloat().toFixed(2), r34: s.add(0x34).readS32(), r38: s.add(0x38).readS32(), type: s.add(8).readU8(), ent: '0x' + (s.add(4).readU32() >>> 0).toString(16) });
 Interceptor.attach(at(0x00252620), {
@@ -813,6 +830,7 @@ Interceptor.attach(at(0x00252620), {
     globalThis.__npcSlot = args[0];
     // Entering "summoning" (1): FUN_140252620 hands slot+8 (the phantom type) to the phantom
     // director (vtable +8). Pate came in blue with type 1; make it the invader row.
+    const SLOT_CHR_TYPE = summonMode.slotChrType;
     if (SLOT_CHR_TYPE !== null && args[2].toInt32() === 1 && args[0].add(4).readU32() === SUMMON_ENTITY) {
       const was = args[0].add(8).readU8();
       args[0].add(8).writeU8(SLOT_CHR_TYPE);
@@ -1016,7 +1034,6 @@ const DESPAWN_FIRST = true;
 // hurt. FUN_140418690 puts FUN_1404124f0(gen)'s chrType into the spawn descriptor; the chrType
 // table 0x1410c0050 pairs row 1 (02 01 01 02 02 01 ..) with row 2 (02 02 01 02 02 00 ..), the red
 // sign type. Return SPAWN_CHR_TYPE from that one call, inside FUN_140418690 only.
-const SPAWN_CHR_TYPE = 16;
 Interceptor.attach(at(0x004124f0), {
   onEnter() {
     const r = this.returnAddress.sub(image.base).toInt32();
@@ -1025,7 +1042,8 @@ Interceptor.attach(at(0x004124f0), {
   },
   onLeave(ret) {
     if (!this.on) return;
-    send({ family: 'summon-sign', tag: 'phantom.chr_type', from: '0x' + this.r.toString(16), native: ret.toInt32() & 0xff, forced: SPAWN_CHR_TYPE });
+    const SPAWN_CHR_TYPE = summonMode.spawnChrType;
+    send({ family: 'summon-sign', tag: 'phantom.chr_type', mode: summonMode.name, from: '0x' + this.r.toString(16), native: ret.toInt32() & 0xff, forced: SPAWN_CHR_TYPE });
     if (SPAWN_CHR_TYPE !== null) ret.replace(ptr(SPAWN_CHR_TYPE));
   },
 });
@@ -1298,8 +1316,10 @@ for (const [name, rva] of [['apply_speffect', 0x0014bec0], ['add_speffect', 0x00
     },
   });
 }
-const AURA_PHANTOM_PARAM = 3; // ChrNetworkPhantomParam row 16's chr_phantom_param_id (red)
 function touchSummonLeave(ctx, ret) {
+  // ChrNetworkPhantomParam row 16's chr_phantom_param_id (red) in hostile mode. Measured
+  // 2026-11-02: written after the spawn it changed nothing (still blue).
+  const AURA_PHANTOM_PARAM = summonMode.aura;
   globalThis.__auraUntil = Date.now() + 10000;
   if (!ctx.touch) return;
   globalThis.__summoning = false;
@@ -1389,6 +1409,26 @@ function itemOfHandle(x, handle) {
   const entry = get(container, handle);
   return entry.isNull() ? 'no entry' : entry.add(0x14).readS32();
 }
+// THE TRIGGER: the inventory's Use queues 0x140500c40(this, u16 handle, u16 count) whatever the
+// item. When the handle resolves to a soapstone in SUMMON_MODES, that soapstone picks the mode and
+// the next nav frame places Pate's sign under the player (npcSignTest).
+Interceptor.attach(USE_ITEM, {
+  onEnter(args) {
+    const handle = args[1].toInt32() & 0xffff;
+    let item;
+    try {
+      const x = GAME_MANAGER_IMP.readPointer().add(GAME_DATA_MANAGER_OFFSET).readPointer().add(ITEM_INVENTORY_OFFSET).readPointer().add(0x10).readPointer();
+      item = itemOfHandle(x, handle);
+    } catch (e) {
+      item = e.message;
+    }
+    const picked = SUMMON_MODES[item];
+    send({ family: 'summon-sign', tag: 'use.soapstone', handle: '0x' + handle.toString(16), item, mode: picked ? picked.name : null });
+    if (!picked) return;
+    summonMode = picked;
+    signTested = false;
+  },
+});
 let lastSemaphore = '';
 function watchItemUse() {
   const gm = GAME_MANAGER_IMP.readPointer();
