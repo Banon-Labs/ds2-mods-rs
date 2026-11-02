@@ -125,8 +125,13 @@ def prose_only(text):
     builds clean, not yet run |` was quoted back as a next step described and abandoned, and the
     clause the agent would have been shown was three unrelated cells joined by slashes.
     `cupcake_turn_scan.prose_paragraphs` already draws this line for the wall-of-text rule; this is
-    the same line drawn for one row at a time. Applied only where a match is hunted, not to the
-    message the exemptions read, so a blocker stated inside a table still exempts.
+    the same line drawn for one row at a time. Applied where a match is hunted, and to the two
+    exemptions a table cell used to fake: a bare `?` (a row label for an open question is not a
+    question to the user) and the bare words "blocker"/"blocked" (a row naming an unknown is not an
+    external dependency). Everything else the exemptions read -- the named handoff phrases, and a
+    blocker that names sudo, approval, a live game, a guard or a merge -- still reads the whole
+    message, so a real blocker stated inside a table still exempts. Measured 2026-11-02; see (3)
+    and (4) below.
     """
     return "\n".join(
         line for line in scrub(text).splitlines() if not line.lstrip().startswith("|")
@@ -343,13 +348,22 @@ acted = any(
 )
 
 message = scrub(turn.text)
+prose = prose_only(turn.text)
 
 # --- (3) the ball was handed to the user --------------------------------------------------------
-# A question mark anywhere in the closing message exempts the turn. That is broad on purpose: a
-# genuine fork is exactly what the agent is allowed to stop for, and this rule must never gag one.
+# A question mark anywhere in the closing PROSE exempts the turn. That is broad on purpose: a genuine
+# fork is exactly what the agent is allowed to stop for, and this rule must never gag one.
+#
+# A question mark inside a markdown table row does not count, and that is a narrowing measured on a
+# real miss (2026-11-02). A status table whose first column is a list of open questions --
+# "| Can the soapstone be used offline? | ... | **open** |" -- is a set of row labels for unknowns
+# the agent resolves itself, not a question put to the user, and its `?` waved through "The next step
+# is to find the code that reads ItemUsageParam" with nothing begun. The named handoff phrases below
+# still read the whole message, table cells included: "your call" or "want me to" in a cell is
+# addressed to the user wherever it sits.
+QUESTION_RE = re.compile(r"\?")
 HANDOFF_RE = re.compile(
-    r"\?"
-    r"|\bonce\s+(?:you|your|the\s+user)\b"
+    r"\bonce\s+(?:you|your|the\s+user)\b"
     r"|\bwhen\s+(?:you|your|the\s+user)\b"
     r"|\bafter\s+(?:you|your|the\s+user)\b"
     r"|\bif\s+(?:you|your|the\s+user)\b"
@@ -378,15 +392,37 @@ HANDOFF_RE = re.compile(
     r"|\bby\s+(?:you|the\s+user)\s+or\s+by\b",
     re.IGNORECASE,
 )
-handoff = bool(HANDOFF_RE.search(message)) or scan.blocked_on_user(message)
+handoff = (
+    bool(QUESTION_RE.search(prose))
+    or bool(HANDOFF_RE.search(message))
+    or scan.blocked_on_user(message)
+)
 
 # --- (4) a genuine blocker was stated -----------------------------------------------------------
 # Reporting a blocker is required behaviour, and a step waiting on approval or on something landing
 # is not a step that could have been begun. Both exempt.
-BLOCKER_RE = re.compile(
+#
+# The bare words -- "blocked", "blocker", "cannot proceed", "can't run" -- count only in prose. In a
+# table cell they label a row, and the row they label is as often an unknown the agent can go and
+# settle as a dependency outside it: "| Can the soapstone be used offline? | ... | **open**; this is
+# the first blocker |" named the very question the closer then declined to start on, and it exempted
+# that closer (2026-11-02). A blocker stated inside a table still exempts when it names what is
+# outside the agent's reach -- sudo, approval, a live game, a guard, a merge, the user --
+# because every other alternative of `BLOCKER_RE`, and `BLOCKED_ON_RE`, still reads the whole
+# message.
+BARE_BLOCKER_RE = re.compile(
     r"\bblocked\b|\bblocker\b|\bcannot\s+proceed\b"
-    r"|\bcan(?:no|')?t\s+(?:proceed|run|test|verify|build|launch|start)\b"
-    r"|\brequires?\s+(?:sudo|root|approval|a\s+game|a\s+live|the\s+game|physical|credentials|network)\b"
+    r"|\bcan(?:no|')?t\s+(?:proceed|run|test|verify|build|launch|start)\b",
+    re.IGNORECASE,
+)
+BLOCKED_ON_RE = re.compile(
+    r"\bblock(?:ed|er|ing)\b[^|\n]{0,60}?"
+    r"\b(?:sudo|root|approval|credentials|network|you|your|the\s+user|a\s+live|the\s+game"
+    r"|guard|policy|cupcake|opa|merge|merged|review|ci|checks?)\b",
+    re.IGNORECASE,
+)
+BLOCKER_RE = re.compile(
+    r"\brequires?\s+(?:sudo|root|approval|a\s+game|a\s+live|the\s+game|physical|credentials|network)\b"
     r"|\bneeds?\s+(?:sudo|root|approval|a\s+game|a\s+live|the\s+game\s+running)\b"
     r"|\bnot\s+(?:available|installed|possible|permitted|allowed|reachable)\b"
     r"|\b(?:guard|policy|cupcake|opa)\s+(?:denied|blocked|refused|refuses)\b"
@@ -395,7 +431,11 @@ BLOCKER_RE = re.compile(
     r"(?:land|lands|merge|merges|complete|completes|finish|finishes|is\s+merged|are\s+merged)\b",
     re.IGNORECASE,
 )
-blocked = bool(BLOCKER_RE.search(message))
+blocked = (
+    bool(BARE_BLOCKER_RE.search(prose))
+    or bool(BLOCKED_ON_RE.search(message))
+    or bool(BLOCKER_RE.search(message))
+)
 
 # --- (5) live background work is carrying it ----------------------------------------------------
 # Something running is not by itself cover, for the reason the promise guard records: a game session

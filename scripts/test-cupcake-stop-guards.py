@@ -171,6 +171,23 @@ CASES = [
         "handoff family, which is the false positive the nominal spellings nearly bought",
     ),
     Case(
+        "described_next_step_table_cells.jsonl",
+        "describing a next step instead of starting it",
+        "verbatim closer of 2026-11-02: a status table of open questions, then 'The next step is to "
+        "find the code that reads ItemUsageParam ...' with nothing begun. It escaped on three fake "
+        "exemptions, all reproduced here: the row labels' '?' (handoff), 'this is the first blocker' "
+        "in a status cell (blocked), and a finished backgrounded Bash re-opened by its "
+        "api-request-blob copy, which let 'when the Red Sign Soapstone is used' read as waiting on "
+        "it (carried)",
+    ),
+    Case(
+        "described_next_step_table_real_blocker.jsonl",
+        None,
+        "the other side of that narrowing: a blocker stated in a table cell still exempts when it "
+        "names something outside the agent's reach ('blocker: sudo for ptrace_scope') -- must "
+        "NOT halt",
+    ),
+    Case(
         "idle_hold.jsonl",
         "announced holding/idling",
         "turn is a pure pause announcing an idle hold while a background task runs",

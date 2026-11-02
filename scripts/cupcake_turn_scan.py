@@ -511,6 +511,15 @@ def live_background_work(events: list[dict]) -> BackgroundWork:
                 pending_bg.pop(m.group(1), None)
             continue
 
+        # Only the transcript's own `assistant`/`user` events are launches and results. Claude Code
+        # also writes `api-request-blob` events that carry a COPY of earlier messages -- tool_uses and
+        # tool_results both -- as they were resent to the API, so the copy of a backgrounded Bash
+        # lands after that Bash's real result and re-opened a finished job. Measured 2026-11-02 on
+        # the ds2-mods-rs session ccc762ef: a `run_in_background` awk that returned "45\n1043" at
+        # line 1073 was re-pended by its blob copy at line 1078, and that phantom job was what let
+        # no_described_next_step read "carried=1" on a closer nothing was carrying.
+        if ev.get("type") not in ("assistant", "user"):
+            continue
         if not isinstance(content, list):
             continue
         for block in content:
