@@ -674,8 +674,8 @@ Interceptor.attach(at(0x002c08e0), {
     const q = args[0].add(8).readPointer();
     const a = q.add(0xc).readS32();
     const b = q.add(0x10).readS32();
-    send({ family: 'summon-sign', tag: 'phantom.request_busy', a, b, forced: FORCE_OK_CHECKS && a !== b });
-    if (FORCE_OK_CHECKS && a !== b) q.add(0x10).writeS32(a);
+    // Not forced: a != b is a pending mode change, whose FUN_1402c09a0 -> FUN_1402d3820 resets the pool.
+    send({ family: 'summon-sign', tag: 'phantom.request_busy', a, b });
   },
   onLeave() { send({ family: 'summon-sign', tag: 'phantom.request_alloc', type: this.type, out: [this.out.readS32(), this.out.add(4).readS32()] }); },
 });
@@ -683,18 +683,35 @@ Interceptor.attach(at(0x002c08e0), {
 // (ctx) refuses unless FUN_1402d1790 (per-type caps) and FUN_1402d1e00 pass, then FUN_1402d3040
 // marks member entries used. FUN_1402d1e00 wants >= 1 entry free in a 5-entry pool at
 // [ctx+0x70+0x1b0] (stride 0x14, +8 == 0 free); FUN_1402d3040 writes 2 there per summon and nothing
-// frees it offline, so the sixth summon is refused. Log the pool; with none free, free the 2s.
+// frees it offline, so the sixth summon is refused. Log the pool (read only: writing state 0 by
+// hand leaves table0's `used` counted, which is the same leak).
 Interceptor.attach(at(0x002d3110), {
   onEnter(args) {
     const pool = args[0].add(0x220).readPointer();
     const states = [];
     for (let i = 0; i < 5; i++) states.push(pool.add(i * 0x14 + 8).readS32());
-    const full = !states.includes(0);
-    globalThis.__poolHasFree = !full || FORCE_OK_CHECKS;
-    send({ family: 'summon-sign', tag: 'phantom.alloc_pool', type: args[2].readU8(), states, forced: FORCE_OK_CHECKS && full });
-    if (FORCE_OK_CHECKS && full) {
-      for (let i = 0; i < 5; i++) if (states[i] === 2) pool.add(i * 0x14 + 8).writeS32(0);
+    send({ family: 'summon-sign', tag: 'phantom.alloc_pool', type: args[2].readU8(), states });
+  },
+});
+// THE LEAK (static, scratchpad alloc-prereqs.md, 2026-11-02): the release FUN_140252580 ->
+// FUN_1402c0950(q, &slot[+8], id) -> FUN_1402d3360(ctx+0x70, &type, id) finds the capacity record
+// by the type's mask bit. SLOT_CHR_TYPE rewrites slot+8 to 16 after the allocation took type 1, and
+// no record carries type 16's bit, so nothing is freed and table0 (type 1: cap 3) fills after three
+// summons. Hand the release the type the pool entry recorded for this id (entry+0xc).
+Interceptor.attach(at(0x002c0950), {
+  onEnter(args) {
+    const pool = args[0].readPointer().add(0x220).readPointer();
+    const id = args[2];
+    for (let i = 0; i < 5; i++) {
+      const e = pool.add(i * 0x14);
+      if (!e.readPointer().equals(id)) continue;
+      const recorded = e.add(0xc).readU8();
+      const passed = args[1].readU8();
+      send({ family: 'summon-sign', tag: 'phantom.release_type', id: id.toString(), passed, recorded });
+      if (passed !== recorded) args[1].writeU8(recorded);
+      return;
     }
+    send({ family: 'summon-sign', tag: 'phantom.release_type', id: id.toString(), passed: args[1].readU8(), recorded: null });
   },
 });
 // Measured: pool [2,2,2,0,0] (two free) and alloc_free still 0, so its other half refused:
@@ -707,9 +724,7 @@ for (const [name, rva] of [['alloc_caps', 0x002d1790], ['alloc_free', 0x002d1e00
     onLeave(ret) {
       if (!this.mine) return;
       const native = ret.toInt32() & 0xff;
-      const forced = FORCE_OK_CHECKS && name === 'alloc_free' && native === 0 && globalThis.__poolHasFree === true;
-      send({ family: 'summon-sign', tag: 'phantom.' + name, result: native, forced, typeStates: name === 'alloc_free' ? globalThis.__typeStates : undefined });
-      if (forced) ret.replace(ptr(1));
+      send({ family: 'summon-sign', tag: 'phantom.' + name, result: native, typeStates: name === 'alloc_free' ? globalThis.__typeStates : undefined });
     },
   });
 }
@@ -747,10 +762,8 @@ Interceptor.attach(at(0x002d26e0), {
     const r = ptr(ret.toString());
     try {
       const v = r.add(8).readS32();
+      // 0 = no room, 1 = room, 2 = no record for this type; computed per lookup, not stored.
       globalThis.__typeStates.push(v);
-      // Measured [0, 2, 2]: the first table (ctx+0x70 itself, which FUN_1402d3040's FUN_1402d27c0
-      // also reads and wants == 1) left at 0 by the previous summon. Put it back to 1.
-      if (FORCE_OK_CHECKS && globalThis.__typeStates.length === 1 && v === 0) r.add(8).writeS32(1);
     } catch (e) { globalThis.__typeStates.push(e.message); }
   },
 });
