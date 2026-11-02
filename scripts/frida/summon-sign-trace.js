@@ -559,7 +559,9 @@ Interceptor.attach(at(0x00418fa8), function () {
   }
 });
 const FORCE_SPAWN = true;
-const SPAWN_AT_PLAYER = true;
+// false: FUN_14040f9c0 shows the spawn position is the generator entity's +0x20 (+0x30 is the
+// rotation), so summonTest writes +0x20 instead and this override is no longer the mechanism.
+const SPAWN_AT_PLAYER = false;
 // Measured with Stalker: the spawn gives up after 0x1404160f0(mgr, desc), whose 0x14041edc0(desc,
 // state) returns bit (state-1) of the u16 at desc+0xe; state = (s8)[mgr+0x2fc], desc = [gen-ish+0x60].
 // Log both, and with FORCE_SPAWN answer true for this call.
@@ -665,11 +667,17 @@ Interceptor.attach(at(0x00422bc0), {
   },
 });
 // The touch, done by the agent: what NetNpcPhantomDirection_HOST (0x1402529c0) calls.
-const SUMMON_TEST = false;
+const SUMMON_TEST = true;
 // 0x2824 = Mild-Mannered Pate (measured: the sign named him; spawned 2026-11-02 at his generator,
 // 210 m away). 0x2c24 = block 2 index 11, chrType 2 / sign type 2 (red): chr 891000, spawned
 // 2026-11-02 at (90.4, -40.4, -148.4) despite gen+0x30 set beside the player. 0x3024 = index 12.
-const SUMMON_ENTITY = 0x3024;
+const SUMMON_ENTITY = 0x2824;
+// Pate's generator already holds the character the forced spawn made at his MSB point, and
+// FUN_140418d50 returns that one instead of spawning. 0x1404193f0(mgr, entry) is the native despawn
+// FUN_14041abf0's eviction uses: it removes the entry's character and decrements mgr+0x368.
+const DESPAWN_FIRST = true;
+const despawn = new NativeFunction(at(0x004193f0), 'void', ['pointer', 'pointer']);
+const grabChr = new NativeFunction(at(0x0014b420), 'pointer', ['pointer']); // getGrabCharacterCtrl(&handle)
 const generate = new NativeFunction(at(0x00415b20), 'pointer', ['pointer', 'pointer', 'uint8']);
 globalThis.__summonId = Memory.alloc(8);
 let summoned = false;
@@ -689,6 +697,20 @@ function prepareThenSummon() {
   const ctrl = resolve(globalThis.__summonId);
   if (ctrl.isNull()) return;
   const chrId = ctrl.add(0x60).readPointer().readU32();
+  if (DESPAWN_FIRST && prepStage === 0) {
+    const entry = ctrl.add(0x68).readPointer();
+    const handle = entry.isNull() ? -1 : entry.add(0x18).readU32();
+    const held = entry.isNull() ? NULL : grabChr(entry.add(0x18));
+    send({ family: 'summon-sign', tag: 'summon_test.despawn', entry: entry.toString(), handle: '0x' + (handle >>> 0).toString(16), held: held.toString() });
+    if (!held.isNull()) {
+      despawn(gm.add(0x40).readPointer(), entry);
+      send({ family: 'summon-sign', tag: 'summon_test.despawn.after', held: grabChr(entry.add(0x18)).toString(),
+        count: gm.add(0x40).readPointer().add(0x368).readS32() });
+    }
+    prepStage = -1;
+    return;
+  }
+  if (prepStage === -1) prepStage = 0;
   if (prepStage === 0) {
     prepStage = 1;
     send({ family: 'summon-sign', tag: 'summon_test.prepare', chrId, loaded_before: chrLoaded(gm.add(0x18).readPointer(), chrId) });
@@ -709,11 +731,15 @@ function watchMoved() {
   const m = globalThis.__movedChr;
   if (!m) return;
   m.frames += 1;
-  if (m.frames === 1 || m.frames === 5 || m.frames === 30 || m.frames === 120) {
+  if ([1, 5, 30, 120, 300, 600].includes(m.frames)) {
     const q = m.chr.add(0x90);
-    send({ family: 'summon-sign', tag: 'spawn.moved', frames: m.frames, at: [q.readFloat(), q.add(4).readFloat(), q.add(8).readFloat()].map((v) => v.toFixed(2)) });
+    const me = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer().add(0x90);
+    const his = [q.readFloat(), q.add(4).readFloat(), q.add(8).readFloat()];
+    const d = Math.hypot(his[0] - me.readFloat(), his[1] - me.add(4).readFloat(), his[2] - me.add(8).readFloat());
+    send({ family: 'summon-sign', tag: 'spawn.moved', frames: m.frames, vtable: rel(m.chr.readPointer()), at: his.map((v) => v.toFixed(2)),
+      distance: d.toFixed(1), hp: m.chr.add(0x168).readS32() });
   }
-  if (m.frames > 120) globalThis.__movedChr = undefined;
+  if (m.frames > 600) globalThis.__movedChr = undefined;
 }
 const ctrlOfHandle = new NativeFunction(at(0x0041e870), 'pointer', ['uint32']);
 let spawnReported = false;
@@ -760,15 +786,16 @@ function summonTest() {
     const state = ctrl.add(0x8c).readU8();
     send({ family: 'summon-sign', tag: 'summon_test.state', ctrl: ctrl.toString(), state, b79: ctrl.add(0x79).readU8(), b7a: ctrl.add(0x7a).readU8() });
     if (![3, 4, 5, 6, 8].includes(state)) ctrl.add(0x8c).writeU8(3);
-    // FUN_140415b20 takes the spawn position from gen+0x30 (rotation +0x20) unless
-    // (gen+0x8e & 0xf0) == 0x30 (static, 0x140415b96). Put it 3 m from the player.
+    // FUN_140415b20 passes gen+0x20 as the position (it is the 5th argument to FUN_140418d50 and
+    // r9 of FUN_140418690; FUN_14040f9c0 stores the same +0x20 as the entry's position at +0x1c)
+    // unless (gen+0x8e & 0xf0) == 0x30. Put it 3 m from the player.
     const me = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer().add(0x90);
-    const before = [0, 4, 8].map((o) => ctrl.add(0x30 + o).readFloat().toFixed(2));
-    ctrl.add(0x30).writeFloat(me.readFloat() + 3);
-    ctrl.add(0x34).writeFloat(me.add(4).readFloat());
-    ctrl.add(0x38).writeFloat(me.add(8).readFloat());
+    const before = [0, 4, 8].map((o) => ctrl.add(0x20 + o).readFloat().toFixed(2));
+    ctrl.add(0x20).writeFloat(me.readFloat() + 3);
+    ctrl.add(0x24).writeFloat(me.add(4).readFloat());
+    ctrl.add(0x28).writeFloat(me.add(8).readFloat());
     send({ family: 'summon-sign', tag: 'summon_test.position', b8e: '0x' + ctrl.add(0x8e).readU8().toString(16), before,
-      after: [0, 4, 8].map((o) => ctrl.add(0x30 + o).readFloat().toFixed(2)) });
+      after: [0, 4, 8].map((o) => ctrl.add(0x20 + o).readFloat().toFixed(2)) });
   }
   globalThis.__summoning = true;
   const ret = generate(mgr, globalThis.__summonId, 1);
@@ -780,6 +807,40 @@ function summonTest() {
   send({ family: 'summon-sign', tag: 'summon_test', entity: '0x' + SUMMON_ENTITY.toString(16), ret: ret.toString(),
     at: ret.isNull() ? null : [0, 4, 8].map((o) => ret.add(0x90 + o).readFloat().toFixed(2)) });
   if (!ret.isNull()) globalThis.__movedChr = { chr: ret, frames: 0 };
+}
+// Read-only, once: every generator entity with its spawn row and the character it holds now, to
+// find the entity whose spawn is an NPC PHANTOM. Measured 2026-11-02: Pate's 0x2824 (kind 1) gave a
+// CharacterCtrl at his standing spot; 0x3024 (kind 3, chr 866001) gave a PlayerCtrl.
+const ENTITY_DUMP = false;
+let entityDumped = false;
+function entityDump() {
+  if (!ENTITY_DUMP || entityDumped || !granted) return;
+  entityDumped = true;
+  const rows = [];
+  for (const c of listCharacters()) {
+    if (c.error) continue;
+    const r = { e: '0x' + c.entity.toString(16), kind: c.kind, t: c.chrType, s: c.chrType < 0x14 ? signTypeOf(c.chrType) : null,
+      st: c.ctrl.add(0x8c).readU8(), b8e: c.ctrl.add(0x8e).readU8() };
+    try {
+      const desc = c.ctrl.add(0x60).readPointer();
+      r.chr = desc.readU32();
+      r.f = [desc.add(4).readU32(), desc.add(8).readU32()];
+      r.mask = '0x' + desc.add(0xe).readU16().toString(16);
+    } catch (e) { r.desc = e.message; }
+    r.at = [0, 4, 8].map((o) => c.ctrl.add(0x30 + o).readFloat().toFixed(1));
+    try {
+      const gen = c.ctrl.add(0x68).readPointer();
+      if (!gen.isNull()) {
+        const h = gen.add(0x18).readU32();
+        r.h = '0x' + h.toString(16);
+        const chr = ctrlOfHandle(h);
+        if (!chr.isNull()) r.vt = rel(chr.readPointer());
+      }
+    } catch (e) { r.gen = e.message; }
+    rows.push(r);
+  }
+  for (let k = 0; k < rows.length; k += 40)
+    send({ family: 'summon-sign', tag: 'entity.dump', from: k, total: rows.length, rows: rows.slice(k, k + 40) });
 }
 let lastSignWords = '';
 function watchSign() {
@@ -880,6 +941,11 @@ globalThis.__useNavCb = new NativeCallback((self, dt) => {
     npcSignTest();
   } catch (e) {
     send({ family: 'summon-sign', tag: 'npc_sign_test.refused', why: 'threw ' + e.message, stage: globalThis.__signStage });
+  }
+  try {
+    entityDump();
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'entity.dump.error', error: e.message });
   }
   try {
     useSoapstone();
