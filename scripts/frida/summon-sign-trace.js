@@ -1626,3 +1626,81 @@ if (lookupPrologue.join(',') === PARAM_LOOKUP_PROLOGUE.join(',')) {
     send({ family: 'summon-sign', tag: 'player.defense', error: e.message });
   }
 })();
+
+// Every hit that lands on the player: the incoming attack as the defender's per-hit function
+// `ChrDamageActionCtrl::v5` 0x1401345c0(this, out, sAr*) receives it (docs/DS2-DPS-MECHANICS.md,
+// "Where the attack and the motion value enter"). `[this+8]` is the owner, as in v14 0x140137af8.
+// sAr +0x0 damage param id, +0x45 hand, +0x48..+0x5c physical/magic/lightning/fire/dark/flat,
+// +0xb4 and +0xb8 the attack and damage multipliers. HP is read before and after so the hit's
+// damage can be set against the attack.
+if (globalThis.__playerHit) globalThis.__playerHit.detach();
+globalThis.__playerHit = Interceptor.attach(at(0x001345c0), {
+  onEnter(args) {
+    this.hit = null;
+    try {
+      const pc = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer();
+      if (!args[0].add(8).readPointer().equals(pc)) return;
+      const s = args[2];
+      const f = (o) => +s.add(o).readFloat().toFixed(2);
+      this.pc = pc;
+      this.hit = {
+        damageId: s.readU32(), hand: s.add(0x45).readU8(),
+        attack: { physical: f(0x48), magic: f(0x4c), lightning: f(0x50), fire: f(0x54), dark: f(0x58), flat: f(0x5c) },
+        mulAttack: f(0xb4), mulDamage: f(0xb8), hpBefore: pc.add(0x168).readS32(),
+      };
+    } catch (e) {
+      send({ family: 'summon-sign', tag: 'player.hit', error: e.message });
+    }
+  },
+  onLeave() {
+    if (!this.hit) return;
+    this.hit.hpAfter = this.pc.add(0x168).readS32();
+    send({ family: 'summon-sign', tag: 'player.hit', ...this.hit });
+  },
+});
+
+// Mimic step 1, LOG ONLY ($S/mimic.md): what the ChrAsm builder FUN_14035a650(mgr, heap, slotBase,
+// npcCtrl, desc, flag) is handed for each spawn. desc +0 EnemyParam row, +0x11 player-shaped flag,
+// +0x12 u8[52] copy-from-player flags, +0x48 the NpcPlayerStatusParam row. On the Ruined Aflis
+// summon (entity 0x3024, row 866001) +0x48 should start `00 00 04 00 f2 1c 00 00 63 63` (row 8660).
+const hexOf = (p, n) => Array.from(new Uint8Array(p.readByteArray(n)), (b) => b.toString(16).padStart(2, '0')).join(' ');
+if (globalThis.__asmBuild) globalThis.__asmBuild.detach();
+globalThis.__asmBuild = Interceptor.attach(at(0x0035a650), {
+  onEnter(args) {
+    try {
+      const d = args[4];
+      const row = d.add(0x48).readPointer();
+      send({
+        family: 'summon-sign', tag: 'mimic.asm_build', npc: args[3].toString(), row: d.readU32(),
+        playerShaped: d.add(0x11).readU8(), copyFlags: hexOf(d.add(0x12), 52),
+        statusRow: row.isNull() ? null : hexOf(row, 32),
+      });
+    } catch (e) {
+      send({ family: 'summon-sign', tag: 'mimic.asm_build', error: e.message });
+    }
+  },
+});
+
+// And the player's side of the copy, once per load: the ChrAsmEquip slot table (52 x 0x14 at
+// [asm+0x20]+8) and the parts bytes +0x1c face mode, +0x20 body, +0x2c sex, +0x2d living.
+(function playerAsm() {
+  try {
+    const pc = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer();
+    const getAsm = new NativeFunction(pc.readPointer().add(0x120).readPointer(), 'pointer', ['pointer']);
+    const asm = getAsm(pc);
+    const equip = asm.add(0x20).readPointer().add(8);
+    const parts = asm.add(0x28).readPointer();
+    const slots = [];
+    for (let i = 0; i < 52; i++) {
+      const e = equip.add(i * 0x14);
+      if (e.add(4).readU32() !== 0 && e.add(4).readU32() !== 0xffffffff) slots.push([i, hexOf(e, 0x14)]);
+    }
+    send({
+      family: 'summon-sign', tag: 'mimic.player_asm',
+      parts: { faceMode: parts.add(0x1c).readU8(), body: parts.add(0x20).readU8(), sex: parts.add(0x2c).readU8(), living: parts.add(0x2d).readU8() },
+      slots,
+    });
+  } catch (e) {
+    send({ family: 'summon-sign', tag: 'mimic.player_asm', error: e.message });
+  }
+})();
