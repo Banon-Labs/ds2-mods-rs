@@ -295,7 +295,7 @@ def resolve(command: str, cwd: str, override: str | None) -> list[str]:
         return ["UNKNOWN the command points git at another tree through a variable or option"]
 
     redirected = target_repo.has_redirect_marker(command)
-    hiding = any(marker in command for marker in HIDING_MARKERS)
+    hiding = target_repo.has_live_marker(command, HIDING_MARKERS)
     if redirected and hiding:
         return ["UNKNOWN a subshell or heredoc hides which directory a push inherits"]
 
@@ -502,6 +502,29 @@ def selftest() -> int:
                     "git push origin loader-build-sha"),
             ["DEST loader-build-sha"],
         )
+        # 2026-11-02: parentheses and an apostrophe inside a double-quoted commit message, chained in
+        # front of a feature push from a cd, made the command UNKNOWN and the push was refused.
+        quoted = (
+            'git add x && git commit -q -m "feat(scripts): pick by soapstone\n\nPate\'s sign'
+            ' (62040000, requirement 1) at the Use (0x140500c40)."'
+        )
+        check(
+            "parentheses inside a quoted commit message before a feature push resolve the push",
+            verdict(f"cd {linked}; {quoted} && git push -q -u origin loader-build-sha 2>&1 | tail -3;"
+                    " git status -sb | head -2"),
+            ["DEST loader-build-sha"],
+        )
+        check(
+            "a single-quoted message with parentheses before a bare push from a cd",
+            verdict(f"cd {onmain} && git commit -m 'fix(x): y (z)' && git push", at=str(linked)),
+            ["DEST main"],
+        )
+        check(
+            "a quoted parenthesis does not hide a bare push from main",
+            verdict('git commit -m "feat(x)" && git push'),
+            ["DEST main"],
+        )
+
         # A redirection is not a refspec: `git push 2>&1` from main once resolved to `>&` and `1`.
         check("a bare push from main with stderr redirected", verdict("git push 2>&1"), ["DEST main"])
         check(
@@ -523,6 +546,13 @@ def selftest() -> int:
             ("--git-dir", f"git --git-dir={linked}/.git push", cwd),
             ("GIT_DIR", f"GIT_DIR={linked}/.git git push", cwd),
             ("a subshell cd", f"(cd {linked} && git push)", cwd),
+            ("a subshell cd after a quoted parenthesis",
+             f"git commit -m 'a (b)' && (cd {linked} && git push)", cwd),
+            ("a substitution cd inside double quotes beside a cd",
+             f'cd {linked} && echo "$(cd {onmain})" && git push', cwd),
+            ("a backtick inside double quotes from main", 'echo "`git push`" && git push -u origin f', cwd),
+            ("a subshell inside a single-quoted wrapper payload",
+             f"cd {linked} && bash -c '(cd {onmain} && git push)'", cwd),
             ("a directory that is not a checkout", f"cd {scratch} && git push", cwd),
             ("a missing directory", f"cd {scratch}/absent && git push", cwd),
             ("an unbalanced quote", "git push origin 'feat", cwd),

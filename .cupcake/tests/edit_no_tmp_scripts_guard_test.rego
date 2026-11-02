@@ -212,3 +212,131 @@ test_deny_bash_install_into_tmp_script if {
 test_deny_bash_pathlib_write_text_tmp_script if {
 	denied(bash_event("python3 -c \"from pathlib import Path; Path('/tmp/probe.py').write_text('print(1)')\""))
 }
+
+# ---------------------------------------------------------------------------
+# 2026-11-02: a COPY of a tracked repo script into /tmp is not authoring, and a /tmp destination
+# behind a shell variable assigned in the same command is still /tmp. The tmp_copy_sources signal
+# is what vouches for "tracked under scripts/"; these fixtures hand the policy its output.
+# ---------------------------------------------------------------------------
+
+scratch := "/tmp/claude-1000/-home-banon-projects-ds2-mods-rs/sess/scratchpad"
+
+frida_src := "scripts/frida/summon-sign-trace.js"
+
+tracked_signal(tokens) := concat("\n", [concat("\t", ["tracked", t]) | some t in tokens])
+
+bash_event_tracked(command, tokens) := object.union(bash_event(command), {"signals": {"tmp_copy_sources": tracked_signal(tokens)}})
+
+# The measured denial, with its literal scratchpad destination.
+test_allow_cp_tracked_repo_script_into_literal_scratchpad if {
+	not denied(bash_event_tracked(
+		sprintf("cd /home/banon/projects/ds2-mods-rs; node --check %s && cp %s %s/summon-sign-trace-frozen.js; sleep 5", [frida_src, frida_src, scratch]),
+		[frida_src],
+	))
+}
+
+test_allow_cp_tracked_repo_script_into_variable_scratchpad if {
+	not denied(bash_event_tracked(
+		sprintf("S=%s; cp %s $S/summon-sign-trace-frozen.js", [scratch, frida_src]),
+		[frida_src],
+	))
+}
+
+test_allow_cp_tracked_repo_script_into_braced_quoted_variable if {
+	not denied(bash_event_tracked(
+		sprintf("export S=\"%s\"; cp -f %s \"${S}/frozen.js\"", [scratch, frida_src]),
+		[frida_src],
+	))
+}
+
+test_allow_install_tracked_repo_script_with_mode_into_tmp if {
+	not denied(bash_event_tracked("install -m 755 scripts/ds2-run.py /tmp/run.py", ["scripts/ds2-run.py"]))
+}
+
+test_allow_signal_object_shape if {
+	event := object.union(bash_event("cp scripts/ds2-run.py /tmp/run.py"), {"signals": {"tmp_copy_sources": {"output": "tracked\tscripts/ds2-run.py"}}})
+	not denied(event)
+}
+
+# The carve-out is cp/install of TRACKED sources only.
+test_deny_cp_untracked_source_into_tmp if {
+	denied(bash_event_tracked("cp scripts/new-probe.js /tmp/probe.js", [frida_src]))
+}
+
+test_deny_cp_without_signal_into_tmp if {
+	denied(bash_event(sprintf("cp %s %s/frozen.js", [frida_src, scratch])))
+}
+
+test_deny_cp_non_repo_source_into_tmp if {
+	denied(bash_event_tracked(sprintf("cp /home/banon/Downloads/x.js %s/x.js", [scratch]), [frida_src]))
+}
+
+test_deny_cp_tracked_plus_untracked_sources_into_tmp_dir_file if {
+	denied(bash_event_tracked(sprintf("cp %s ../other/evil.js /tmp/x.js", [frida_src]), [frida_src]))
+}
+
+test_deny_cp_target_directory_flag if {
+	denied(bash_event_tracked(sprintf("cp -t /tmp/out %s /tmp/x.js", [frida_src]), [frida_src]))
+}
+
+test_deny_mv_tracked_source_into_tmp if {
+	denied(bash_event_tracked(sprintf("mv %s /tmp/x.js", [frida_src]), [frida_src]))
+}
+
+test_deny_cp_when_command_relinks if {
+	denied(bash_event_tracked(sprintf("ln -sf /tmp/evil.js %s; cp %s /tmp/x.js", [frida_src, frida_src]), [frida_src]))
+}
+
+test_deny_cp_tracked_then_appended_in_same_command if {
+	denied(bash_event_tracked(sprintf("cp %s /tmp/x.js; echo 'evil()' >> /tmp/x.js", [frida_src]), [frida_src]))
+}
+
+# Writing new script content into /tmp behind a variable is still authoring.
+test_deny_heredoc_into_variable_tmp_script if {
+	denied(bash_event("S=/tmp/x; cat > $S/evil.py <<'EOF'\nprint(1)\nEOF"))
+}
+
+test_deny_echo_redirect_into_quoted_variable_tmp_script if {
+	denied(bash_event(sprintf("S=%s; echo 'print(1)' > \"$S/probe.py\"", [scratch])))
+}
+
+test_deny_printf_append_into_braced_variable_tmp_script if {
+	denied(bash_event("D=/tmp; printf 'set -e\\n' >> ${D}/x.sh"))
+}
+
+test_deny_tee_into_variable_tmp_script if {
+	denied(bash_event(sprintf("S=%s; echo 'print(1)' | tee $S/probe.py", [scratch])))
+}
+
+test_deny_python_open_write_into_variable_tmp_script if {
+	denied(bash_event(sprintf("S=%s; python3 -c \"open('$S/probe.py','w').write('x')\"", [scratch])))
+}
+
+test_deny_sed_rewrite_into_variable_tmp_script if {
+	denied(bash_event_tracked(sprintf("S=%s; sed 's/a/b/' %s > $S/frozen.js", [scratch, frida_src]), [frida_src]))
+}
+
+test_deny_cp_non_repo_source_into_variable_tmp if {
+	denied(bash_event_tracked(sprintf("S=%s; cp ~/Downloads/x.js $S/x.js", [scratch]), [frida_src]))
+}
+
+test_deny_variable_reassigned_to_tmp if {
+	denied(bash_event("S=/home/banon/out; S=/tmp/x; echo 'x' > $S/a.py"))
+}
+
+# A variable the command never assigns, or assigns outside /tmp, is not guessed at.
+test_allow_redirect_into_unassigned_variable if {
+	not denied(bash_event("echo 'x' > $CLAUDE_PROJECT_DIR/scripts/a.py"))
+}
+
+test_allow_redirect_into_variable_assigned_outside_tmp if {
+	not denied(bash_event("S=/home/banon/projects/ds2-mods-rs/scripts; echo 'x' > $S/a.py"))
+}
+
+test_allow_data_artifact_into_variable_tmp if {
+	not denied(bash_event(sprintf("S=%s; python3 scripts/probe.py > $S/out.json", [scratch])))
+}
+
+test_allow_sed_extract_into_variable_tmp_rs if {
+	not denied(bash_event(sprintf("S=%s; sed -n 1,40p crates/ds2-loader/src/lib.rs > $S/ours.rs", [scratch])))
+}

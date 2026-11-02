@@ -947,6 +947,37 @@ def cases() -> list[PolicyCase]:
                 "content": "print(1)\n",
             },
         ),
+        # A copy of a TRACKED repo script into /tmp is the artifact, not authoring; only the
+        # tmp_copy_sources signal can say "tracked", so only this layer proves it is wired. The
+        # 2026-11-02 denial was this shape with a frida agent and the session scratchpad.
+        PolicyCase(
+            "allow-cp-tracked-repo-script-into-tmp",
+            True,
+            "cp scripts/ds2-run.py /tmp/claude-1000/scratchpad/run-frozen.py",
+        ),
+        PolicyCase(
+            "allow-cp-tracked-repo-script-into-variable-tmp",
+            True,
+            "S=/tmp/claude-1000/scratchpad; cp scripts/ds2-run.py $S/run-frozen.py",
+        ),
+        PolicyCase(
+            "deny-cp-untracked-repo-path-into-tmp",
+            False,
+            "cp scripts/not-a-tracked-file.py /tmp/claude-1000/scratchpad/x.py",
+            expected_text="paused authoring a script into /tmp",
+        ),
+        PolicyCase(
+            "deny-cp-after-cd-away-into-tmp",
+            False,
+            "cd /tmp; cp scripts/ds2-run.py /tmp/claude-1000/scratchpad/run.py",
+            expected_text="paused authoring a script into /tmp",
+        ),
+        PolicyCase(
+            "deny-heredoc-into-variable-tmp-script",
+            False,
+            "S=/tmp/claude-1000/scratchpad; cat > $S/probe.sh <<'EOF'\necho hi\nEOF",
+            expected_text="paused authoring a script into /tmp",
+        ),
         # --- docs_no_size_metrics ----------------------------------------------------------------
         # A display's height is not a line count. The exemption reads capture groups out of
         # `regex.find_all_string_submatch_n`, and only this layer shows the WASM runtime hands them
