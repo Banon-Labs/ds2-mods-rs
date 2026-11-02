@@ -1,0 +1,2 @@
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "is CI done on 368?"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "I'm waiting for CI on #368."}]}}

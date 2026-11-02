@@ -51,6 +51,8 @@ all_halts contains decision if { some decision in data.cupcake.policies.claude.g
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.idle_hold.halt }
 
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_unwatched_wait.halt }
+
 all_halts contains decision if { some decision in data.cupcake.policies.claude.native_ownership_vocab_reminder.halt }
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_admission_with_defence.halt }

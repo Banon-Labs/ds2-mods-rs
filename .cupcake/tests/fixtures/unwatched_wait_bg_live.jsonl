@@ -1,0 +1,4 @@
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "watch CI on 368"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "tool_use", "name": "Bash", "id": "t1", "input": {"command": "deadline=$(( $(date +%s) + 480 )); while (( $(date +%s) < deadline )); do gh pr checks 368 | grep -q pending || break; sleep 10; done", "description": "Poll CI with a deadline", "run_in_background": true}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"tool_use_id": "t1", "type": "tool_result", "content": [{"type": "text", "text": "Command running in background with ID: b1. You will be notified when it completes."}]}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Blocked on #368's checks, with an 8-minute cap."}]}}
