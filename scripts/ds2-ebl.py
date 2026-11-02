@@ -32,11 +32,9 @@ THE CHAIN, and every step of it is checked rather than assumed:
   DCX / DFLT         zlib at a FIXED offset from the header, not at the first `78` byte found
   BND4               a small file table; entries carry a name
 
-WHAT IS NOT IMPLEMENTED, deliberately, and named rather than left as a surprise: 1960 of the
-11699 entries carry an AES key record (a nonzero key offset at +0x18). Those are encrypted in
-ranges and this does not decrypt them. It REFUSES such an entry instead of handing back
-ciphertext that looks like a corrupt file. Nothing this repo has needed so far is one of them --
-`/menu/42.febnd.dcx`, the pause menu's layout, is not.
+AES: 1960 of the 11699 entries carry an AES key record (a nonzero key offset at +0x18), and
+are AES-128-ECB in the ranges that record lists (`aes_decrypt_ranges`). The per-map params
+(`/param/GeneratorLocation_m50_35_00_00.param` and the like) are among them.
 
 The BDT is 13 GB. Nothing here reads more of it than one entry.
 """
@@ -46,6 +44,7 @@ from __future__ import annotations
 import argparse
 import base64
 import struct
+import subprocess
 import sys
 import zlib
 from pathlib import Path
@@ -163,18 +162,41 @@ class Bhd5:
         return entry
 
 
-def read_entry(bdt_path: Path, size: int, offset: int, aes_key: int, what: str) -> bytes:
-    if aes_key:
-        raise SystemExit(
-            f"{what} is one of the AES-encrypted entries (key record at {aes_key:#x}).\n"
-            "    This tool does not decrypt those, and will not hand back ciphertext dressed\n"
-            "    up as a file. See the module docstring."
+def aes_decrypt_ranges(data: bytes, header: bytes, key_record: int) -> bytes:
+    """Undo an entry's AES, per its key record in the BHD5 header.
+
+    The record is SoulsFormats' `BHD5.AESKey`: `u8 key[16], i32 count, (i64 start, i64 end)[count]`,
+    each range AES-128-ECB with no padding, and a range of `-1` is not encrypted. openssl does the
+    cipher, as it does for `scripts/ds2-regulation.py`.
+    """
+    key = header[key_record : key_record + 16]
+    (count,) = struct.unpack_from("<i", header, key_record + 16)
+    out = bytearray(data)
+    for index in range(count):
+        start, end = struct.unpack_from("<qq", header, key_record + 20 + index * 16)
+        if start == -1 or end == -1 or start == end:
+            continue
+        run = subprocess.run(
+            ["openssl", "enc", "-aes-128-ecb", "-d", "-nopad", "-K", key.hex()],
+            input=bytes(out[start:end]),
+            capture_output=True,
         )
+        if run.returncode:
+            raise SystemExit(run.stderr.decode().strip() or "openssl failed")
+        out[start:end] = run.stdout
+    return bytes(out)
+
+
+def read_entry(
+    bdt_path: Path, size: int, offset: int, aes_key: int, header: bytes, what: str
+) -> bytes:
     with bdt_path.open("rb") as handle:
         handle.seek(offset)
         data = handle.read(size)
     if len(data) != size:
         raise SystemExit(f"{what}: wanted {size} bytes at {offset:#x}, got {len(data)}")
+    if aes_key:
+        data = aes_decrypt_ranges(data, header, aes_key)
     return data
 
 
@@ -276,7 +298,7 @@ def main() -> int:
         return 0
 
     size, offset, aes_key, _bucket = header.lookup(args.path)
-    data = read_entry(bdt_path, size, offset, aes_key, args.path)
+    data = read_entry(bdt_path, size, offset, aes_key, header.blob, args.path)
     args.out.mkdir(parents=True, exist_ok=True)
     stem = args.path.rsplit("/", 1)[-1]
     print(f"{args.path}  hash=0x{path_hash(args.path):08x} size={size} offset={offset:#x}")

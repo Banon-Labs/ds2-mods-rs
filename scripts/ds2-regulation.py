@@ -507,7 +507,19 @@ def main() -> int:
     )
     p_items.add_argument("--limit", type=int, default=60, help="0 for no limit")
 
+    ap.add_argument(
+        "--loose",
+        type=Path,
+        action="append",
+        default=[],
+        help="read this already-extracted .param instead of the regulation (repeatable), e.g. a "
+        "per-map `/param/GeneratorLocation_m50_35_00_00.param` out of `scripts/ds2-ebl.py`",
+    )
+
     args = ap.parse_args()
+    if args.loose:
+        members = {path.name: path.read_bytes() for path in args.loose}
+        return {"list": cmd_list, "param": cmd_param}[args.command](members, args)
     if not re.fullmatch(r"[0-9A-Fa-f]{32}", args.key):
         raise Fail(f"--key must be 32 hex digits, got {args.key!r}")
     if not args.file.is_file():
