@@ -145,7 +145,10 @@ const nav = Interceptor.attach(NAV_UPDATE, {
       const inner = inventory.add(0x10).readPointer();
       const error = inner.add(0x10138).readU32() >>> 0;
       const detail = inner.add(0x1013c).readU32() >>> 0;
-      send({ family: 'summon-sign', tag: 'give', item, granted: ok, error: '0x' + error.toString(16), detail, player: player.toString() });
+      // 0x81010000 is the refusal for a soapstone already held, sent on every reload; it is the
+      // normal case, not news, so it is not logged (it also matched every monitor's `error` filter).
+      if (error === 0x81010000) continue;
+      send({ family: 'summon-sign', tag: 'give', item, granted: ok, refusal: '0x' + error.toString(16), detail, player: player.toString() });
     }
   },
 });
