@@ -63,7 +63,31 @@ env:
   DEARXAN_REMOTE: https://github.com/Banon-Labs/dearxan.git
 
 jobs:
+  # A pull request that touches no Rust input has nothing for this to build: the job shows as
+  # skipped, with the reason in the `changes` job's summary (scripts/ci-rust-inputs.py). A push to
+  # main, which is what publishes, always builds.
+  changes:
+    runs-on: ubuntu-latest
+    # A checkout and one git diff; the default is six hours.
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      rust: ${{ steps.decide.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: python3 scripts/ci-rust-inputs.py --event "$EVENT" ${BASE:+--base "$BASE"}
+
+  # Also built when `changes` did not succeed, so a failed decision never reads as a skipped build.
   build:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # create and replace the `latest` release and its tag

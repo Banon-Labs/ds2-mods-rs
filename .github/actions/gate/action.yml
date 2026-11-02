@@ -1,0 +1,125 @@
+name: gate leg
+description: >-
+  Install what scripts/check.sh needs and run it with `args`. Shared by gate.yml's `check` and
+  `host-tests` jobs, which are separate jobs (not a matrix) so that a skipped host-tests still
+  reports a status: main's ruleset requires `check`, `host-tests` and `build`, and a job left out
+  of a matrix never reports at all. The job checks the repository out before using this.
+inputs:
+  args:
+    description: check.sh's arguments; --no-rust and --no-policy also skip the installs only they need
+    required: false
+    default: ""
+  cache-key:
+    description: rust-cache key, one per job
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Check out dearxan as a sibling
+      shell: bash
+      run: |
+        git clone "$DEARXAN_REMOTE" "$GITHUB_WORKSPACE/../dearxan"
+        git -C "$GITHUB_WORKSPACE/../dearxan" checkout "$DEARXAN_REV"
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ env.PYTHON_VERSION }}
+
+    # test-cupcake-policies.py reads the signal commands out of .cupcake/rulebook.yml.
+    - name: Install PyYAML
+      shell: bash
+      run: python -m pip install pyyaml
+
+    # clang/lld/llvm are what cargo-xwin drives. wine executes the cfg(windows) test binaries in
+    # the host-tests job; it is installed in both jobs so they differ only in check.sh's own
+    # argument. Not under --no-rust, which runs no cargo.
+    - name: Install the cross-compile toolchain and wine
+      if: ${{ !contains(inputs.args, '--no-rust') }}
+      shell: bash
+      run: |
+        sudo apt-get install -y --no-install-recommends clang lld llvm wine \
+          || { sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld llvm wine; }
+        wine --version
+
+    # rust-toolchain.toml names the channel, components (rustfmt, clippy) and the Windows target;
+    # this installs exactly that instead of restating it.
+    - name: Install Rust from rust-toolchain.toml
+      shell: bash
+      run: |
+        rustup toolchain install
+        rustc --version
+        cargo clippy --version
+        cargo fmt --version
+
+    - name: Install cargo-xwin
+      if: ${{ !contains(inputs.args, '--no-rust') }}
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-xwin@${{ env.CARGO_XWIN_VERSION }}
+
+    - name: Cache the Windows CRT and SDK
+      if: ${{ !contains(inputs.args, '--no-rust') }}
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/cargo-xwin
+        key: xwin-sdk-${{ runner.os }}-cargo-xwin-${{ env.CARGO_XWIN_VERSION }}
+
+    # From the release asset, pinned, and checked: without `-f` a redirector's error page would be
+    # written over the binary and every policy step would then fail to parse.
+    # The OPA and cupcake steps are skipped under --no-policy, which runs no policy suite.
+    - name: Install OPA (pinned)
+      if: ${{ !contains(inputs.args, '--no-policy') }}
+      shell: bash
+      run: |
+        curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/opa \
+          "https://github.com/open-policy-agent/opa/releases/download/${OPA_VERSION}/opa_linux_amd64_static"
+        sudo install -m 0755 /tmp/opa /usr/local/bin/opa
+        opa version | grep -qx "Version: ${OPA_VERSION#v}"
+
+    # No release exists for 0.5.2 at all, so it is built from source; the binary is cached on the
+    # rev so the build only runs when CUPCAKE_REV moves.
+    - name: Cache the cupcake binary
+      if: ${{ !contains(inputs.args, '--no-policy') }}
+      id: cache-cupcake
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/cupcake
+        key: cupcake-${{ runner.os }}-${{ env.CUPCAKE_REV }}
+
+    - name: Build cupcake (pinned)
+      if: ${{ !contains(inputs.args, '--no-policy') && steps.cache-cupcake.outputs.cache-hit != 'true' }}
+      shell: bash
+      run: cargo install --git "$CUPCAKE_REMOTE" --rev "$CUPCAKE_REV" cupcake-cli --locked
+
+    - name: Check cupcake
+      if: ${{ !contains(inputs.args, '--no-policy') }}
+      shell: bash
+      run: cupcake --version | grep -qx 'cupcake 0.5.2'
+
+    # scripts/check-allow-debt.py runs `~/.local/bin/bd show <id>` for every `# DEBT: <id>` above an
+    # `#[allow]`, so the gate needs bd AND this repo's issue database, or an allow naming a closed
+    # or invented issue would pass. The database is not in git; `bd bootstrap` clones it from the
+    # `sync.remote` in .beads/config.yaml, a public DoltHub repository, so this needs no secret.
+    # bd is the developer tree's version (`bd version` -> 1.0.4).
+    - name: Install bd and clone the issue database
+      shell: bash
+      run: |
+        mkdir -p "$HOME/.local/bin"
+        curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+          "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
+          | tar -xz -C "$HOME/.local/bin" bd
+        "$HOME/.local/bin/bd" version | grep -q "bd version ${BD_VERSION} "
+        "$HOME/.local/bin/bd" bootstrap --yes
+        "$HOME/.local/bin/bd" count
+
+    - uses: Swatinem/rust-cache@v2
+      if: ${{ !contains(inputs.args, '--no-rust') }}
+      with:
+        key: ${{ inputs.cache-key }}
+
+    - name: scripts/check.sh ${{ inputs.args }}
+      shell: bash
+      env:
+        ARGS: ${{ inputs.args }}
+      # Unquoted on purpose: the flags are separate words.
+      run: bash scripts/check.sh $ARGS
