@@ -83,6 +83,17 @@ STACK_WITH_DEPENDENT = json.dumps({"number": 129, "headRefName": "boot-timeline"
                                    "dependents": [131]})
 
 
+# no_unmarked_user_claim_relay: the SendMessage of 2026-10-30, verbatim, and the same with a marker.
+ESTUS_RELAY = (
+    "Correction to the filter: keep the Estus Flask in invader kits. The user (2026-10-30) says"
+    " vanilla disables Estus for invaders and Seamless re-enables it. The binary fits that: ..."
+    " So the rule is: drop items ... except Estus, which Seamless exempts."
+)
+ESTUS_RELAY_MARKED = ESTUS_RELAY.replace(
+    "re-enables it.", "re-enables it (unverified -- verify before relying on it)."
+)
+
+
 @dataclass(frozen=True)
 class PolicyCase:
     name: str
@@ -1046,6 +1057,50 @@ def cases() -> list[PolicyCase]:
                     ' "NOT RUN" when the probe is off, and `FUN_1402e67f0` is a DLL symbol.'
                 ),
             },
+        ),
+        # --- no_unmarked_user_claim_relay ------------------------------------------------------
+        # 2026-10-30: a SendMessage told a subagent the user's claim about Seamless and Estus as
+        # settled fact. The first two cases are that message, verbatim and then marked; the Agent
+        # pair proves the `prompt` key routes too; the long prompt is there because a WASM crash
+        # on a large payload returns an allow, so only a denial at that size proves it ran.
+        PolicyCase(
+            "deny-relayed-user-claim-send-message",
+            False,
+            tool_name="SendMessage",
+            tool_input={"to": "kit-builder", "message": ESTUS_RELAY},
+            expected_text="relayed user claim with no status marker",
+        ),
+        PolicyCase(
+            "allow-relayed-user-claim-marked-unverified",
+            True,
+            tool_name="SendMessage",
+            tool_input={"to": "kit-builder", "message": ESTUS_RELAY_MARKED},
+        ),
+        PolicyCase(
+            "deny-relayed-user-claim-agent-prompt",
+            False,
+            tool_name="Agent",
+            tool_input={"description": "kit filter", "prompt": ESTUS_RELAY},
+            expected_text="relayed user claim with no status marker",
+        ),
+        PolicyCase(
+            "allow-relayed-user-decision-agent-prompt",
+            True,
+            tool_name="Agent",
+            tool_input={
+                "description": "kit filter",
+                "prompt": "The user decided to keep the Estus Flask in invader kits.",
+            },
+        ),
+        PolicyCase(
+            "deny-relayed-user-claim-long-agent-prompt",
+            False,
+            tool_name="Agent",
+            tool_input={
+                "description": "kit filter",
+                "prompt": "Read the kit builder and report the item filter. " * 250 + ESTUS_RELAY,
+            },
+            expected_text="relayed user claim with no status marker",
         ),
     ]
 
