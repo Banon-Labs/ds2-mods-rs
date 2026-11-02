@@ -452,6 +452,19 @@ def selftest() -> int:
     check(decide(facts=facts, game=(766429, {"tick.js"})) is None,
           "the live watcher runs another agent (another session's) -> silent")
 
+    # 2026-11-02 21:02: the next instance. A finding, then a results table, and nothing else.
+    table = head + [said(
+        "Pate wasn't spawned as a phantom, and the class of the returned object shows it.\n\n"
+        "| entry | chr | class returned | where |\n|---|---|---|---|\n"
+        "| 0x2824 (Pate) | 744009 | `CharacterCtrl` | his map spot, 210 m away, not moving |\n"
+        "| 0x3024 | 866001 | `PlayerCtrl` | pooled generator, moving |")]
+    check(decide(facts=scan(table), game=alive) == "summon-sign-trace-frozen.js",
+          "incident 2026-11-02 21:02: a finding plus a results table, no ask, no blocker -> speaks")
+    table_q = head + [said("Two spawns are traced.\n\n| question | answer |\n|---|---|\n"
+                           "| phantom? | no, blocker: the class |")]
+    check(decide(facts=scan(table_q), game=alive) is not None,
+          "a `?` and the word blocker inside table cells do not exempt -> speaks")
+
     asked = head + [said(closing.replace("where it is.", "where it is. Is the sign on your screen right now?"))]
     check(decide(facts=scan(asked), game=alive) is None, "turn ends on a question to the user -> silent")
     imperative = head + [said(closing + "\n\nWalk up to where the sign should be and press E.")]

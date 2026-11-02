@@ -151,6 +151,14 @@ CASES = [
         env=(("CUPCAKE_FRIDA_ATTACHED_MACHINE_OVERRIDE", "766429|summon-sign-trace-frozen.js"),),
     ),
     Case(
+        "frida_attached_table.jsonl",
+        "with the Frida watcher this session started attached (agent summon-sign-trace-frozen.js)",
+        "2026-11-02 21:02: a one-sentence finding followed by a results table (which class the generator "
+        "returned), with no question, blocker or done claim, while the watcher is attached -- halts. The "
+        "table's cells are dropped before the question and bare-blocker checks, so nothing in them exempts",
+        env=(("CUPCAKE_FRIDA_ATTACHED_MACHINE_OVERRIDE", "766429|summon-sign-trace-frozen.js"),),
+    ),
+    Case(
         "frida_attached_question.jsonl",
         None,
         "the same session ending on a question to the user (is the sign on your screen?) must NOT halt",
