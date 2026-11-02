@@ -160,16 +160,15 @@ class WatchSet:
 
 
 def game_dir() -> Path:
-    """The `ELDEN RING/Game` directory: where the game lives and where every loaded DLL logs.
+    """The DARK SOULS II `Game` directory: where the game lives and where every loaded DLL logs.
 
-    One owner, because the path is machine-shaped: this repo now runs a native Linux Steam
-    install, the retired WSL2 layout put it under `C:\\SteamLibrary`, and a script carrying its
-    own copy of either silently resolves to nothing rather than erroring -- which reads as "the
-    file is missing" instead of "you looked in the wrong place". `ME3_STEAM_DIR` overrides it,
-    the same variable `~/Elden/launch.sh` derives from.
+    One owner, because the path is machine-shaped. It said `ELDEN RING/Game` until 2026-11-02, a
+    leftover of the port from er-mods-rs: the Frida watcher's launch wait was watching the wrong
+    game's directory, and its crash-logger gate read a crash log that could never exist there.
+    `ME3_STEAM_DIR` still overrides the Steam root.
     """
     steam = Path(os.environ.get("ME3_STEAM_DIR", Path.home() / ".local/share/Steam"))
-    return steam / "steamapps/common/ELDEN RING/Game"
+    return steam / "steamapps/common/Dark Souls II Scholar of the First Sin/Game"
 
 
 def process_alive(pid: int) -> bool:

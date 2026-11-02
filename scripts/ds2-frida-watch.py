@@ -156,6 +156,48 @@ def linux_game_pid() -> int | None:
     return None
 
 
+CRASH_LOG_NAME = "ds2-crash-log.txt"
+CRASH_LOGGER_INSTALLED = "crash logger installed"
+
+
+def process_start_epoch(linux_pid: int) -> float | None:
+    """Wall-clock start of a Linux process: `/proc/<pid>/stat` field 22 plus `/proc/stat` btime."""
+    try:
+        stat = pathlib.Path(f"/proc/{linux_pid}/stat").read_text(encoding="utf-8")
+        boot = next(
+            int(line.split()[1])
+            for line in pathlib.Path("/proc/stat").read_text(encoding="utf-8").splitlines()
+            if line.startswith("btime ")
+        )
+    except (OSError, StopIteration, ValueError):
+        return None
+    # The command name sits in parentheses and may contain spaces; fields count from after it.
+    fields = stat[stat.rindex(")") + 2 :].split()
+    return boot + int(fields[19]) / os.sysconf("SC_CLK_TCK")
+
+
+def crash_logger_verdict(log_path: pathlib.Path, started: float | None) -> str | None:
+    """`None` when THIS process installed the crash logger, else why it cannot be shown to have.
+
+    User directive 2026-11-02: no Frida attach without the crash logger in the process, so that a
+    crash during an experiment always leaves a record of why. The logger rotates
+    `ds2-crash-log.txt` when it installs, so a file that names the install and was last written
+    after the process started belongs to this run; one written before it belongs to an earlier one.
+    """
+    if started is None:
+        return "the game's Linux process start time could not be read"
+    try:
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        mtime = log_path.stat().st_mtime
+    except OSError as exc:
+        return f"{log_path} is unreadable ({exc})"
+    if CRASH_LOGGER_INSTALLED not in text:
+        return f"{log_path} has no '{CRASH_LOGGER_INSTALLED}' line"
+    if mtime < started:
+        return f"{log_path} was last written before this game process started -- it is a previous run's"
+    return None
+
+
 def find_game_bounded(dev, timeout_seconds: float = 6.0):
     """`find_game` with a bound, because the underlying call has none.
 
@@ -328,6 +370,23 @@ def run(
         return 2
     del existing
 
+    # No attach without the crash logger, and no flag to skip this: a crash under an agent with no
+    # record of why is an experiment that taught nothing (user directive 2026-11-02).
+    linux_pid = linux_game_pid()
+    refusal = crash_logger_verdict(
+        er_run_lib.game_dir() / CRASH_LOG_NAME,
+        process_start_epoch(linux_pid) if linux_pid is not None else None,
+    )
+    if refusal is not None:
+        print(
+            f"refusing to attach: the crash logger is not shown to be running in this game process "
+            f"({refusal}). Launch the game with `scripts/ds2-run.py`, whose loader DLL installs it.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 2
+    print("crash logger confirmed installed in this game process", flush=True)
+
     session = dev.attach(pid)
     print(f"attached to DarkSoulsII.exe (windows pid {pid})", flush=True)
     attached_at = time.monotonic()
@@ -456,6 +515,32 @@ def run(
     return 0
 
 
+def crash_logger_selftest_checks() -> list[tuple[str, bool]]:
+    """The attach gate, exercised on files it writes itself."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log = pathlib.Path(tmp) / CRASH_LOG_NAME
+        log.write_text(f"ds2-loader build\n{CRASH_LOGGER_INSTALLED} module=ds2-loader\n", encoding="utf-8")
+        written = log.stat().st_mtime
+        missing = crash_logger_verdict(pathlib.Path(tmp) / "absent.txt", written - 1)
+        current = crash_logger_verdict(log, written - 1)
+        stale = crash_logger_verdict(log, written + 60)
+        log.write_text("ds2-loader build\n", encoding="utf-8")
+        uninstalled = crash_logger_verdict(log, log.stat().st_mtime - 1)
+    source = pathlib.Path(__file__).read_text(encoding="utf-8")
+    return [
+        ("the attach gate passes a log this process's logger wrote", current is None),
+        ("the attach gate refuses a missing crash log", missing is not None),
+        ("the attach gate refuses a crash log from before the process started", stale is not None),
+        ("the attach gate refuses a log with no install line", uninstalled is not None),
+        (
+            "the gate runs before the attach, with no flag to skip it",
+            source.index("refusal = crash_logger_verdict(") < source.index("session = dev.attach(pid)"),
+        ),
+    ]
+
+
 def selftest() -> int:
     import inspect
 
@@ -509,6 +594,7 @@ def selftest() -> int:
             "the evidence is written by this tool, not typed by its caller",
             "def record(" in EVIDENCE_SCRIPT.read_text(encoding="utf-8"),
         ),
+        *crash_logger_selftest_checks(),
     ]
     failed = 0
     for label, ok in checks:
