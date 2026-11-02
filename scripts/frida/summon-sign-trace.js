@@ -668,6 +668,7 @@ Interceptor.attach(at(0x00422bc0), {
 });
 // The touch, done by the agent: what NetNpcPhantomDirection_HOST (0x1402529c0) calls.
 const SUMMON_TEST = true;
+const SPAWN_TEAM = null;
 // 0x2824 = Mild-Mannered Pate (measured: the sign named him; spawned 2026-11-02 at his generator,
 // 210 m away). 0x2c24 = block 2 index 11, chrType 2 / sign type 2 (red): chr 891000, spawned
 // 2026-11-02 at (90.4, -40.4, -148.4) despite gen+0x30 set beside the player. 0x3024 = index 12.
@@ -680,7 +681,7 @@ const DESPAWN_FIRST = true;
 // hurt. FUN_140418690 puts FUN_1404124f0(gen)'s chrType into the spawn descriptor; the chrType
 // table 0x1410c0050 pairs row 1 (02 01 01 02 02 01 ..) with row 2 (02 02 01 02 02 00 ..), the red
 // sign type. Return SPAWN_CHR_TYPE from that one call, inside FUN_140418690 only.
-const SPAWN_CHR_TYPE = 2;
+const SPAWN_CHR_TYPE = 16;
 Interceptor.attach(at(0x004124f0), {
   onEnter() {
     const r = this.returnAddress.sub(image.base).toInt32();
@@ -714,6 +715,18 @@ function prepareThenSummon() {
   const ctrl = resolve(globalThis.__summonId);
   if (ctrl.isNull()) return;
   const chrId = ctrl.add(0x60).readPointer().readU32();
+  // The player took chr 866001 (entity 0x3024, PlayerCtrl, following and fighting for the player)
+  // for Pate. Despawn it too, so only one NPC is near the player when the result is judged.
+  if (DESPAWN_FIRST && prepStage === 0) {
+    globalThis.__otherId = globalThis.__otherId || Memory.alloc(8);
+    globalThis.__otherId.writeU32(0x3024);
+    const other = resolve(globalThis.__otherId);
+    const oe = other.isNull() ? NULL : other.add(0x68).readPointer();
+    if (!oe.isNull() && !grabChr(oe.add(0x18)).isNull()) {
+      despawn(gm.add(0x40).readPointer(), oe);
+      send({ family: 'summon-sign', tag: 'summon_test.despawn_other', entity: '0x3024', held: grabChr(oe.add(0x18)).toString() });
+    }
+  }
   if (DESPAWN_FIRST && prepStage === 0) {
     const entry = ctrl.add(0x68).readPointer();
     const handle = entry.isNull() ? -1 : entry.add(0x18).readU32();
@@ -760,6 +773,10 @@ function watchMoved() {
   const hp = m.chr.add(0x168).readS32();
   if (m.hp !== undefined && hp !== m.hp) send({ family: 'summon-sign', tag: 'spawn.hp', frames: m.frames, was: m.hp, now: hp });
   m.hp = hp;
+  // The player's HP too, so Pate hitting the player is measured as well.
+  const php = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer().add(0x168).readS32();
+  if (m.php !== undefined && php !== m.php) send({ family: 'summon-sign', tag: 'player.hp', frames: m.frames, was: m.php, now: php });
+  m.php = php;
 }
 const ctrlOfHandle = new NativeFunction(at(0x0041e870), 'pointer', ['uint32']);
 let spawnReported = false;
@@ -826,13 +843,23 @@ function summonTest() {
   }
   send({ family: 'summon-sign', tag: 'summon_test', entity: '0x' + SUMMON_ENTITY.toString(16), ret: ret.toString(),
     at: ret.isNull() ? null : [0, 4, 8].map((o) => ret.add(0x90 + o).readFloat().toFixed(2)) });
-  if (!ret.isNull()) globalThis.__movedChr = { chr: ret, frames: 0 };
+  if (!ret.isNull()) {
+    globalThis.__movedChr = { chr: ret, frames: 0 };
+    // +0x30 is the team byte (1 player side, 2 hostile; measured by diffing live CharacterCtrls).
+    if (SPAWN_TEAM !== null) {
+      const was = ret.add(0x30).readU8();
+      ret.add(0x30).writeU8(SPAWN_TEAM);
+      send({ family: 'summon-sign', tag: 'summon_test.team', was, now: ret.add(0x30).readU8() });
+    }
+  }
 }
 // Read-only, once: every generator entity with its spawn row and the character it holds now, to
 // find the entity whose spawn is an NPC PHANTOM. Measured 2026-11-02: Pate's 0x2824 (kind 1) gave a
 // CharacterCtrl at his standing spot; 0x3024 (kind 3, chr 866001) gave a PlayerCtrl.
 const ENTITY_DUMP = false;
 let entityDumped = false;
+const PATE_TEAM = null;
+globalThis.__pateId = Memory.alloc(8);
 function entityDump() {
   if (!ENTITY_DUMP || entityDumped || !granted) return;
   entityDumped = true;
@@ -847,20 +874,48 @@ function entityDump() {
       r.f = [desc.add(4).readU32(), desc.add(8).readU32()];
       r.mask = '0x' + desc.add(0xe).readU16().toString(16);
     } catch (e) { r.desc = e.message; }
-    r.at = [0, 4, 8].map((o) => c.ctrl.add(0x30 + o).readFloat().toFixed(1));
+    r.at = [0, 4, 8].map((o) => c.ctrl.add(0x20 + o).readFloat().toFixed(1));
+    // The generator param row ([ctrl+0x58]): +0x84 is the kind; FUN_140418690 copies +0x85 and +8
+    // into the spawn descriptor (+0x3d, +0x3c) beside it. Candidate team type.
+    const row = c.ctrl.add(0x58).readPointer();
+    r.row80 = Array.from(new Uint8Array(row.add(0x80).readByteArray(0x10))).map((x) => x.toString(16).padStart(2, '0')).join(' ');
+    r.row00 = Array.from(new Uint8Array(row.readByteArray(0x10))).map((x) => x.toString(16).padStart(2, '0')).join(' ');
     try {
       const gen = c.ctrl.add(0x68).readPointer();
       if (!gen.isNull()) {
         const h = gen.add(0x18).readU32();
         r.h = '0x' + h.toString(16);
-        const chr = ctrlOfHandle(h);
-        if (!chr.isNull()) r.vt = rel(chr.readPointer());
+        const chr = grabChr(gen.add(0x18));
+        if (!chr.isNull()) {
+          r.vt = rel(chr.readPointer());
+          r.bytes = Array.from(new Uint8Array(chr.readByteArray(0x600))).map((x) => x.toString(16).padStart(2, '0')).join('');
+          // [chr+0xb0]+0x3c is the phantom type FUN_14014ed00 reads (and TeamTypeArray indexes).
+          const cd = chr.add(0xb0).readPointer();
+          if (!cd.isNull()) r.cd = Array.from(new Uint8Array(cd.readByteArray(0x100))).map((x) => x.toString(16).padStart(2, '0')).join('');
+        }
       }
     } catch (e) { r.gen = e.message; }
     rows.push(r);
   }
-  for (let k = 0; k < rows.length; k += 40)
-    send({ family: 'summon-sign', tag: 'entity.dump', from: k, total: rows.length, rows: rows.slice(k, k + 40) });
+  // Measured 2026-11-02 by diffing live CharacterCtrls: byte +0x30 is 1 on the player and on the
+  // friendly Pate, 2 on all 13 hostile enemies. Candidate team type: write PATE_TEAM into Pate's.
+  if (PATE_TEAM !== null) {
+    const pate = rows.find((r) => r.e === '0x2824');
+    globalThis.__pateId.writeU32(0x2824);
+    const gen = new NativeFunction(at(0x0017b7e0), 'pointer', ['pointer'])(globalThis.__pateId).add(0x68).readPointer();
+    const chr = grabChr(gen.add(0x18));
+    if (!chr.isNull()) {
+      globalThis.__movedChr = { chr, frames: 0 };
+      const was = chr.add(0x30).readU32();
+      chr.add(0x30).writeU8(PATE_TEAM);
+      send({ family: 'summon-sign', tag: 'pate.team', chr: chr.toString(), was: '0x' + was.toString(16), now: chr.add(0x30).readU32(), found: !!pate });
+    }
+  }
+  const pl = GAME_MANAGER_IMP.readPointer().add(PLAYER_CTRL_OFFSET).readPointer();
+  send({ family: 'summon-sign', tag: 'entity.dump.player', vt: rel(pl.readPointer()),
+    bytes: Array.from(new Uint8Array(pl.readByteArray(0x600))).map((x) => x.toString(16).padStart(2, '0')).join('') });
+  for (let k = 0; k < rows.length; k += 8)
+    send({ family: 'summon-sign', tag: 'entity.dump', from: k, total: rows.length, rows: rows.slice(k, k + 8) });
 }
 let lastSignWords = '';
 function watchSign() {
