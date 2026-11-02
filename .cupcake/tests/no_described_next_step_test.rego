@@ -8,8 +8,9 @@
 # The split of duty, same as the sibling guards. This file pins the RULE: which combination of facts
 # halts a turn and what the correction says. The prose classification that produces those facts --
 # which sentences count as naming a next step, and which are exempt -- lives in the SIGNAL and is
-# pinned by scripts/test-described-next-step-signal.py against the verbatim failure. Between the two
-# suites the corpus is covered end to end: text in, facts out, halt or no halt.
+# pinned by the described_next_step*.jsonl fixtures in scripts/test-cupcake-stop-guards.py, which
+# drive the real signal and the real `cupcake eval` over transcripts. Between the two suites the
+# corpus is covered end to end: text in, facts out, halt or no halt.
 #
 # The four cases the user asked for are asserted in BOTH layers on purpose, because they are the
 # intent of the whole guard and a reader should be able to find them in either file:
@@ -78,9 +79,9 @@ test_allow_when_a_genuine_blocker_is_stated if {
 }
 
 # --- the four closers that escaped on 2026-09-16 ------------------------------------------------
-# The prose classification that finds these lives in the signal and is pinned by
-# scripts/test-described-next-step-signal.py. What is pinned here is the half this layer owns: with
-# the clause extracted and no exemption set, each one halts. They are named rather than folded into
+# The prose classification that finds these lives in the signal and is pinned by the
+# described_next_step*.jsonl fixtures in scripts/test-cupcake-stop-guards.py. What is pinned here is
+# the half this layer owns: with the clause extracted and no exemption set, each one halts. They are named rather than folded into
 # the verbatim case so a regression says which closer came back.
 
 escape_next_edit := "The pre-flight itself is not built yet -- it needs the DLL to issue and poll its own RequestLobbyList the way the Frida agent does, which is the next edit."
@@ -134,6 +135,35 @@ test_allow_when_the_next_edit_was_made if {
 # The remaining work named beside the one thing that stops it being done now.
 test_allow_when_the_remaining_work_is_blocked if {
 	not halted(facts(escape_remaining_work, "0", "1", "0", "0"))
+}
+
+# --- the status-table closer that escaped on 2026-11-02 -----------------------------------------
+# Verbatim, after a two-row status table whose first column was a list of open questions and whose
+# status cell read "**open**; this is the first blocker":
+#
+#   "The next step is to find the code that reads ItemUsageParam, which settles whether the
+#    soapstone can even be used offline."
+#
+# It escaped on three exemptions, none of them real. The `?` that ends each row label set
+# `handoff`; "blocker" in a status cell set `blocked`; and a backgrounded Bash whose result had
+# already arrived was re-opened by its `api-request-blob` copy, so "when the Red Sign Soapstone is
+# used" in the turn's opening narration set `carried`. The signal now reads `?` and the bare blocker
+# words from prose only, and the scan ignores blob copies. These are the facts it emits for that turn
+# (fixture: described_next_step_table_cells.jsonl), and they halt.
+table_cells_closer := "The next step is to find the code that reads ItemUsageParam, which settles whether the soapstone can even be used offline."
+
+test_halt_on_the_status_table_closer if {
+	halted(facts(table_cells_closer, "0", "0", "0", "0"))
+}
+
+# The halt must not outlive a genuine exemption on the same clause: a real question in prose, or a
+# real external blocker stated in a cell, still lets it stop.
+test_allow_the_status_table_closer_when_a_question_is_asked if {
+	not halted(facts(table_cells_closer, "0", "0", "1", "0"))
+}
+
+test_allow_the_status_table_closer_when_a_real_blocker_is_stated if {
+	not halted(facts(table_cells_closer, "0", "1", "0", "0"))
 }
 
 # --- the remaining exemption, and the shape of the halt -----------------------------------------
