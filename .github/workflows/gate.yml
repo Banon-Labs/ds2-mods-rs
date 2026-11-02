@@ -87,8 +87,13 @@ jobs:
   # matrix leaves out never reports, so a pull request with no Rust input could never merge. A job
   # skipped by its `if` reports "skipped", which the ruleset accepts. The steps are shared in
   # .github/actions/gate.
+  #
+  # Both jobs also run when `changes` did not succeed: a job skipped because a job it needs failed
+  # reports "skipped" too, which the ruleset would take as a pass for a gate that never ran
+  # (GitHub's "Troubleshooting required status checks"). Then check gets no arguments and runs in full.
   check:
     needs: changes
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
@@ -106,7 +111,7 @@ jobs:
 
   host-tests:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:

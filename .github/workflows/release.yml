@@ -84,9 +84,10 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: python3 scripts/ci-rust-inputs.py --event "$EVENT" ${BASE:+--base "$BASE"}
 
+  # Also built when `changes` did not succeed, so a failed decision never reads as a skipped build.
   build:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write # create and replace the `latest` release and its tag
