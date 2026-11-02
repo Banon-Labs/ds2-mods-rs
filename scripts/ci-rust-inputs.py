@@ -37,7 +37,6 @@ against runs every leg too: a skip needs a positive answer, never a missing one.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import subprocess
@@ -91,11 +90,11 @@ def policy_inputs(paths: list[str], named: set[str]) -> list[str]:
     ]
 
 
-def gate_legs(rust: bool, policy: bool) -> list[dict[str, str]]:
-    """gate.yml's matrix: both legs, or `check` alone with what the change cannot reach skipped."""
+def check_args(rust: bool, policy: bool) -> str:
+    """gate.yml's `check` job's check.sh arguments: what the change cannot reach is skipped."""
     if rust:
-        return [{"leg": "check", "args": ""}, {"leg": "host-tests", "args": "--host-tests"}]
-    return [{"leg": "check", "args": "--no-rust" if policy else "--no-rust --no-policy"}]
+        return ""
+    return "--no-rust" if policy else "--no-rust --no-policy"
 
 
 def shown(hits: list[str]) -> str:
@@ -169,9 +168,9 @@ def selftest() -> int:
         decide("pull_request", "no-such-ref-for-the-selftest", "HEAD")[:2],
         (True, True),
     )
-    expect("Rust: both legs", [leg["leg"] for leg in gate_legs(True, False)], ["check", "host-tests"])
-    expect("policy only", gate_legs(False, True), [{"leg": "check", "args": "--no-rust"}])
-    expect("neither", gate_legs(False, False), [{"leg": "check", "args": "--no-rust --no-policy"}])
+    expect("Rust: check runs in full", check_args(True, False), "")
+    expect("policy only", check_args(False, True), "--no-rust")
+    expect("neither", check_args(False, False), "--no-rust --no-policy")
     total = len(rust_cases) + len(policy_cases) + 8
     print(f"ci-rust-inputs selftest: {total - failed}/{total} pass")
     return 1 if failed else 0
@@ -187,12 +186,12 @@ def main() -> int:
     if a.selftest:
         return selftest()
     rust, policy, why = decide(a.event, a.base, a.head)
-    legs = json.dumps(gate_legs(rust, policy), separators=(",", ":"))
+    args = check_args(rust, policy)
     lines = [
         f"rust={'true' if rust else 'false'}",
         f"policy={'true' if policy else 'false'}",
         f"reason={why}",
-        f"legs={legs}",
+        f"check_args={args}",
     ]
     print("\n".join(lines))
     out = os.environ.get("GITHUB_OUTPUT")
@@ -204,7 +203,7 @@ def main() -> int:
         if rust:
             said = "every leg runs"
         else:
-            said = "host-tests and the release build are SKIPPED; check runs " + gate_legs(rust, policy)[0]["args"]
+            said = f"host-tests and the release build are SKIPPED; check runs {args}"
         with open(summary, "a", encoding="utf-8") as f:
             f.write(f"### Which legs this change needs\n\n{why}. {said}.\n")
     return 0
