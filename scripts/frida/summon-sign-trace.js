@@ -298,6 +298,22 @@ const BROAD = {
   net_sign_job_5ce0: 0x002a5ce0,
   net_sign_job_5d50: 0x002a5d50,
   net_sign_job_5dc0: 0x002a5dc0,
+  // The Red Sign Soapstone is a DUEL sign. The getter's only callers outside NetSvrSummonSign* are
+  // here: 0x14027b410 (called by NetSvrDuelManager 0x14027e630) and 0x14027e0c0 (by 0x14027e840).
+  duel_b410: 0x0027b410,
+  duel_e0c0: 0x0027e0c0,
+  duel_e840: 0x0027e840,
+  duel_mgr_e2c0: 0x0027e2c0,
+  duel_mgr_e330: 0x0027e330,
+  duel_mgr_e370: 0x0027e370,
+  duel_mgr_e630: 0x0027e630,
+  duel_mgr_e960: 0x0027e960,
+  duel_join_mgr_e090: 0x0027e090,
+  duel_accept_mgr_b310: 0x0027b310,
+  duel_register_wait: 0x0027c250,
+  duel_register_wait_dc00: 0x0027dc00,
+  duel_update_register_wait: 0x0027c390,
+  duel_search: 0x0027c170,
 };
 for (const [base, count] of [[0x010cb698, 9], [0x010cb6e8, 26]]) {
   for (let i = 1; i < count; i++) {
