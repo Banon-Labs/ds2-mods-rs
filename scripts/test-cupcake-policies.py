@@ -1142,8 +1142,45 @@ def cases() -> list[PolicyCase]:
             tool_name="Monitor",
             tool_input={
                 "command": "tail -n0 -F /tmp/s/summon-sign.jsonl"
-                " | grep --line-buffered -E 'Error|detached'"
+                " | grep --line-buffered -E 'agent\\.reloaded|Error|detached'"
                 f" | python3 -u {REPO_ROOT}/scripts/monitor-throttle.py 10",
+                "description": "watch",
+            },
+        ),
+        # 2026-11-02: the agent's load-time one-shots sent an `error` line on every hot reload,
+        # and a grep that drops the watcher's `agent.reloaded` line keeps the throttle's reload
+        # quiet window from ever opening, so every edit notified.
+        PolicyCase(
+            "deny-monitor-frida-log-grep-drops-reload-marker",
+            False,
+            tool_name="Monitor",
+            tool_input={
+                "command": "S=/tmp/claude-1000/x/scratchpad; tail -n0 -F $S/summon-sign.jsonl"
+                " | grep --line-buffered -E '\"player\\.hit\"|\"mode\"|error|Error|detached'"
+                f" | python3 -u {REPO_ROOT}/scripts/monitor-throttle.py 10",
+                "description": "watch",
+            },
+            # The reason arrives JSON-encoded, so its backslash is doubled; match past it.
+            expected_text="reloaded|<your pattern>' | python3 -u scripts/monitor-throttle.py 10",
+        ),
+        PolicyCase(
+            "allow-monitor-frida-log-keeps-reload-marker-with-quiet-flag",
+            True,
+            tool_name="Monitor",
+            tool_input={
+                "command": "S=/tmp/claude-1000/x/scratchpad; tail -n0 -F $S/summon-sign.jsonl"
+                " | grep --line-buffered -E 'agent\\.reloaded|\"player\\.hit\"|error|detached'"
+                f" | python3 -u {REPO_ROOT}/scripts/monitor-throttle.py 10 --reload-quiet 15",
+                "description": "watch",
+            },
+        ),
+        PolicyCase(
+            "allow-monitor-frida-log-without-grep",
+            True,
+            tool_name="Monitor",
+            tool_input={
+                "command": "tail -n0 -F /tmp/claude-1000/x/scratchpad/tick.jsonl"
+                " | python3 -u scripts/monitor-throttle.py 10",
                 "description": "watch",
             },
         ),
