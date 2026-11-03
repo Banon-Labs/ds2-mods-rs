@@ -42,6 +42,7 @@ import math
 import os
 import re
 import statistics
+import struct
 import subprocess
 import sys
 import time
@@ -175,6 +176,10 @@ class Data:
         self.hit_flat = {}  # PlayerDamageParam row -> DMG key -> flat attack (regulation_hit_flat)
         self.damage_scale = {}  # weapon key -> WeaponParam.damageScale where not 1.0 (regulation_damage_scale)
         self.self_hit = {}  # weapon key -> HP each landed hit costs its wielder (regulation_self_hits)
+        # weapon key -> its equip SpEffect's conditional attack (regulation_conditions), and the
+        # wielder's state those conditions read (condition_rate, cycle_add)
+        self.weapon_cond = {}
+        self.conditions = dict(CONDITIONS)
         # weapon key -> (WeaponTypeParam.dualWieldingPermission, leftDamageScale) (regulation_stance)
         self.stance = {}
         self.hit_shape = {}  # PlayerDamageParam row -> its hitbox shape (regulation_reach)
@@ -1263,6 +1268,7 @@ def apply_regulation(data: Data) -> str:
             + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_stance(data, d, names)
             + "; " + regulation_reach(data, d, names)
             + "; " + regulation_self_hits(data, emevd, members, d, names)
+            + "; " + regulation_conditions(data, emevd, members, d, names)
             + "; " + regulation_poise(data, d, names) + "; " + regulation_stamina(data, d, names)
             + "; " + regulation_status(data, d, names)
             + "; " + regulation_status_procs(data, d, emevd, members, names)
@@ -1484,6 +1490,105 @@ def regulation_self_hits(data: Data, emevd, members: dict, d: dict, names: dict)
                      if hp.get(norm(w.get("name", key)))}
     return "self-damage per hit from SpEffectWeapon.emevd: " + ", ".join(
         f"{data.weapons[k]['name']} {v}" for k, v in data.self_hit.items())
+
+
+#: The SpEffect instructions that make a weapon's attack depend on the wielder's state. EXE (static,
+#: bd ds2-mods-rs-169u.2/.3/.5): the action table at 0x14156fa50 names 1000[14] 所持ソウル攻撃力倍率
+#: (souls held), 1000[15] 亡者カウント攻撃力倍率 (hollow count) and 1000[17] 週回数攻撃力補正 (NG cycle).
+ATK_RATE_SOULS, ATK_RATE_COUNT, ATK_ADD_CYCLE = (1000, 14), (1000, 15), (1000, 17)
+#: What an attack-rate instruction's selector byte reads, all off the LOCAL player's PlayerParam
+#: (EXE, SpEffectOwner 0x1410af2b8): 1 hollow level (+0x1ac, 0x14023c7c0), 2 sin points (+0x1d7,
+#: 0x14038b950), anything else souls held (+0xec, 0x14023c940).
+CONDITION_SELECTOR = {1: "hollow", 2: "sin"}
+#: The wielder the recommender assumes unless told otherwise: a human (hollow 0) holding no souls,
+#: with no sin, in the first playthrough (NG is cycle 1: INFERRED, bd ds2-mods-rs-169u.5).
+CONDITIONS = {"hollow": 0, "souls": 0, "sin": 0, "cycle": 1}
+
+
+def regulation_conditions(data: Data, emevd, members: dict, d: dict, names: dict) -> str:
+    """data.weapon_cond: weapon key -> {"rates": [(selector, low, high, at_low, at_high)],
+    "cycle": (first, last, at_first, at_last) or None}, read from the SpEffectWeapon.emevd event a
+    weapon's ItemParam.specialEffectId names: the effect the game applies to the hand holding it
+    (EXE 0x14022ed30, keyed 0xfc/0xfd per hand, so it boosts that weapon's own attacks; bd
+    ds2-mods-rs-169u.8). The id is not always the weapon's own: the Lost Sinner's Sword's is 5295010.
+
+    * 1000[14] [selector, low s32, high s32, at_low, at_high, seconds] and 1000[15] [selector | low
+      << 8 | high << 16, at_low, at_high, seconds] multiply the stat-scaling part of the attack
+      (condition_rate). An effect with a duration is a temporary buff, not the equip effect, and is
+      skipped.
+    * 1000[17] [first | last << 8 | slot << 16, at_first, at_last, gate] adds flat attack by NG
+      cycle (cycle_add). Gate 1 is what the player calculator reads, which is the one asked when
+      the target is a player (EXE calculateDamage_attack 0x14013749e asks the target's calculator
+      about the attacker's effects): the recommender's defender. Slot 0 is physical."""
+    events = {e.id: e for e in emevd.Emevd(Path("SpEffectWeapon.emevd"), members["SpEffectWeapon.emevd"]).events}
+    effect = {}
+    for iid, it in d["ItemParam"].items():
+        effect.setdefault(norm(names.get(iid, "")), it["specialEffectId"])
+    data.weapon_cond = {}
+    for key, w in data.weapons.items():
+        ev = events.get(effect.get(norm(w.get("name", key)), -1))
+        if ev is None:
+            continue
+        rates, cycle = [], None
+        for ins in ev.instructions:
+            words = ins.words()
+            if (ins.bank, ins.index) == ATK_RATE_SOULS and len(words) >= 6 and words[5][1] <= 0:
+                rates.append((words[0][2] & 0xFF, words[1][0], words[2][0], words[3][1], words[4][1]))
+            elif (ins.bank, ins.index) == ATK_RATE_COUNT and len(words) >= 4 and words[3][1] <= 0:
+                packed = words[0][2]
+                rates.append((packed & 0xFF, packed >> 8 & 0xFF, packed >> 16 & 0xFF, words[1][1], words[2][1]))
+            elif (ins.bank, ins.index) == ATK_ADD_CYCLE and len(words) >= 4 and words[3][0] == 1 \
+                    and words[0][2] >> 16 & 0xFF == 0:
+                cycle = (words[0][2] & 0xFF, words[0][2] >> 8 & 0xFF, words[1][1], words[2][1])
+        if rates or cycle:
+            data.weapon_cond[key] = {"rates": rates, "cycle": cycle}
+    return "conditional attack from SpEffectWeapon.emevd: " + ", ".join(
+        f"{data.weapons[k]['name']} " + "+".join(
+            [CONDITION_SELECTOR.get(r[0], "souls") for r in c["rates"]] + (["cycle"] if c["cycle"] else []))
+        for k, c in data.weapon_cond.items())
+
+
+def _weapon_cond(data: Data, weapon: str) -> dict:
+    """data.weapon_cond[weapon], or {} -- also for the selftest's fake Data, which has none."""
+    return getattr(data, "weapon_cond", {}).get(weapon) or {}
+
+
+def condition_rate(data: Data, weapon: str) -> float:
+    """What `weapon`'s equip effect multiplies the stat-scaling part of its attack by, at
+    data.conditions: 1.0 for a weapon with none. EXE (0x14021f1e0, 0x14021f570): the condition x
+    reads at_low at or below low, at_high at or above high, and the straight line between, except
+    that low == high or at_low == at_high is at_low throughout; several effects multiply together
+    (0x1402210e0). The attack builder 0x140391fe0 multiplies its whole bonus vector by this -- the
+    stat terms and the hand's SpEffect adds (a ring's flat add), not the weapon's base -- before
+    `AR = (bonus + base) x rate` (0x140391020, 0x141b8ba3d)."""
+    rate = 1.0
+    for selector, low, high, at_low, at_high in (_weapon_cond(data, weapon)).get("rates", ()):
+        x = data.conditions[CONDITION_SELECTOR.get(selector, "souls")]
+        if low == high or at_low == at_high or x <= low:
+            rate *= at_low
+        elif x >= high:
+            rate *= at_high
+        else:
+            rate *= at_low + (x - low) / (high - low) * (at_high - at_low)
+    return rate
+
+
+def cycle_add(data: Data, weapon: str) -> float:
+    """The flat physical attack `weapon`'s equip effect adds at data.conditions' NG cycle: 0 below
+    `first`, then at_first rising in a straight line to at_last at `last` and held there (EXE
+    0x14021b2f0). The game adds it at the hit, before defense (0x1401374a4), and the status screen
+    does not show it; the recommender adds it to physical attack rating, which is what its damage
+    reads. INFERRED: that it is not also multiplied by the infusion's physical rate."""
+    c = _weapon_cond(data, weapon).get("cycle")
+    if not c:
+        return 0.0
+    first, last, at_first, at_last = c
+    n = data.conditions["cycle"]
+    if n < first:
+        return 0.0
+    if last <= first:
+        return at_last
+    return at_first + (at_last - at_first) * min(1.0, max(0.0, (n - first) / (last - first)))
 
 
 def regulation_reach(data: Data, d: dict, names: dict) -> str:
@@ -1821,7 +1926,10 @@ def cast_power(data: Data, catalyst: str, element: str, stats: dict, inf: str = 
     cast with this catalyst attacks with this plus its damage row's flat damage (spell_attack)."""
     cat = data.catalysts[catalyst]
     base, scale = cat.get("infused", {}).get(inf, cat["power"])[element]
-    return base + scale * element_bonus(data, element, stats)
+    # A spell is built by the weapon attack builder with the catalyst (docs/DS2-DPS-MECHANICS.md),
+    # so the catalyst's equip effect scales its stat term as attack_rating's: Staff of Amana, Dark
+    # Pyromancy Flame.
+    return base + scale * element_bonus(data, element, stats) * condition_rate(data, catalyst)
 
 
 def element_bonus(data: Data, element: str, stats: dict) -> float:
@@ -2295,15 +2403,21 @@ def attack_rating(data: Data, weapon: str, inf: str, eff: dict, rings=()) -> dic
     row = data.weapons[weapon]["infusions"].get(inf) or {}
     atk, sc = row.get("atk") or {}, row.get("atkScale") or {}
     add = ring_attack_add(data, row, rings) if rings else {}
+    # condition_rate scales every term but the base; x 1.0 is exact, so a weapon without an equip
+    # effect sums the same floats it always has.
+    r = condition_rate(data, weapon)
     out = {}
     if atk.get("physical"):
-        v = (atk["physical"] + add.get("physical", 0)
-             + sc.get("strength", 0) * _tab(data, "physicalATKBonus", eff["strength"])
-             + sc.get("dexterity", 0) * _tab(data, "physicalATKBonus", eff["dexterity"]))
+        v = (atk["physical"] + add.get("physical", 0) * r
+             + sc.get("strength", 0) * _tab(data, "physicalATKBonus", eff["strength"]) * r
+             + sc.get("dexterity", 0) * _tab(data, "physicalATKBonus", eff["dexterity"]) * r)
         if inf == "Enchanted" and sc.get("magic"):
-            v += sc["magic"] * _tab(data, "magicATKBonus", eff["intelligence"])
+            v += sc["magic"] * _tab(data, "magicATKBonus", eff["intelligence"]) * r
         if inf == "Mundane":
-            v += sc.get("modifier", 1) * _tab(data, "mundaneATKBonus", min(eff.values()))
+            v += sc.get("modifier", 1) * _tab(data, "mundaneATKBonus", min(eff.values())) * r
+        c = cycle_add(data, weapon)
+        if c:
+            v += c
         out["physical"] = int(v)
     feed = {"magic": ("magicATKBonus", eff["intelligence"]),
             "fire": ("fireATKBonus", eff["intelligence"] + eff["faith"]),
@@ -2315,7 +2429,7 @@ def attack_rating(data: Data, weapon: str, inf: str, eff: dict, rings=()) -> dic
         # dark is this: darkRate 100, maximumDark 0, dark coefficient 0.4. Enchanted's "magic" is
         # its INT term on physical, above, unless the row also has a magic base.
         if atk.get(k) or ((row.get("rate") or {}).get(k) and sc.get(k) and not (inf == "Enchanted" and k == "magic")):
-            out[k] = int(atk.get(k, 0) + add.get(k, 0) + sc.get(k, 0) * _tab(data, tab, i))
+            out[k] = int(atk.get(k, 0) + add.get(k, 0) * r + sc.get(k, 0) * _tab(data, tab, i) * r)
     return out
 
 
@@ -7116,8 +7230,9 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             equip-load, attunement-slots,
 #                                                             max-stamina or cast-bonus table
 #   W key name class flags weight require ha1h ha2h counter   a weapon; flags: S shield, C catalyst,
-#     damagescale                                             H high-stamina R1; require: stat:value,..;
-#                                                             damagescale: WeaponParam.damageScale
+#     damagescale rates cycle                                 H high-stamina R1; require: stat:value,..;
+#                                                             damagescale: WeaponParam.damageScale;
+#                                                             rates, cycle: _cond_fields
 #   I code atk(7) scale(9) rate(5)                            one infusion of the last W; rate: its
 #                                                             moved rates in DMG order (0 unread)
 #   L grip t:mv:type:lower[:flat(5)] ...                      the last W's R1 chain, grip 1 or 2;
@@ -7148,10 +7263,10 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #   Z key name slots category require                         a spell: its attunement slot cost,
 #                                                             SpellParam category (-1 unread) and
 #                                                             INT/FTH requirements (spell_floors)
-#   Y key name categories require base:scale(4)               a catalyst (regulation_catalysts):
+#   Y key name categories require base:scale(4) rates         a catalyst (regulation_catalysts):
 #                                                             the categories it casts, one digit
 #                                                             each, and magic fire lightning dark
-#                                                             cast power terms
+#                                                             cast power terms; rates: the W's
 #   X bracket stat-brackets ring,ring.. weapon:code,..        one corpus build
 #   RG ammo kind hand volley                                  the last W is a bow, greatbow or
 #                                                             crossbow (data.ranged): the arrowType
@@ -7253,7 +7368,7 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 26"
+BACKEND_FORMAT = "ds2-build-recommender-data 27"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -7276,6 +7391,15 @@ def _num(v) -> str:
         return repr(v)
     assert isinstance(v, int) and not isinstance(v, bool), v
     return str(v)
+
+
+def _cond_fields(data: Data, key: str) -> list[str]:
+    """data.weapon_cond[key] as two fields: its attack rates, `selector:low:high:at_low:at_high`
+    comma-separated, and its NG-cycle add, `first:last:at_first:at_last`; `-` for none."""
+    c = data.weapon_cond.get(key) or {}
+    rates = ",".join(":".join(map(_num, (s, lo, hi, float(a), float(b)))) for s, lo, hi, a, b in c.get("rates", ()))
+    cyc = c.get("cycle")
+    return [rates or "-", ":".join(map(_num, (cyc[0], cyc[1], float(cyc[2]), float(cyc[3])))) if cyc else "-"]
 
 
 def _stat_pairs(d: dict) -> str:
@@ -7453,7 +7577,8 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
     for key, c in data.catalysts.items():
         out.append("\t".join(["Y", key, data.weapons[key]["name"], "".join(map(str, c["categories"])),
                               _stat_pairs(c["require"]) or "-",
-                              *(f"{_num(float(b))}:{_num(float(s))}" for b, s in c["power"].values())]))
+                              *(f"{_num(float(b))}:{_num(float(s))}" for b, s in c["power"].values()),
+                              _cond_fields(data, key)[0]]))
     for key, w in data.weapons.items():
         flags = ("S" if w.get("isShield") else "") + ("C" if CATALYST.search(key) else "") \
             + ("H" if r1.get(key, 0) >= cut else "")
@@ -7462,7 +7587,7 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                               _num(w.get("weight", 0)), _stat_pairs(w.get("require") or {}) or "-",
                               _num(float(hyperarmor(attacks, rates, w["name"], False))),
                               _num(float(hyperarmor(attacks, rates, w["name"], True))), _num(ctr),
-                              _num(float(data.damage_scale.get(key, 1.0)))]))
+                              _num(float(data.damage_scale.get(key, 1.0))), *_cond_fields(data, key)]))
         for inf, row in w["infusions"].items():
             atk, sc = row.get("atk") or {}, row.get("atkScale") or {}
             rate = row.get("rate") or {}
@@ -8731,6 +8856,15 @@ def selftest() -> int:
     RINGS = type("Rings", (), {"rings": {k: {"group": g} for k, g in [
         ("Third_Dragon_Ring", "Dragon_Ring"), ("Agape_Ring", "Agape_Ring"), ("Ring_of_Blades", "Ring_of_Blades"),
         ("Ring_of_Blades_2", "Ring_of_Blades"), ("Flynns_Ring", "Flynns_Ring"), ("Life_Ring", "Life_Ring")]}})
+    f32 = lambda x: struct.unpack("<f", struct.pack("<f", x))[0]  # noqa: E731 -- the emevd's floats
+    cond = {"Forlorn": {"rates": [(1, 0, 10, f32(0.1), 1.0)], "cycle": None},
+            "Rulers": {"rates": [(0, 10000, 1000000, f32(0.85), f32(1.3))], "cycle": None},
+            "Sinners": {"rates": [(2, 0, 30, 1.0, 0.0)], "cycle": None},
+            "Nil": {"rates": [], "cycle": (2, 10, 5.0, 100.0)}}
+
+    def COND(**at):  # noqa: N802 -- a fake Data with only what condition_rate and cycle_add read
+        return type("Cond", (), {"weapon_cond": cond, "conditions": {**CONDITIONS, **at}})
+
     cases = [
         ("trident R2 = opening hit + 3 spin ticks", attack_hits(A[("channelerstrident", "Single1HandStrong1st")]), 4),
         ("trident R1 = one hit", attack_hits(A[("channelerstrident", "Single1HandNormal1st")]), 1),
@@ -8749,6 +8883,19 @@ def selftest() -> int:
         # 30% + 50% per unit of shortfall, all of it past a full unit
         # a piece's own defense under unmet requirements (PlayerLackOfStatsParam rows 15-17): all of
         # it when met, 70% less 20% per unit of shortfall, half past a full unit
+        # equip-effect conditions, at the regulation's own arguments (SpEffectWeapon.emevd events
+        # 3080000, 1900000, 5295010, 5050000)
+        ("Forlorn at hollow 0: x0.1", round(condition_rate(COND(hollow=0), "Forlorn"), 6), 0.1),
+        ("Forlorn at hollow 5: x0.55", round(condition_rate(COND(hollow=5), "Forlorn"), 6), 0.55),
+        ("Forlorn at hollow 12: x1.0", condition_rate(COND(hollow=12), "Forlorn"), 1.0),
+        ("Ruler's at 340k souls: x1.0", round(condition_rate(COND(souls=340000), "Rulers"), 6), 1.0),
+        ("Ruler's at no souls: x0.85", round(condition_rate(COND(), "Rulers"), 6), 0.85),
+        ("Lost Sinner's at 15 sin: x0.5", condition_rate(COND(sin=15), "Sinners"), 0.5),
+        ("no equip effect: x1.0", condition_rate(COND(hollow=3), "Dagger"), 1.0),
+        ("Curved Nil at NG: +0", cycle_add(COND(), "Nil"), 0.0),
+        ("Curved Nil at NG+: +5", cycle_add(COND(cycle=2), "Nil"), 5.0),
+        ("Curved Nil at NG+4: +52.5", cycle_add(COND(cycle=6), "Nil"), 52.5),
+        ("Curved Nil at NG+12: +100", cycle_add(COND(cycle=14), "Nil"), 100.0),
         ("defense lack: requirements met", defense_lack_factor({"strength": 20}, {"strength": 20}), 1.0),
         ("defense lack: STR 10 of 20", defense_lack_factor({"strength": 20}, {"strength": 10}), 0.6),
         ("defense lack: floor 0.5", defense_lack_factor({"strength": 20, "dexterity": 20},
@@ -9043,6 +9190,11 @@ def main() -> int:
     ap.add_argument("--one-hand", action="store_true", help="with --weapons-for: only weapons usable one-handed (drop 2H-only)")
     ap.add_argument("--agl", type=int, default=0, help="optional hard AGL floor for --minimum (default none: AGL is a slider output)")
     ap.add_argument("--sl", type=int, help="with --minimum: clamp SL here and show how free stats can spread")
+    for name, what in (("hollow", "hollow level (Forlorn weapons, Dark Pyromancy Flame, Staff of Amana)"),
+                       ("souls", "souls held (Ruler's Sword)"), ("sin", "sin points (Lost Sinner's Sword)"),
+                       ("cycle", "NG cycle, NG = 1 (Curved Nil Greatsword)")):
+        ap.add_argument(f"--{name}", type=int, default=CONDITIONS[name],
+                        help=f"the wielder's {what}, which a weapon's equip effect reads (default {CONDITIONS[name]})")
     ap.add_argument("--json", action="store_true", help="with --minimum: also print the options as JSON; with --best-weapons: print only JSON")
     ap.add_argument("--lam", type=float, default=50.0, help="EASE L2 penalty")
     ap.add_argument("--site-numbers", action="store_true",
@@ -9068,6 +9220,8 @@ def main() -> int:
     data = Data(json.loads(sp_json.read_text()), json.loads(mm_json.read_text()))
     if not a.site_numbers:
         print(apply_regulation(data), file=sys.stderr)
+    # --export-backend's fixtures are the default wielder's: the Rust port's CorpusBackend starts there
+    data.conditions = dict(CONDITIONS) if a.export_backend else {k: getattr(a, k) for k in CONDITIONS}
     if a.start_class and a.start_class.lower() not in data.classes:
         ap.error(f"unknown class {a.start_class!r}: one of {', '.join(data.classes)}")
     spells = []

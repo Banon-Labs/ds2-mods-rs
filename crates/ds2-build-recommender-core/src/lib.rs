@@ -34,6 +34,6 @@ pub use backend::{
     Answer, Calibration, CatalystPick, GeneratedBuild, OptimizedBuild, Outcome, RecommenderBackend,
     ResultRow, SpellRow, StubBackend, ask, generate, to_import,
 };
-pub use corpus::CorpusBackend;
+pub use corpus::{Conditions, CorpusBackend};
 pub use model::{Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS, StatusFilter};
 pub use weapons::{WeaponKind, WeaponRow};
