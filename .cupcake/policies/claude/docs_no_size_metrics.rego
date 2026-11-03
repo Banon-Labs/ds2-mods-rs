@@ -203,7 +203,21 @@ violation contains {"kind": "a test count", "line": trim_space(line)} if {
 # `N bytes` is the one shape that is sometimes a real ABI fact (a struct's size, an AES block, a
 # Steam ID's length) and sometimes an artifact's bulk. It is banned only when the same line also
 # names an artifact, which is what separates "the record is 152 bytes" from "the save is 8 bytes".
-artifact_words := `(?i)\b(?:file|files|crate|module|save|log|archive|dll|binary|document|repo|repository)\b`
+#
+# Two shapes are layout, not bulk. Measured 2026-11-02: it refused an EzState bytecode decoder's
+# `/// Binary handlers pop the two operands off the stack, 16 bytes per value.`
+#   1. "binary" followed by an operator word (`binary operator`, `binary handlers`, `binary ops`)
+#      is a two-operand operator, not a build artifact, so it does not count as naming one. Any
+#      other artifact word on the line still does.
+#   2. `N bytes per X` / `N bytes each` is a record's layout -- a stride, a slot width -- which
+#      does not go stale when a file grows. Each count is judged on its own, so a real size beside
+#      a stride (`the save is 8251680 bytes, 16 bytes per entry`) is still refused.
+# Both groups always take part in a match, empty or not, for the same WASM reason as the line count.
+artifact_word_pattern := `(?i)\b(file|files|crate|module|save|log|archive|dll|binary|binaries|document|repo|repository)\b((?:\s+[a-z]+)?)`
+
+binary_operator_words_pattern := `(?i)^\s+(?:operators?|ops?|operations?|operands?|handlers?|opcodes?|instructions?|expressions?|arithmetic|comparisons?)$`
+
+byte_count_pattern := `(?i)\d[\d,_]*\s*bytes\b((?:\s+(?:per|each|apiece)\b)?)`
 
 violation contains {"kind": kind, "line": trim_space(line)} if {
 	some line in doc_lines
@@ -213,8 +227,20 @@ violation contains {"kind": kind, "line": trim_space(line)} if {
 
 violation contains {"kind": "a file size in bytes", "line": trim_space(line)} if {
 	some line in doc_lines
-	regex.match(`(?i)\d[\d,_]*\s*bytes\b`, line)
-	regex.match(artifact_words, line)
+	some m in regex.find_all_string_submatch_n(byte_count_pattern, line, -1)
+	m[1] == ""
+	names_artifact(line)
+}
+
+names_artifact(line) if {
+	some m in regex.find_all_string_submatch_n(artifact_word_pattern, line, -1)
+	not binary_operator(m)
+}
+
+# `m` is [the match, the artifact word, the word after it].
+binary_operator(m) if {
+	lower(m[1]) in {"binary", "binaries"}
+	regex.match(binary_operator_words_pattern, m[2])
 }
 
 deny contains decision if {
