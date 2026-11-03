@@ -859,8 +859,21 @@ function watchSlot() {
 // to 0.01 with +0x38 = 2, which expires into state 3 (leaving) and then 0 (despawn). The setter is
 // FUN_1402521b0(slot, reason) (reason 1 -> 3 s, 2 -> 0.01 s), called only by the manager update
 // FUN_1402540f0 with a reason FUN_140254780 pops for the slot's entity from the dead-notification
-// queue at mgr+0x1c8. Pop it as usual, but hand back 0 for the summoned entity.
+// queue at mgr+0x1c8. Pop it as usual, but hand back 0 for the summoned entity while it is alive.
+// Keeping it after death left a dead summon in the world that blocked resting at a bonfire until a
+// Black Separation Crystal sent it home (user-observed 2026-11-02). Alive means the character the
+// touch returned still has the vtable it had then and HP (+0x168) above 0; with no record (a reload
+// before any summon), keep it as before.
 const KEEP_FROM_DEAD_QUEUE = true;
+function summonAlive() {
+  const s = globalThis.__lastSummoned;
+  if (!s || !globalThis.__lastSummonedVt) return true;
+  try {
+    return s.readPointer().equals(globalThis.__lastSummonedVt) && s.add(0x168).readS32() > 0;
+  } catch (e) {
+    return false;
+  }
+}
 Interceptor.attach(at(0x00254780), {
   onEnter(args) {
     this.on = this.returnAddress.equals(at(0x0025436a));
@@ -871,12 +884,13 @@ Interceptor.attach(at(0x00254780), {
     const reason = ret.toInt32();
     if (reason === 0) return;
     // Measured: once he is up the queue reports him every frame -- log only a change.
-    const key = this.entity + ':' + reason;
+    const keep = KEEP_FROM_DEAD_QUEUE && this.entity === summonEntity() && summonAlive();
+    const key = this.entity + ':' + reason + ':' + keep;
     if (globalThis.__lastLeave !== key) {
       globalThis.__lastLeave = key;
-      send({ family: 'summon-sign', tag: 'phantom.leave_reason', entity: '0x' + (this.entity >>> 0).toString(16), reason, kept: KEEP_FROM_DEAD_QUEUE && this.entity === summonEntity() });
+      send({ family: 'summon-sign', tag: 'phantom.leave_reason', entity: '0x' + (this.entity >>> 0).toString(16), reason, kept: keep });
     }
-    if (KEEP_FROM_DEAD_QUEUE && this.entity === summonEntity()) ret.replace(ptr(0));
+    if (keep) ret.replace(ptr(0));
   },
 });
 // WHY THE SUMMON FAILS (measured: FUN_140415b20 got handle -1 back, so 0x14041e870 returned 0).
@@ -1356,7 +1370,8 @@ function touchSummonLeave(ctx, ret) {
     }
   } catch (e) { phantomType = e.message; }
   send({ family: 'summon-sign', tag: 'touch_summon.ret', ret: ret.toString(), phantomType, spCtrl, cd38: globalThis.__auraCd });
-  globalThis.__lastSummoned = ret;
+  globalThis.__lastSummoned = ptr(ret.toString());
+  try { globalThis.__lastSummonedVt = ret.isNull() ? null : ret.readPointer(); } catch (e) { globalThis.__lastSummonedVt = null; }
   if (summonMode.name === 'mimic') globalThis.__mimicCtrl = ptr(ret.toString());
   // Diff the mimic against the player once it has stood in the world for a few seconds.
   // Measured 2026-11-02: the hollow look FUN_1402026e0 sets in FUN_14035a3d0's onLeave (2) reads 0
