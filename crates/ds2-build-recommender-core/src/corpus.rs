@@ -60,7 +60,7 @@ mod trade;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 26";
+pub const FORMAT: &str = "ds2-build-recommender-data 27";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -312,6 +312,8 @@ struct Catalyst {
     require: Vec<(usize, i32)>,
     /// Per element, magic, fire, lightning, dark: base and scale.
     power: [(f64, f64); 4],
+    /// Its equip effect's attack rates (no catalyst has a cycle add).
+    cond: Cond,
 }
 
 /// The script's `SPELL_SCHOOLS`: per spell category, its label and the element (an index into
@@ -357,6 +359,8 @@ struct InfusionRow {
     /// The moved rates, physical, magic, fire, lightning, dark: what a ring's flat attack add is
     /// multiplied by (the script's `ring_attack_add`); `0` where the regulation was not read.
     rate: [f64; 5],
+    /// Its weapon's [`Weapon::cond`], here because [`CorpusBackend::attack_rating`] reads the row.
+    cond: Cond,
 }
 
 /// One hit of an R1 chain.
@@ -373,6 +377,117 @@ struct Hit {
     /// The damage row's flat attack per type, in [`Ar`] order, which the attack builder adds to
     /// the weapon's before the defense: the script's `regulation_hit_flat`.
     flat: [f64; 5],
+}
+
+/// The wielder's state a weapon's equip effect reads: the script's `data.conditions`. The default
+/// is the script's `CONDITIONS`, a human holding no souls, with no sin, in the first playthrough.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Conditions {
+    /// Hollow level: the Forlorn weapons, Dark Pyromancy Flame and Staff of Amana read it.
+    pub hollow: i64,
+    /// Souls held: the Ruler's Sword reads it.
+    pub souls: i64,
+    /// Sin points: the Lost Sinner's Sword reads it.
+    pub sin: i64,
+    /// NG cycle, NG = 1: the Curved Nil Greatsword reads it.
+    pub cycle: i64,
+}
+
+impl Default for Conditions {
+    fn default() -> Self {
+        Self {
+            hollow: 0,
+            souls: 0,
+            sin: 0,
+            cycle: 1,
+        }
+    }
+}
+
+/// `(selector, low, high, at_low, at_high)`: one rate the script's `condition_rate` multiplies.
+type Rate = (i64, i64, i64, f64, f64);
+
+/// `(first, last, at_first, at_last)`: what the script's `cycle_add` adds.
+type CycleAdd = (i64, i64, f64, f64);
+
+/// A weapon's equip effect's conditional attack: the script's `data.weapon_cond` row.
+#[derive(Clone, Debug, Default)]
+struct Cond {
+    rates: Vec<Rate>,
+    cycle: Option<CycleAdd>,
+}
+
+impl Cond {
+    /// The script's `condition_rate`.
+    fn rate(&self, at: &Conditions) -> f64 {
+        let mut rate = 1.0;
+        for &(selector, low, high, at_low, at_high) in &self.rates {
+            let x = match selector {
+                1 => at.hollow,
+                2 => at.sin,
+                _ => at.souls,
+            };
+            rate *= if low == high || at_low == at_high || x <= low {
+                at_low
+            } else if x >= high {
+                at_high
+            } else {
+                at_low + (x - low) as f64 / (high - low) as f64 * (at_high - at_low)
+            };
+        }
+        rate
+    }
+
+    /// The script's `cycle_add`.
+    fn cycle_add(&self, at: &Conditions) -> f64 {
+        let Some((first, last, at_first, at_last)) = self.cycle else {
+            return 0.0;
+        };
+        if at.cycle < first {
+            return 0.0;
+        }
+        if last <= first {
+            return at_last;
+        }
+        let frac = ((at.cycle - first) as f64 / (last - first) as f64).clamp(0.0, 1.0);
+        at_first + (at_last - at_first) * frac
+    }
+
+    /// Parse [`Cond::rates`] from a `W` or `Y` record's field.
+    fn parse_rates(text: Option<&str>, line: usize) -> Result<Vec<Rate>, String> {
+        match text {
+            None | Some("-") => Ok(Vec::new()),
+            Some(text) => text
+                .split(',')
+                .map(|rate| {
+                    let mut parts = rate.split(':');
+                    Ok((
+                        long(parts.next(), line)?,
+                        long(parts.next(), line)?,
+                        long(parts.next(), line)?,
+                        float(parts.next(), line)?,
+                        float(parts.next(), line)?,
+                    ))
+                })
+                .collect(),
+        }
+    }
+
+    /// Parse [`Cond::cycle`] from a `W` record's field.
+    fn parse_cycle(text: Option<&str>, line: usize) -> Result<Option<CycleAdd>, String> {
+        match text {
+            None | Some("-") => Ok(None),
+            Some(text) => {
+                let mut parts = text.split(':');
+                Ok(Some((
+                    long(parts.next(), line)?,
+                    long(parts.next(), line)?,
+                    float(parts.next(), line)?,
+                    float(parts.next(), line)?,
+                )))
+            }
+        }
+    }
 }
 
 /// A weapon, with everything the ranking reads.
@@ -398,6 +513,8 @@ struct Weapon {
     /// `WeaponParam.damageScale`, which every hit's damage is multiplied by after the defense:
     /// the script's `regulation_damage_scale`.
     damage_scale: f64,
+    /// Its equip effect's conditional attack, which each of `infusions` carries a copy of.
+    cond: Cond,
     infusions: Vec<InfusionRow>,
     /// The R1 chain one- and two-handed, empty where there is no timing.
     timeline: [Vec<Hit>; 2],
@@ -780,6 +897,8 @@ pub struct CorpusBackend {
     /// The script's `data.ring_attack`, in its order: a ring (an index into `rings`) and its flat
     /// attack adds, physical, magic, fire, lightning, dark.
     ring_attack: Vec<(usize, [f64; 5])>,
+    /// The wielder's state weapons' equip effects read: [`CorpusBackend::set_conditions`].
+    conditions: Conditions,
     ring_effects: Vec<RingEffect>,
     /// The script's `ring_gear`, in its order: every ring the optimizer counts.
     gear: Vec<RingGear>,
@@ -840,6 +959,12 @@ fn bad(line: usize, what: &str) -> String {
 }
 
 fn int(field: Option<&str>, line: usize) -> Result<i32, String> {
+    field
+        .and_then(|text| text.parse().ok())
+        .ok_or_else(|| bad(line, "expected an integer"))
+}
+
+fn long(field: Option<&str>, line: usize) -> Result<i64, String> {
     field
         .and_then(|text| text.parse().ok())
         .ok_or_else(|| bad(line, "expected an integer"))
@@ -920,6 +1045,13 @@ impl CorpusBackend {
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
         Self::parse(&text)
+    }
+
+    /// The wielder's state every later answer reads weapons' equip effects at: the script's
+    /// `--hollow`, `--souls`, `--sin` and `--cycle`. A parsed file starts at
+    /// [`Conditions::default`].
+    pub fn set_conditions(&mut self, conditions: Conditions) {
+        self.conditions = conditions;
     }
 
     /// Parse a data file's text.
@@ -1027,6 +1159,10 @@ impl CorpusBackend {
                 ];
                 let counter = float(Some(next("counter")?), line)?;
                 let damage_scale = float(Some(next("damage scale")?), line)?;
+                let cond = Cond {
+                    rates: Cond::parse_rates(Some(next("attack rates")?), line)?,
+                    cycle: Cond::parse_cycle(Some(next("cycle add")?), line)?,
+                };
                 self.weapons.push(Weapon {
                     key,
                     name,
@@ -1040,6 +1176,7 @@ impl CorpusBackend {
                     hyperarmor,
                     counter,
                     damage_scale,
+                    cond,
                     infusions: Vec::new(),
                     timeline: [Vec::new(), Vec::new()],
                     status: Default::default(),
@@ -1099,16 +1236,17 @@ impl CorpusBackend {
                 for value in &mut rate {
                     *value = float(fields.next(), line)?;
                 }
-                self.weapons
+                let weapon = self
+                    .weapons
                     .last_mut()
-                    .ok_or_else(|| bad(line, "an infusion before any weapon"))?
-                    .infusions
-                    .push(InfusionRow {
-                        infusion,
-                        atk,
-                        scale,
-                        rate,
-                    });
+                    .ok_or_else(|| bad(line, "an infusion before any weapon"))?;
+                weapon.infusions.push(InfusionRow {
+                    infusion,
+                    atk,
+                    scale,
+                    rate,
+                    cond: weapon.cond.clone(),
+                });
             }
             "L" => {
                 let grip = match next("grip")? {
@@ -1422,11 +1560,19 @@ impl CorpusBackend {
                         .ok_or_else(|| bad(line, "base:scale"))?;
                     *terms = (float(Some(base), line)?, float(Some(scale), line)?);
                 }
+                let cond = Cond {
+                    rates: Cond::parse_rates(
+                        Some(fields.next().ok_or_else(|| bad(line, "attack rates"))?),
+                        line,
+                    )?,
+                    cycle: None,
+                };
                 self.catalysts.push(Catalyst {
                     name,
                     categories,
                     require,
                     power,
+                    cond,
                 });
             }
             "X" => {
@@ -1716,17 +1862,24 @@ impl CorpusBackend {
         let (atk, sc) = (&row.atk, &row.scale);
         let add = self.ring_attack_add(row, rings);
         let t = &self.tables;
+        // The script's `condition_rate`: x 1.0 is exact, so a weapon without an equip effect sums
+        // the same floats.
+        let r = row.cond.rate(&self.conditions);
         if atk[ATK_PHYSICAL] != 0.0 {
             let mut v = atk[ATK_PHYSICAL]
-                + add[ATK_PHYSICAL]
-                + sc[SCALE_STR] * t.physical.at(eff[STR])
-                + sc[SCALE_DEX] * t.physical.at(eff[DEX]);
+                + add[ATK_PHYSICAL] * r
+                + sc[SCALE_STR] * t.physical.at(eff[STR]) * r
+                + sc[SCALE_DEX] * t.physical.at(eff[DEX]) * r;
             if row.infusion == Infusion::Enchanted && sc[SCALE_MAGIC] != 0.0 {
-                v += sc[SCALE_MAGIC] * t.magic.at(eff[INT]);
+                v += sc[SCALE_MAGIC] * t.magic.at(eff[INT]) * r;
             }
             if row.infusion == Infusion::Mundane {
                 let least = eff.iter().copied().min().unwrap_or(0);
-                v += sc[SCALE_MODIFIER] * t.mundane.at(least);
+                v += sc[SCALE_MODIFIER] * t.mundane.at(least) * r;
+            }
+            let c = row.cond.cycle_add(&self.conditions);
+            if c != 0.0 {
+                v += c;
             }
             out[0] = Some(v.trunc());
         }
@@ -1745,8 +1898,9 @@ impl CorpusBackend {
                 && sc[2 + element] != 0.0
                 && !(row.infusion == Infusion::Enchanted && element == 0);
             if base != 0.0 || rated {
-                out[1 + element] =
-                    Some((base + add[1 + element] + sc[2 + element] * table.at(index)).trunc());
+                out[1 + element] = Some(
+                    (base + add[1 + element] * r + sc[2 + element] * table.at(index) * r).trunc(),
+                );
             }
         }
         out
@@ -2585,7 +2739,7 @@ impl CorpusBackend {
             2 => fth,
             _ => int.min(fth),
         };
-        base + scale * self.tables.cast[element].at(at)
+        base + scale * self.tables.cast[element].at(at) * catalyst.cond.rate(&self.conditions)
     }
 
     /// The script's `best_catalysts`: for each spell category `spells` need, in category order,
@@ -4785,6 +4939,70 @@ impl RecommenderBackend for CorpusBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The script's selftest's equip-effect cases, at the regulation's own arguments.
+    #[test]
+    fn conditions_are_the_scripts() {
+        let at = |f: fn(&mut Conditions)| {
+            let mut c = Conditions::default();
+            f(&mut c);
+            c
+        };
+        let rate = |rates: Vec<Rate>| Cond { rates, cycle: None };
+        let forlorn = rate(vec![(1, 0, 10, f64::from(0.1_f32), 1.0)]);
+        let rulers = rate(vec![(
+            0,
+            10_000,
+            1_000_000,
+            f64::from(0.85_f32),
+            f64::from(1.3_f32),
+        )]);
+        let sinners = rate(vec![(2, 0, 30, 1.0, 0.0)]);
+        let nil = Cond {
+            rates: Vec::new(),
+            cycle: Some((2, 10, 5.0, 100.0)),
+        };
+        let near = |got: f64, want: f64| (got - want).abs() < 1e-6;
+        assert!(near(forlorn.rate(&Conditions::default()), 0.1));
+        assert!(near(forlorn.rate(&at(|c| c.hollow = 5)), 0.55));
+        assert_eq!(forlorn.rate(&at(|c| c.hollow = 12)), 1.0);
+        assert!(near(rulers.rate(&at(|c| c.souls = 340_000)), 1.0));
+        assert!(near(rulers.rate(&Conditions::default()), 0.85));
+        assert_eq!(sinners.rate(&at(|c| c.sin = 15)), 0.5);
+        assert_eq!(Cond::default().rate(&at(|c| c.hollow = 3)), 1.0);
+        assert_eq!(nil.cycle_add(&Conditions::default()), 0.0);
+        assert_eq!(nil.cycle_add(&at(|c| c.cycle = 2)), 5.0);
+        assert_eq!(nil.cycle_add(&at(|c| c.cycle = 6)), 52.5);
+        assert_eq!(nil.cycle_add(&at(|c| c.cycle = 14)), 100.0);
+    }
+
+    /// The Scythe of the Forlorn's uninfused attack at STR 40 DEX 40 INT 10 FTH 10, as the script's
+    /// `--best-infusion Scythe_of_the_Forlorn` prints it at `--hollow 0` and `--hollow 10`.
+    #[test]
+    fn hollowing_scales_the_forlorn_scythe_as_the_script_does() {
+        let mut backend = with_and_without_trades().0.clone();
+        let scythe = backend
+            .weapons
+            .iter()
+            .find(|weapon| weapon.key == "Scythe_of_the_Forlorn")
+            .expect("the fixture has the scythe")
+            .clone();
+        let row = scythe.infusion(Infusion::None);
+        let mut stats = [0; STAT_COUNT];
+        (stats[STR], stats[DEX], stats[INT], stats[FTH]) = (40, 40, 10, 10);
+        assert_eq!(
+            backend.attack_rating(row, &stats, &[]),
+            [Some(219.0), None, None, None, Some(73.0)]
+        );
+        backend.set_conditions(Conditions {
+            hollow: 10,
+            ..Conditions::default()
+        });
+        assert_eq!(
+            backend.attack_rating(row, &stats, &[]),
+            [Some(304.0), None, None, None, Some(102.0)]
+        );
+    }
 
     #[test]
     fn brackets_are_the_scripts() {
