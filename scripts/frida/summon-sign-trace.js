@@ -1365,6 +1365,8 @@ function touchSummonLeave(ctx, ret) {
   if (summonMode.name === 'mimic' && globalThis.__mimicDiff) {
     setTimeout(() => {
       try { applyHollowLook(ret); } catch (e) { send({ family: 'summon-sign', tag: 'mimic.hollow_look', error: e.message }); }
+      try { mimicHp(ret); } catch (e) { send({ family: 'summon-sign', tag: 'mimic.hp_set', error: e.message }); }
+      if (globalThis.__mimicHpReport) globalThis.__mimicHpReport('mimic.hp_set');
       globalThis.__mimicDiff();
     }, 5000);
   }
@@ -1940,3 +1942,37 @@ globalThis.__forceHumanCb = new NativeCallback((ctrl) => {
   }
 }, 'void', ['pointer']);
 Interceptor.replace(HOLLOW_FORCE_HUMAN, globalThis.__forceHumanCb);
+
+// The hollowing HP cap FUN_140202ca0 sets ctrl +0x174 = ceil(+0x170 * FUN_140202820(ctrl)); that
+// factor is 1.0 unless the 5-byte row for type [ctrl+0x54] in the table at 0x1410bfff3 is non-zero.
+// Once per load, read both characters' HP fields, their type bytes and the factor.
+const hollowHpFactor = new NativeFunction(at(0x00202820), 'float', ['pointer']);
+{
+  const hp = (c) => ({ t54: c.add(0x54).readS8(), chrType: c.add(0xb0).readPointer().add(0x3c).readS8(),
+    hp: [0x168, 0x16c, 0x170, 0x174].map((o) => c.add(o).readS32()), factor: hollowHpFactor(c),
+    level: c.add(0x490).readPointer().add(0x1ac).readS8() });
+  const report = (tag) => {
+    try {
+      send({ family: 'summon-sign', tag, player: hp(playerCtrl()),
+        npc: globalThis.__mimicCtrl ? hp(globalThis.__mimicCtrl) : null });
+    } catch (e) {
+      send({ family: 'summon-sign', tag, error: e.message });
+    }
+  };
+  globalThis.__mimicHpReport = report;
+  report('mimic.hp');
+  if (globalThis.__mimicCtrl) {
+    try { mimicHp(globalThis.__mimicCtrl); } catch (e) { send({ family: 'summon-sign', tag: 'mimic.hp_set', error: e.message }); }
+    report('mimic.hp_set');
+    setTimeout(() => report('mimic.hp_later'), 10000);
+  }
+}
+// Measured 2026-11-02: the mimic has Ruined Aflis's 5070 HP and type [+0x54] 5, whose row turns the
+// cap off, while the player has 274 of 546 at hollow level 12 (factor 0.5). Give it the player's
+// max and capped max, and start it at that cap.
+function mimicHp(npc) {
+  const pc = playerCtrl();
+  npc.add(0x170).writeS32(pc.add(0x170).readS32());
+  npc.add(0x174).writeS32(pc.add(0x174).readS32());
+  npc.add(0x168).writeS32(pc.add(0x174).readS32());
+}
