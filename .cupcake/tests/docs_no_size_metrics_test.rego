@@ -208,6 +208,54 @@ test_allow_abi_size_in_a_doc_comment_with_no_artifact_word if {
 	))
 }
 
+# Measured 2026-11-02: refused on an EzState bytecode decoder's doc comment. "Binary" there is a
+# two-operand operator, not a build artifact, and "16 bytes per value" is the stack slot's layout.
+test_allow_binary_operator_with_a_per_value_layout if {
+	not denied(edit_event(
+		"crates/ds2-ezstate/src/lib.rs",
+		"/// Binary handlers pop the two operands off the stack, 16 bytes per value.",
+	))
+}
+
+test_allow_binary_operator_beside_a_record_size if {
+	not denied(write_event(
+		"docs/EZSTATE.md",
+		"A binary operator pops two values; each stack entry is 16 bytes.",
+	))
+}
+
+test_allow_binary_handlers_pop_two_values if {
+	not denied(edit_event(
+		"crates/ds2-ezstate/src/lib.rs",
+		"/// The binary handlers pop two values, and a value is 16 bytes.",
+	))
+}
+
+test_allow_per_entry_layout_on_a_line_naming_an_artifact if {
+	not denied(edit_event(
+		"crates/ds2-sl2-core/src/lib.rs",
+		"/// The save's slot table is 0x10 bytes per entry.",
+	))
+}
+
+test_deny_byte_size_of_the_binary if {
+	denied(edit_event("crates/ds2-loader/src/lib.rs", "/// The binary is 8251680 bytes."))
+}
+
+test_deny_byte_size_of_a_file_beside_a_binary_operator if {
+	denied(edit_event(
+		"crates/ds2-ezstate/src/lib.rs",
+		"/// The binary operator table sits in a file of 4096 bytes.",
+	))
+}
+
+test_deny_artifact_size_beside_a_per_entry_layout if {
+	denied(edit_event(
+		"crates/ds2-sl2-core/src/lib.rs",
+		"/// The save is 8251680 bytes, 16 bytes per entry.",
+	))
+}
+
 test_allow_hex_offsets if {
 	not denied(edit_event(
 		"crates/ds2-rva/src/lib.rs",
