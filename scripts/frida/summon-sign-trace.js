@@ -1357,6 +1357,7 @@ function touchSummonLeave(ctx, ret) {
   } catch (e) { phantomType = e.message; }
   send({ family: 'summon-sign', tag: 'touch_summon.ret', ret: ret.toString(), phantomType, spCtrl, cd38: globalThis.__auraCd });
   globalThis.__lastSummoned = ret;
+  if (summonMode.name === 'mimic') globalThis.__mimicCtrl = ptr(ret.toString());
   // Diff the mimic against the player once it has stood in the world for a few seconds.
   // Measured 2026-11-02: the hollow look FUN_1402026e0 sets in FUN_14035a3d0's onLeave (2) reads 0
   // again 5 s later, while the level stays 12. Derive it once more after spawn has settled, then diff.
@@ -1910,68 +1911,32 @@ globalThis.__hollowLook = Interceptor.attach(at(0x002026e0), {
     send({ family: 'summon-sign', tag: 'mimic.hollow_look', ...v });
   },
 });
-// One shot per load, while a mimic stands in the world: run the game's own hollow-look derivation on
-// it once more, so mimic.hollow_look shows what that call does to parts +0x2d now.
-// A reload starts a fresh script, so __lastSummoned is gone; fall back to the mimic measured
-// 2026-11-02 (0x7fffeb7b9e60, reused by every mimic summon so far), accepted only as a PlayerCtrl.
+// Why the mimic never looks hollow (read 2026-11-02): every frame 0x14037dc20 sends a PlayerCtrl
+// whose chrType ([ctrl+0xb0]+0x3c) has a non-zero byte 1 in the table at 0x1410c0050 (every type
+// but 0, 18 and 19; the friendly summon is 2), or whose [[ctrl+0xb8]+0x4b8] has bit 0x40, to
+// 0x140203cf0, which writes parts +0x2d = 0. The others go to 0x140203a20, which derives +0x2d from
+// the hollow level. Send the mimic to the second; its chrType stays, since team and AI read it.
+// A reload starts a fresh script, so fall back to the mimic measured 2026-11-02 (0x7fffeb7b9e60,
+// reused by every mimic summon so far), accepted only as a PlayerCtrl.
 {
-  try {
-    const c = globalThis.__lastSummoned || ptr('0x7fffeb7b9e60');
-    if (!c.readPointer().equals(at(0x010e4bb8))) throw new Error('not a PlayerCtrl: ' + c);
-    globalThis.__lastSummoned = c;
-    const parts = asmCtrlOf(c).add(0x28).readPointer();
-    const read = () => [parts.add(0x2d).readU8(), parts.add(0x30).readS32(), c.add(0x490).readPointer().add(0x1ac).readS8()];
-    const before = read();
-    applyHollowLook(c);
-    send({ family: 'summon-sign', tag: 'mimic.hollow_call', vt: rel(c.readPointer()), before, after: read() });
-  } catch (e) {
-    send({ family: 'summon-sign', tag: 'mimic.hollow_look', error: e.message });
-  }
+  const c = globalThis.__mimicCtrl || ptr('0x7fffeb7b9e60');
+  try { if (c.readPointer().equals(at(0x010e4bb8))) globalThis.__mimicCtrl = c; } catch (e) { /* not mapped */ }
 }
-
-// Who puts the mimic's hollow look back to 0: FUN_1403493c0(parts, faceMode, sex, living, faceId)
-// is the one setter of parts +0x2d known ($S/mimic.md). Log each distinct caller for a parts block
-// that is not the player's, with what it writes.
-if (globalThis.__partsSet) globalThis.__partsSet.detach();
-globalThis.__partsSetSeen = {};
-globalThis.__partsSet = Interceptor.attach(at(0x003493c0), {
-  onEnter(args) {
-    let mine = false;
-    try { mine = args[0].equals(asmCtrlOf(playerCtrl()).add(0x28).readPointer()); } catch (e) { /* no player */ }
-    if (mine) return;
-    const from = rel(this.returnAddress);
-    const key = from + ' ' + (args[3].toInt32() & 0xff);
-    if (globalThis.__partsSetSeen[key]) return;
-    globalThis.__partsSetSeen[key] = true;
-    send({ family: 'summon-sign', tag: 'mimic.parts_set', parts: args[0].toString(), faceMode: args[1].toInt32(),
-      sex: args[2].toInt32() & 0xff, living: args[3].toInt32() & 0xff, faceId: args[4].toInt32(), from,
-      backtrace: Thread.backtrace(this.context, Backtracer.ACCURATE).slice(0, 6).map(rel) });
-  },
-});
-
-// Nothing called FUN_1403493c0 or FUN_1402026e0 for the mimic, yet its parts +0x2d returns to 0, so
-// something writes it directly. Guard the page for 90 s, re-arming after every access, and report
-// the first few writes to exactly parts +0x2d with the writing instruction.
-(function watchHollowByte() {
+const HOLLOW_FORCE_HUMAN = at(0x00203cf0);
+const forceHuman = new NativeFunction(HOLLOW_FORCE_HUMAN, 'void', ['pointer']);
+const hollowFromLevel = new NativeFunction(at(0x00203a20), 'void', ['pointer']);
+let mimicHollowSent = false;
+globalThis.__forceHumanCb = new NativeCallback((ctrl) => {
+  if (!globalThis.__mimicCtrl || !ctrl.equals(globalThis.__mimicCtrl)) { forceHuman(ctrl); return; }
+  hollowFromLevel(ctrl);
+  if (mimicHollowSent) return;
+  mimicHollowSent = true;
   try {
-    const c = globalThis.__lastSummoned || ptr('0x7fffeb7b9e60');
-    if (!c.readPointer().equals(at(0x010e4bb8))) return;
-    const target = asmCtrlOf(c).add(0x28).readPointer().add(0x2d);
-    const range = { base: target, size: 1 };
-    let writes = 0;
-    const until = Date.now() + 90000;
-    const arm = () => MemoryAccessMonitor.enable([range], {
-      onAccess(d) {
-        if (d.operation === 'write' && d.address.equals(target) && writes < 4) {
-          writes += 1;
-          send({ family: 'summon-sign', tag: 'mimic.hollow_write', from: rel(d.from), thread: d.threadId });
-        }
-        if (Date.now() < until && writes < 4) setTimeout(arm, 0);
-      },
-    });
-    send({ family: 'summon-sign', tag: 'mimic.hollow_watch', target: target.toString(), value: target.readU8() });
-    arm();
+    const parts = asmCtrlOf(ctrl).add(0x28).readPointer();
+    send({ family: 'summon-sign', tag: 'mimic.hollow_kept', npc: ctrl.toString(), living: parts.add(0x2d).readU8(),
+      level: ctrl.add(0x490).readPointer().add(0x1ac).readS8(), chrType: ctrl.add(0xb0).readPointer().add(0x3c).readS8() });
   } catch (e) {
-    send({ family: 'summon-sign', tag: 'mimic.hollow_watch', error: e.message });
+    send({ family: 'summon-sign', tag: 'mimic.hollow_kept', error: e.message });
   }
-})();
+}, 'void', ['pointer']);
+Interceptor.replace(HOLLOW_FORCE_HUMAN, globalThis.__forceHumanCb);
