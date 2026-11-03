@@ -1363,9 +1363,11 @@ function touchSummonLeave(ctx, ret) {
   // again 5 s later, while the level stays 12. Derive it once more after spawn has settled, then diff.
   globalThis.__hollowLookLast = undefined;
   if (summonMode.name === 'mimic' && globalThis.__mimicDiff) {
+    // A copy: `ret` reads as null once this callback returns (measured: the timer faulted at 0x490).
+    const chr = ptr(ret.toString());
     setTimeout(() => {
-      try { applyHollowLook(ret); } catch (e) { send({ family: 'summon-sign', tag: 'mimic.hollow_look', error: e.message }); }
-      try { mimicHp(ret); } catch (e) { send({ family: 'summon-sign', tag: 'mimic.hp_set', error: e.message }); }
+      try { applyHollowLook(chr); } catch (e) { send({ family: 'summon-sign', tag: 'mimic.hollow_look', error: e.message }); }
+      try { mimicHp(chr); } catch (e) { send({ family: 'summon-sign', tag: 'mimic.hp_set', error: e.message }); }
       if (globalThis.__mimicHpReport) globalThis.__mimicHpReport('mimic.hp_set');
       globalThis.__mimicDiff();
     }, 5000);
@@ -1960,6 +1962,21 @@ const hollowHpFactor = new NativeFunction(at(0x00202820), 'float', ['pointer']);
     }
   };
   globalThis.__mimicHpReport = report;
+  // Once per load: every one of the 52 slots ($S/mimic.md slot-name table) whose entry differs
+  // between the player and the mimic, as [slot, player aux/id, npc aux/id].
+  try {
+    if (globalThis.__mimicCtrl) {
+      const table = (c) => asmCtrlOf(c).add(0x20).readPointer().add(8);
+      const p = table(playerCtrl());
+      const n = table(globalThis.__mimicCtrl);
+      const e = (t, s) => [t.add(s * 0x14).readU32(), t.add(s * 0x14 + 4).readU32()];
+      const slots = Array.from({ length: 52 }, (_, s) => [s, e(p, s), e(n, s)])
+        .filter(([, a, b]) => a[0] !== b[0] || a[1] !== b[1]);
+      send({ family: 'summon-sign', tag: 'mimic.slots', differ: slots });
+    }
+  } catch (err) {
+    send({ family: 'summon-sign', tag: 'mimic.slots', error: err.message });
+  }
   report('mimic.hp');
   if (globalThis.__mimicCtrl) {
     try { mimicHp(globalThis.__mimicCtrl); } catch (e) { send({ family: 'summon-sign', tag: 'mimic.hp_set', error: e.message }); }
