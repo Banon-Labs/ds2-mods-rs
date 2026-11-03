@@ -380,6 +380,34 @@ def cases() -> list[PolicyCase]:
         PolicyCase("deny-pkill-full-match", False, "pkill -f ds2-run.py"),
         PolicyCase("allow-pgrep-exact-name", True, "pgrep -x DarkSoulsII.exe"),
         PolicyCase("allow-unrelated-grep-f", True, "grep -f patterns.txt haystack.txt"),
+        # --- bd_notes_append_only -------------------------------------------------------------
+        # 2026-11-02: `$B update X --notes` ran unblocked because the match needed a literal bd.
+        PolicyCase(
+            "deny-bd-notes-variable-head",
+            False,
+            'B=$HOME/.local/bin/bd; $B update ds2-mods-rs-169u.3 --notes "clean"',
+            expected_text="`bd update --notes` replaces",
+        ),
+        PolicyCase(
+            "deny-bd-notes-quoted-variable-head",
+            False,
+            '"$B" update ds2-mods-rs-169u.3 --notes "clean"',
+            expected_text="`bd update --notes` replaces",
+        ),
+        # The opt-in a deliberate replacement uses, with the rebuilt text read from a file. The
+        # newline inside the quotes survives the engine; the marker must still be read.
+        PolicyCase(
+            "allow-bd-notes-marked-replacement",
+            True,
+            "$HOME/.local/bin/bd update ds2-mods-rs-169u.3 --notes "
+            '"[notes rebuilt from bd history ds2-mods-rs-169u.3]\n$(cat clean.txt)"',
+        ),
+        PolicyCase(
+            "deny-bd-notes-marker-for-another-issue",
+            False,
+            'bd update ds2-mods-rs-169u.3 --notes "[notes rebuilt from bd history ds2-mods-rs-169u.2] x"',
+            expected_text="`bd update --notes` replaces",
+        ),
         # --- block_compositor_input_injection -------------------------------------------------
         # 2026-09-27: a python heredoc editing a script, whose body declared a field named after
         # the tool, was refused. The tool name only counts in command position. Multi-line
